@@ -4981,12 +4981,19 @@ internal sealed class StudioRuntime
                 return;
             }
 
-            var listLabel = NormalizeListTargetLabel(relativePath, ToUserFieldLabel(relativePath, label));
-            if (ShouldExposeListTarget(relativePath, listLabel))
+            var isCurvePointArray = IsCurvePointArray(arrayProperty, values);
+            var listLabel = isCurvePointArray
+                ? ResolveCurvePointListLabel(relativePath)
+                : NormalizeListTargetLabel(relativePath, ToUserFieldLabel(relativePath, label));
+            if (isCurvePointArray || ShouldExposeListTarget(relativePath, listLabel))
             {
                 var picker = ResolveListTargetReferencePicker(relativePath, listLabel, values);
                 List<string>? entryLabels = null;
-                if (ResolveUassetArrayItemKind(values).Equals("reference", StringComparison.OrdinalIgnoreCase))
+                if (isCurvePointArray)
+                {
+                    entryLabels = BuildCurvePointEntryLabels(values.Length);
+                }
+                else if (ResolveUassetArrayItemKind(values).Equals("reference", StringComparison.OrdinalIgnoreCase))
                 {
                     entryLabels = values
                         .Select((value, index) => ResolveArrayEntryLabel(asset, relativePath, listLabel, value, index))
@@ -5238,6 +5245,11 @@ internal sealed class StudioRuntime
 
     private static string NormalizeListTargetLabel(string relativePath, string userLabel)
     {
+        if (IsCurvePointListLabel(relativePath, userLabel))
+        {
+            return ResolveCurvePointListLabel(relativePath);
+        }
+
         if (IsGameEventMarkerAsset(relativePath) && !string.IsNullOrWhiteSpace(userLabel))
         {
             var normalized = userLabel.ToLowerInvariant();
@@ -5319,6 +5331,94 @@ internal sealed class StudioRuntime
         }
 
         return userLabel;
+    }
+
+    private static bool IsCurvePointArray(ArrayPropertyData arrayProperty, PropertyData[] values)
+    {
+        if (!string.Equals(arrayProperty.ArrayType?.ToString(), "StructProperty", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (values.Length > 0)
+        {
+            return values.All(IsCurvePointStruct);
+        }
+
+        return arrayProperty.DummyStruct is not null && IsCurvePointStruct(arrayProperty.DummyStruct);
+    }
+
+    private static bool IsCurvePointStruct(PropertyData property)
+    {
+        if (property is RichCurveKeyPropertyData)
+        {
+            return true;
+        }
+
+        if (property is not StructPropertyData structProperty || structProperty.Value.Count == 0)
+        {
+            return false;
+        }
+
+        return structProperty.Value.Any(child => child is RichCurveKeyPropertyData);
+    }
+
+    private static bool IsCurvePointListLabel(string relativePath, string userLabel)
+    {
+        if (string.IsNullOrWhiteSpace(userLabel))
+        {
+            return false;
+        }
+
+        var normalized = userLabel.ToLowerInvariant();
+        return normalized.Contains("точки кривой", StringComparison.Ordinal)
+            || normalized.Contains("rich curve", StringComparison.Ordinal)
+            || normalized.Contains("float curve", StringComparison.Ordinal)
+            || normalized.Contains("editor curve data", StringComparison.Ordinal)
+            || (relativePath.Contains("/spawn_amount_curves/", StringComparison.OrdinalIgnoreCase)
+                && normalized.Contains("keys", StringComparison.Ordinal));
+    }
+
+    private static string ResolveCurvePointListLabel(string relativePath)
+    {
+        var path = relativePath.ToLowerInvariant();
+        if (path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal))
+        {
+            return "Кривая количества спавна / точки кривой";
+        }
+
+        if (path.Contains("/cooking/data/curves/", StringComparison.Ordinal))
+        {
+            return "Кривая приготовления / точки кривой";
+        }
+
+        if (path.Contains("/minigames/lockpicking/", StringComparison.Ordinal))
+        {
+            return "Кривая взлома / точки кривой";
+        }
+
+        if (path.Contains("/skills/", StringComparison.Ordinal))
+        {
+            return "Кривая навыка / точки кривой";
+        }
+
+        if (path.Contains("/vehicles/", StringComparison.Ordinal))
+        {
+            return "Кривая транспорта / точки кривой";
+        }
+
+        return "Кривая / точки кривой";
+    }
+
+    private static List<string> BuildCurvePointEntryLabels(int count)
+    {
+        var result = new List<string>(count);
+        for (var i = 0; i < count; i++)
+        {
+            result.Add($"Точка {i + 1}");
+        }
+
+        return result;
     }
 
     private static string ResolveCargoLootReferenceLabel(string rawReference)
@@ -8010,7 +8110,27 @@ internal sealed class StudioRuntime
             || label.Contains("положение точки кривой", StringComparison.Ordinal)
             || label.Contains("значение точки кривой", StringComparison.Ordinal))
         {
-            return "Кривые эффекта";
+            if (path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal))
+            {
+                return "Кривые спавна";
+            }
+
+            if (path.Contains("/cooking/data/curves/", StringComparison.Ordinal))
+            {
+                return "Приготовление";
+            }
+
+            if (path.Contains("/minigames/lockpicking/", StringComparison.Ordinal))
+            {
+                return "Взлом";
+            }
+
+            if (path.Contains("/skills/", StringComparison.Ordinal))
+            {
+                return "Кривая навыка";
+            }
+
+            return "Кривые";
         }
 
         if (label.Contains("что создаётся", StringComparison.Ordinal))
@@ -8587,13 +8707,43 @@ internal sealed class StudioRuntime
         if (label.Contains("когда начинается эта ступень", StringComparison.Ordinal)
             || label.Contains("положение точки кривой", StringComparison.Ordinal))
         {
-            return "На каком уровне эффекта или вещества начинает действовать эта точка кривой.";
+            if (relativePath.Contains("/encounters/spawn_amount_curves/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "На каком входном значении кривая спавна переходит к следующей точке.";
+            }
+
+            if (relativePath.Contains("/cooking/data/curves/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "При каком уровне нагрева, времени или ошибки приготовления начинает действовать эта точка кривой.";
+            }
+
+            if (relativePath.Contains("/minigames/lockpicking/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "На каком этапе поведения мини-игры начинает действовать эта точка кривой.";
+            }
+
+            return "На каком входном значении начинает действовать эта точка кривой.";
         }
 
         if (label.Contains("насколько сильно действует эта ступень", StringComparison.Ordinal)
             || label.Contains("значение точки кривой", StringComparison.Ordinal))
         {
-            return "Какой силы эффект будет у этой точки кривой.";
+            if (relativePath.Contains("/encounters/spawn_amount_curves/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Сколько врагов или событий должна давать кривая спавна в этой точке.";
+            }
+
+            if (relativePath.Contains("/cooking/data/curves/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Как сильно эта точка меняет качество, массу или другой результат приготовления.";
+            }
+
+            if (relativePath.Contains("/minigames/lockpicking/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Насколько сильно меняется затухание, приближение или другой эффект взлома в этой точке.";
+            }
+
+            return "Какое значение выдаёт кривая в этой точке.";
         }
 
         if (label.Contains("что создаётся", StringComparison.Ordinal))
@@ -9992,6 +10142,21 @@ internal sealed class StudioRuntime
 
         if (label.Contains("точки кривой", StringComparison.Ordinal))
         {
+            if (path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой спавна. Добавляй или убирай точки, чтобы менять, сколько врагов или событий появляется при разных условиях.";
+            }
+
+            if (path.Contains("/cooking/data/curves/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кулинарной кривой. Они задают, как меняется качество, масса или другой результат приготовления по мере нагрева и времени.";
+            }
+
+            if (path.Contains("/minigames/lockpicking/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой взлома. Добавляй новую точку, чтобы менять затухание, приближение или другой эффект мини-игры по этапам.";
+            }
+
             if (path.Contains("/skills/", StringComparison.Ordinal))
             {
                 return "Ключевые точки кривой навыка. Добавляй новую ступень, чтобы задать, как бонус меняется от низкого опыта к высокому.";
