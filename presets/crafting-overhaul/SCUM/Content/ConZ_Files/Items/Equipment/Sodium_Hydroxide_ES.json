@@ -1,0 +1,827 @@
+{
+  "$type": "UAssetAPI.UAsset, UAssetAPI",
+  "Info": "Serialized with UAssetAPI 1.0.2.0 (39a20ea)",
+  "NameMap": [
+    "/Game/ConZ_Files/Items/Crafting/Ingredients/CI_Sodium_Hydroxide",
+    "/Game/ConZ_Files/Items/Equipment/Sodium_Hydroxide",
+    "/Game/ConZ_Files/Items/Equipment/Sodium_Hydroxide.Sodium_Hydroxide_C",
+    "/Game/ConZ_Files/Items/Equipment/Sodium_Hydroxide_ES",
+    "/Game/ConZ_Files/Models/Objects/Items/Crafting_Items/Acid_Various/ICO_Sodium_Hydroxide",
+    "/Game/ConZ_Files/Models/Objects/Items/Crafting_Items/Acid_Various/ICO_Sodium_Hydroxide.ICO_Sodium_Hydroxide",
+    "/Script/ConZ",
+    "/Script/CoreUObject",
+    "/Script/Engine",
+    "Actor",
+    "Amount",
+    "ArrayProperty",
+    "BlueprintGeneratedClass",
+    "BoolProperty",
+    "ByteProperty",
+    "CanBeSplit",
+    "Caption",
+    "CI_Sodium_Hydroxide",
+    "Class",
+    "Component",
+    "Components",
+    "CraftingIngredientInstance",
+    "CraftingIngredientInstances",
+    "CraftingIngredientTag",
+    "Default__BlueprintGeneratedClass",
+    "Default__Sodium_Hydroxide_ES_C",
+    "Default__ItemEntitySetup",
+    "Default__StackableItemEntityComponentSetup",
+    "Description",
+    "Engine",
+    "EntitySetup_Component",
+    "FloatProperty",
+    "GeneralPurposeIcon",
+    "Sodium_Hydroxide_ES_C",
+    "GridInventoryColumnSpan",
+    "GridInventoryEntryBinder_Item",
+    "GridInventoryIcon",
+    "GridInventoryRowSpan",
+    "HandsAndShouldersIcon",
+    "IsFullStackSpawned",
+    "ItemEntitySetup",
+    "ItemUIData",
+    "MaxQuantity",
+    "Name",
+    "NameProperty",
+    "None",
+    "Object",
+    "ObjectProperty",
+    "Package",
+    "PrisonerInventoryHandsEntryBinder_Item",
+    "RepresentsUses",
+    "SoftObjectProperty",
+    "Stackable",
+    "StackableItemEntityComponentSetup",
+    "StructProperty",
+    "TextProperty",
+    "Type",
+    "UInt32Property",
+    "UserClasses",
+    "VicinityEntryBinder_Item",
+    "Weight"
+  ],
+  "CustomSerializationFlags": "None",
+  "UseSeparateBulkDataFiles": true,
+  "IsUnversioned": true,
+  "FileVersionLicenseeUE": 0,
+  "ObjectVersion": "VER_UE4_CORRECT_LICENSEE_FLAG",
+  "ObjectVersionUE5": "UNKNOWN",
+  "CustomVersionContainer": [
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{375EC13C-06E4-48FB-B500-84F0262A717E}",
+      "FriendlyName": "FCoreObjectVersion",
+      "Version": 4,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{E4B068ED-F494-42E9-A231-DA0B2E46BB41}",
+      "FriendlyName": "FEditorObjectVersion",
+      "Version": 40,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{CFFC743F-43B0-4480-9391-14DF171D2073}",
+      "FriendlyName": "FFrameworkObjectVersion",
+      "Version": 37,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{7B5AE74C-D270-4C10-A958-57980B212A5A}",
+      "FriendlyName": "FSequencerObjectVersion",
+      "Version": 13,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{29E575DD-E0A3-4627-9D10-D276232CDCEA}",
+      "FriendlyName": "FAnimPhysObjectVersion",
+      "Version": 17,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{601D1886-AC64-4F84-AA16-D3DE0DEAC7D6}",
+      "FriendlyName": "FFortniteMainBranchObjectVersion",
+      "Version": 47,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{F2AED0AC-9AFE-416F-8664-AA7FFA26D6FC}",
+      "FriendlyName": "FNiagaraObjectVersion",
+      "Version": 1,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{717F9EE7-E9B0-493A-88B3-91321B388107}",
+      "FriendlyName": "FAssetRegistryVersion",
+      "Version": 17,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{9C54D522-A826-4FBE-9421-074661B482D0}",
+      "FriendlyName": "FReleaseObjectVersion",
+      "Version": 43,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{E7086368-6B23-4C58-8439-1B7016265E91}",
+      "FriendlyName": "FFortniteReleaseBranchCustomObjectVersion",
+      "Version": 1,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{D89B5E42-24BD-4D46-8412-ACA8DF641779}",
+      "FriendlyName": "FUE5ReleaseStreamObjectVersion",
+      "Version": 0,
+      "IsSerialized": false
+    },
+    {
+      "$type": "UAssetAPI.CustomVersion, UAssetAPI",
+      "Name": null,
+      "Key": "{FCF57AFA-5076-4283-B9A9-E658FFA02D32}",
+      "FriendlyName": "FNiagaraCustomVersion",
+      "Version": 68,
+      "IsSerialized": false
+    }
+  ],
+  "SoftObjectPathList": null,
+  "GatherableTextData": null,
+  "Exports": [
+    {
+      "$type": "UAssetAPI.ExportTypes.ClassExport, UAssetAPI",
+      "FuncMap": [],
+      "ClassFlags": "CLASS_Parsed, CLASS_ReplicationDataIsSetUp, CLASS_CompiledFromBlueprint, CLASS_HasInstancedReference",
+      "ClassWithin": -7,
+      "ClassConfigName": "Engine",
+      "Interfaces": [],
+      "ClassGeneratedBy": 0,
+      "bDeprecatedForceScriptOrder": false,
+      "bCooked": true,
+      "ClassDefaultObject": 2,
+      "SuperStruct": -3,
+      "Children": [],
+      "LoadedProperties": [],
+      "ScriptBytecode": [],
+      "ScriptBytecodeSize": 0,
+      "ScriptBytecodeRaw": null,
+      "Field": {
+        "$type": "UAssetAPI.FieldTypes.UField, UAssetAPI",
+        "Next": null
+      },
+      "Data": [],
+      "ObjectGuid": null,
+      "SerializationControl": "NoExtension",
+      "Operation": "None",
+      "ObjectName": "Sodium_Hydroxide_ES_C",
+      "OuterIndex": 0,
+      "ClassIndex": -9,
+      "SuperIndex": -3,
+      "TemplateIndex": -1,
+      "ObjectFlags": "RF_Public, RF_Transactional",
+      "SerialSize": 80,
+      "SerialOffset": 2871,
+      "ScriptSerializationStartOffset": 0,
+      "ScriptSerializationEndOffset": 0,
+      "bForcedExport": false,
+      "bNotForClient": false,
+      "bNotForServer": false,
+      "PackageGuid": "{00000000-0000-0000-0000-000000000000}",
+      "IsInheritedInstance": false,
+      "PackageFlags": "PKG_None",
+      "bNotAlwaysLoadedForEditorGame": false,
+      "bIsAsset": true,
+      "GeneratePublicHash": false,
+      "SerializationBeforeSerializationDependencies": [
+        -3,
+        -9
+      ],
+      "CreateBeforeSerializationDependencies": [],
+      "SerializationBeforeCreateDependencies": [
+        -9,
+        -1
+      ],
+      "CreateBeforeCreateDependencies": [
+        -3
+      ],
+      "Extras": ""
+    },
+    {
+      "$type": "UAssetAPI.ExportTypes.NormalExport, UAssetAPI",
+      "Data": [
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.TextPropertyData, UAssetAPI",
+          "Flags": "Immutable",
+          "HistoryType": "Base",
+          "Namespace": "",
+          "CultureInvariantString": "Sodium Hydroxide",
+          "SourceFmt": null,
+          "Arguments": null,
+          "ArgumentsData": null,
+          "TransformType": "ToLower",
+          "SourceValue": null,
+          "FormatOptions": null,
+          "TargetCulture": null,
+          "Name": "Caption",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": "FFB543E84BF2FAF327CC5A89A779CC7F"
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.TextPropertyData, UAssetAPI",
+          "Flags": "Immutable",
+          "HistoryType": "Base",
+          "Namespace": "",
+          "CultureInvariantString": "Sodium hydroxide is a highly caustic base and alkali that decomposes proteins at ordinary ambient temperatures and may cause severe chemical burns. It is highly soluble in water, and readily absorbs moisture and carbon dioxide from the air.",
+          "SourceFmt": null,
+          "Arguments": null,
+          "ArgumentsData": null,
+          "TransformType": "ToLower",
+          "SourceValue": null,
+          "FormatOptions": null,
+          "TargetCulture": null,
+          "Name": "Description",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": "BF7647E546D391A4C7D6BF90A3187BFE"
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.SoftObjectPropertyData, UAssetAPI",
+          "Name": "GeneralPurposeIcon",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": {
+            "$type": "UAssetAPI.PropertyTypes.Objects.FSoftObjectPath, UAssetAPI",
+            "AssetPath": {
+              "$type": "UAssetAPI.PropertyTypes.Objects.FTopLevelAssetPath, UAssetAPI",
+              "PackageName": null,
+              "AssetName": "/Game/ConZ_Files/Models/Objects/Items/Crafting_Items/Acid_Various/ICO_Sodium_Hydroxide.ICO_Sodium_Hydroxide"
+            },
+            "SubPathString": null
+          }
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.SoftObjectPropertyData, UAssetAPI",
+          "Name": "GridInventoryIcon",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": {
+            "$type": "UAssetAPI.PropertyTypes.Objects.FSoftObjectPath, UAssetAPI",
+            "AssetPath": {
+              "$type": "UAssetAPI.PropertyTypes.Objects.FTopLevelAssetPath, UAssetAPI",
+              "PackageName": null,
+              "AssetName": "/Game/ConZ_Files/Models/Objects/Items/Crafting_Items/Acid_Various/ICO_Sodium_Hydroxide.ICO_Sodium_Hydroxide"
+            },
+            "SubPathString": null
+          }
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.BytePropertyData, UAssetAPI",
+          "ByteType": "Byte",
+          "EnumType": "None",
+          "Value": 2,
+          "Name": "GridInventoryRowSpan",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension"
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.BytePropertyData, UAssetAPI",
+          "ByteType": "Byte",
+          "EnumType": "None",
+          "Value": 2,
+          "Name": "GridInventoryColumnSpan",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension"
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.SoftObjectPropertyData, UAssetAPI",
+          "Name": "HandsAndShouldersIcon",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": {
+            "$type": "UAssetAPI.PropertyTypes.Objects.FSoftObjectPath, UAssetAPI",
+            "AssetPath": {
+              "$type": "UAssetAPI.PropertyTypes.Objects.FTopLevelAssetPath, UAssetAPI",
+              "PackageName": null,
+              "AssetName": "/Game/ConZ_Files/Models/Objects/Items/Crafting_Items/Acid_Various/ICO_Sodium_Hydroxide.ICO_Sodium_Hydroxide"
+            },
+            "SubPathString": null
+          }
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.ArrayPropertyData, UAssetAPI",
+          "ArrayType": "StructProperty",
+          "Name": "CraftingIngredientInstances",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": [
+            {
+              "$type": "UAssetAPI.PropertyTypes.Structs.StructPropertyData, UAssetAPI",
+              "StructType": "CraftingIngredientInstance",
+              "SerializeNone": true,
+              "StructGUID": "{00000000-0000-0000-0000-000000000000}",
+              "SerializationControl": "NoExtension",
+              "Operation": "None",
+              "Name": "CraftingIngredientInstances",
+              "ArrayIndex": 0,
+              "IsZero": false,
+              "PropertyTagFlags": "None",
+              "PropertyTagExtensions": "NoExtension",
+              "Value": [
+                {
+                  "$type": "UAssetAPI.PropertyTypes.Objects.ObjectPropertyData, UAssetAPI",
+                  "Name": "Type",
+                  "ArrayIndex": 0,
+                  "IsZero": false,
+                  "PropertyTagFlags": "None",
+                  "PropertyTagExtensions": "NoExtension",
+                  "Value": -10
+                },
+                {
+                  "$type": "UAssetAPI.PropertyTypes.Objects.FloatPropertyData, UAssetAPI",
+                  "Value": 1.0,
+                  "Name": "Amount",
+                  "ArrayIndex": 0,
+                  "IsZero": false,
+                  "PropertyTagFlags": "None",
+                  "PropertyTagExtensions": "NoExtension"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.FloatPropertyData, UAssetAPI",
+          "Value": 250.0,
+          "Name": "Weight",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension"
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.SoftObjectPropertyData, UAssetAPI",
+          "Name": "Actor",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": {
+            "$type": "UAssetAPI.PropertyTypes.Objects.FSoftObjectPath, UAssetAPI",
+            "AssetPath": {
+              "$type": "UAssetAPI.PropertyTypes.Objects.FTopLevelAssetPath, UAssetAPI",
+              "PackageName": null,
+              "AssetName": "/Game/ConZ_Files/Items/Equipment/Sodium_Hydroxide.Sodium_Hydroxide_C"
+            },
+            "SubPathString": null
+          }
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.ArrayPropertyData, UAssetAPI",
+          "ArrayType": "StructProperty",
+          "Name": "Components",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": [
+            {
+              "$type": "UAssetAPI.PropertyTypes.Structs.StructPropertyData, UAssetAPI",
+              "StructType": "EntitySetup_Component",
+              "SerializeNone": true,
+              "StructGUID": "{00000000-0000-0000-0000-000000000000}",
+              "SerializationControl": "NoExtension",
+              "Operation": "None",
+              "Name": "Components",
+              "ArrayIndex": 0,
+              "IsZero": false,
+              "PropertyTagFlags": "None",
+              "PropertyTagExtensions": "NoExtension",
+              "Value": [
+                {
+                  "$type": "UAssetAPI.PropertyTypes.Objects.NamePropertyData, UAssetAPI",
+                  "Name": "Name",
+                  "ArrayIndex": 0,
+                  "IsZero": false,
+                  "PropertyTagFlags": "None",
+                  "PropertyTagExtensions": "NoExtension",
+                  "Value": "Stackable"
+                },
+                {
+                  "$type": "UAssetAPI.PropertyTypes.Objects.ObjectPropertyData, UAssetAPI",
+                  "Name": "Component",
+                  "ArrayIndex": 0,
+                  "IsZero": false,
+                  "PropertyTagFlags": "None",
+                  "PropertyTagExtensions": "NoExtension",
+                  "Value": 3
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.ArrayPropertyData, UAssetAPI",
+          "ArrayType": "ObjectProperty",
+          "Name": "UserClasses",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": [
+            {
+              "$type": "UAssetAPI.PropertyTypes.Objects.ObjectPropertyData, UAssetAPI",
+              "Name": "0",
+              "ArrayIndex": 0,
+              "IsZero": false,
+              "PropertyTagFlags": "None",
+              "PropertyTagExtensions": "NoExtension",
+              "Value": -4
+            },
+            {
+              "$type": "UAssetAPI.PropertyTypes.Objects.ObjectPropertyData, UAssetAPI",
+              "Name": "1",
+              "ArrayIndex": 0,
+              "IsZero": false,
+              "PropertyTagFlags": "None",
+              "PropertyTagExtensions": "NoExtension",
+              "Value": -2
+            },
+            {
+              "$type": "UAssetAPI.PropertyTypes.Objects.ObjectPropertyData, UAssetAPI",
+              "Name": "2",
+              "ArrayIndex": 0,
+              "IsZero": false,
+              "PropertyTagFlags": "None",
+              "PropertyTagExtensions": "NoExtension",
+              "Value": -5
+            },
+            {
+              "$type": "UAssetAPI.PropertyTypes.Objects.ObjectPropertyData, UAssetAPI",
+              "Name": "3",
+              "ArrayIndex": 0,
+              "IsZero": false,
+              "PropertyTagFlags": "None",
+              "PropertyTagExtensions": "NoExtension",
+              "Value": -7
+            }
+          ]
+        }
+      ],
+      "ObjectGuid": null,
+      "SerializationControl": "NoExtension",
+      "Operation": "None",
+      "ObjectName": "Default__Sodium_Hydroxide_ES_C",
+      "OuterIndex": 0,
+      "ClassIndex": 1,
+      "SuperIndex": 0,
+      "TemplateIndex": -9,
+      "ObjectFlags": "RF_Public, RF_ClassDefaultObject, RF_ArchetypeObject",
+      "SerialSize": 1024,
+      "SerialOffset": 2951,
+      "ScriptSerializationStartOffset": 0,
+      "ScriptSerializationEndOffset": 0,
+      "bForcedExport": false,
+      "bNotForClient": false,
+      "bNotForServer": false,
+      "PackageGuid": "{00000000-0000-0000-0000-000000000000}",
+      "IsInheritedInstance": false,
+      "PackageFlags": "PKG_None",
+      "bNotAlwaysLoadedForEditorGame": false,
+      "bIsAsset": false,
+      "GeneratePublicHash": false,
+      "SerializationBeforeSerializationDependencies": [],
+      "CreateBeforeSerializationDependencies": [
+        -4,
+        -2,
+        -5,
+        -6
+      ],
+      "SerializationBeforeCreateDependencies": [
+        1,
+        -9
+      ],
+      "CreateBeforeCreateDependencies": [],
+      "Extras": ""
+    },
+    {
+      "$type": "UAssetAPI.ExportTypes.NormalExport, UAssetAPI",
+      "Data": [
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.UInt32PropertyData, UAssetAPI",
+          "Name": "MaxQuantity",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": 1
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.BoolPropertyData, UAssetAPI",
+          "Name": "CanBeSplit",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": false
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.BoolPropertyData, UAssetAPI",
+          "Name": "RepresentsUses",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": true
+        },
+        {
+          "$type": "UAssetAPI.PropertyTypes.Objects.BoolPropertyData, UAssetAPI",
+          "Name": "IsFullStackSpawned",
+          "ArrayIndex": 0,
+          "IsZero": false,
+          "PropertyTagFlags": "None",
+          "PropertyTagExtensions": "NoExtension",
+          "Value": true
+        }
+      ],
+      "ObjectGuid": null,
+      "SerializationControl": "NoExtension",
+      "Operation": "None",
+      "ObjectName": "StackableItemEntityComponentSetup_0",
+      "OuterIndex": 0,
+      "ClassIndex": -6,
+      "SuperIndex": 0,
+      "TemplateIndex": -16,
+      "ObjectFlags": "RF_NoFlags",
+      "SerialSize": 119,
+      "SerialOffset": 3975,
+      "ScriptSerializationStartOffset": 0,
+      "ScriptSerializationEndOffset": 0,
+      "bForcedExport": false,
+      "bNotForClient": false,
+      "bNotForServer": false,
+      "PackageGuid": "{00000000-0000-0000-0000-000000000000}",
+      "IsInheritedInstance": false,
+      "PackageFlags": "PKG_None",
+      "bNotAlwaysLoadedForEditorGame": true,
+      "bIsAsset": false,
+      "GeneratePublicHash": false,
+      "SerializationBeforeSerializationDependencies": [],
+      "CreateBeforeSerializationDependencies": [],
+      "SerializationBeforeCreateDependencies": [
+        -6,
+        -16
+      ],
+      "CreateBeforeCreateDependencies": [],
+      "Extras": ""
+    }
+  ],
+  "SearchableNames": null,
+  "Thumbnails": null,
+  "WorldTileInfo": null,
+  "AppendedNullBytes": 0,
+  "OtherAssetsFailedToAccess": [],
+  "LegacyFileVersion": -7,
+  "DataResourceVersion": "Invalid",
+  "DataResources": null,
+  "UsesEventDrivenLoader": true,
+  "WillSerializeNameHashes": true,
+  "Imports": [
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "Default__BlueprintGeneratedClass",
+      "OuterIndex": -15,
+      "ClassPackage": "/Script/Engine",
+      "ClassName": "BlueprintGeneratedClass",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "GridInventoryEntryBinder_Item",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "ItemEntitySetup",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "ItemUIData",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "PrisonerInventoryHandsEntryBinder_Item",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "StackableItemEntityComponentSetup",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "VicinityEntryBinder_Item",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "Object",
+      "OuterIndex": -14,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "BlueprintGeneratedClass",
+      "OuterIndex": -15,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Class",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "CI_Sodium_Hydroxide",
+      "OuterIndex": -12,
+      "ClassPackage": "/Script/ConZ",
+      "ClassName": "CraftingIngredientTag",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "Default__ItemEntitySetup",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/ConZ",
+      "ClassName": "ItemEntitySetup",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "/Game/ConZ_Files/Items/Crafting/Ingredients/CI_Sodium_Hydroxide",
+      "OuterIndex": 0,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Package",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "/Script/ConZ",
+      "OuterIndex": 0,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Package",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "/Script/CoreUObject",
+      "OuterIndex": 0,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Package",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "/Script/Engine",
+      "OuterIndex": 0,
+      "ClassPackage": "/Script/CoreUObject",
+      "ClassName": "Package",
+      "PackageName": null,
+      "bImportOptional": false
+    },
+    {
+      "$type": "UAssetAPI.Import, UAssetAPI",
+      "ObjectName": "Default__StackableItemEntityComponentSetup",
+      "OuterIndex": -13,
+      "ClassPackage": "/Script/ConZ",
+      "ClassName": "StackableItemEntityComponentSetup",
+      "PackageName": null,
+      "bImportOptional": false
+    }
+  ],
+  "DependsMap": [
+    [],
+    [],
+    []
+  ],
+  "SoftPackageReferenceList": null,
+  "AssetRegistryData": "AAAAAA==",
+  "BulkData": "wYMqng==",
+  "ValorantGarbageData": null,
+  "SeaOfThievesGarbageData": null,
+  "Generations": [
+    {
+      "$type": "UAssetAPI.FGenerationInfo, UAssetAPI",
+      "ExportCount": 3,
+      "NameCount": 61
+    }
+  ],
+  "PackageGuid": "{3FF9C9FB-450E-3E06-7129-2D9EF41074A3}",
+  "PersistentGuid": "{00000000-0000-0000-0000-000000000000}",
+  "RecordedEngineVersion": {
+    "$type": "UAssetAPI.FEngineVersion, UAssetAPI",
+    "Major": 0,
+    "Minor": 0,
+    "Patch": 0,
+    "Changelist": 0,
+    "Branch": null
+  },
+  "RecordedCompatibleWithEngineVersion": {
+    "$type": "UAssetAPI.FEngineVersion, UAssetAPI",
+    "Major": 0,
+    "Minor": 0,
+    "Patch": 0,
+    "Changelist": 0,
+    "Branch": null
+  },
+  "ChunkIDs": [],
+  "PackageSource": 1742446799,
+  "FolderName": "None",
+  "LocalizationId": null,
+  "SoftObjectPathsCount": 0,
+  "SoftObjectPathsOffset": 0,
+  "SearchableNamesOffset": 0,
+  "ThumbnailTableOffset": 0,
+  "CompressionFlags": 0,
+  "AdditionalPackagesToCook": [],
+  "NamesReferencedFromExportDataCount": 61,
+  "PayloadTocOffset": -1,
+  "DataResourceOffset": -1,
+  "doWeHaveAssetRegistryData": true,
+  "doWeHaveWorldTileInfo": false,
+  "PackageFlags": "PKG_RequiresLocalizationGather, PKG_FilterEditorOnly",
+  "HasUnversionedProperties": false,
+  "IsFilterEditorOnly": true
+}

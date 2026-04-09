@@ -1,0 +1,9 @@
+bin/
+obj/
+builds/
+.vs/
+runtime-err.log
+runtime-out.log
+*.user
+*.suo
+Releases/

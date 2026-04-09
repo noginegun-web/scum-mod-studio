@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SCUM Студия модов</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="top-main">
+      <div>
+        <h1>SCUM Студия модов</h1>
+        <div id="statusLine" class="muted">Проверка игры и данных...</div>
+      </div>
+      <button id="updateCheckBtn" type="button" class="small-button">Проверить обновления</button>
+    </div>
+    <div id="updateBanner" class="update-banner" hidden>
+      <div class="update-banner-copy">
+        <div id="updateTitle" class="update-banner-title">Обновление программы</div>
+        <div id="updateSummary" class="muted small"></div>
+        <div id="updateNotes" class="update-notes small"></div>
+      </div>
+      <div class="update-banner-actions">
+        <div id="updateProgress" class="muted small"></div>
+        <button id="updateDownloadBtn" type="button">Скачать обновление</button>
+        <button id="updateInstallBtn" type="button" class="primary">Установить и перезапустить</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel">
+      <h2>1) Найди, что хочешь изменить</h2>
+      <p class="muted small">Сначала выбери раздел, потом систему в списке слева. Справа сразу будет видно, что именно меняет выбранная система и можно ли её безопасно настроить.</p>
+
+      <details class="quick-help">
+        <summary class="quick-help-title">Как пользоваться, если нужно</summary>
+        <div class="quick-help-grid">
+          <div class="quick-help-step">
+            <strong>1. Выбери раздел</strong>
+            <span>Например: крафт, эффекты персонажа, NPC, стартовые вещи.</span>
+          </div>
+          <div class="quick-help-step">
+            <strong>2. Найди систему</strong>
+            <span>Выбери в списке болезнь, рецепт, предмет, событие или другую игровую систему.</span>
+          </div>
+          <div class="quick-help-step">
+            <strong>3. Поменяй параметры</strong>
+            <span>Если система пустая, сначала добавь в неё нужный эффект, предмет или связь. Технические поля скрыты.</span>
+          </div>
+          <div class="quick-help-step">
+            <strong>4. Сохрани и собери</strong>
+            <span>Добавь изменения в мод и выпусти один готовый <code>.pak</code>.</span>
+          </div>
+        </div>
+      </details>
+
+      <div class="toolbar">
+        <select id="modCategorySelect"></select>
+        <input id="modAssetSearch" type="text" placeholder="Поиск по названию раздела, эффекта или предмета">
+        <select id="modPageSize">
+          <option value="40" selected>40 на страницу</option>
+          <option value="60">60 на страницу</option>
+          <option value="120">120 на страницу</option>
+          <option value="200">200 на страницу</option>
+        </select>
+        <label class="inline-check">
+          <input id="modOnlyEditableCheck" type="checkbox">
+          Только понятные настройки
+        </label>
+      </div>
+
+      <div id="modCategoryChips" class="category-chip-row"></div>
+
+      <div class="asset-browser">
+        <div class="asset-browser-left">
+          <div class="asset-browser-meta">
+            <div id="modAssetMeta" class="muted small"></div>
+          </div>
+          <div id="modAssetRows" class="asset-list"></div>
+          <div class="toolbar asset-browser-footer">
+            <button id="modPrevBtn" type="button">← Предыдущая</button>
+            <div id="modPageInfo" class="small">Страница 1 / 1</div>
+            <button id="modNextBtn" type="button">Следующая →</button>
+          </div>
+        </div>
+
+        <aside class="asset-browser-right">
+          <div id="selectedAssetPreview" class="selected-asset-card">
+            <div class="muted">Система ещё не выбрана.</div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="panel" id="schemaPanel">
+      <h2>2) Настрой выбранную систему</h2>
+      <div id="schemaAssetTitle" class="schema-title">Раздел не выбран</div>
+      <div id="schemaAssetSummary" class="muted small"></div>
+      <div class="toolbar">
+        <button id="loadSchemaBtn" type="button">Заново прочитать настройки из игры</button>
+        <span id="schemaMeta" class="muted small"></span>
+      </div>
+      <div id="schemaWarnings" class="warning-list"></div>
+
+      <details class="advanced-box">
+        <summary>Для опытных и редких случаев</summary>
+        <div class="toolbar top-gap">
+          <label>Источник основы
+            <select id="schemaSourceMode">
+              <option value="auto" selected>Авто (рекомендуется)</option>
+              <option value="preset">Встроенный шаблон</option>
+              <option value="game">Файл игры</option>
+            </select>
+          </label>
+          <label>Добавлять связанные игровые файлы автоматически
+            <select id="schemaCompanionMode">
+              <option value="auto" selected>Авто (рекомендуется)</option>
+              <option value="force">Да, всегда</option>
+              <option value="none">Нет</option>
+            </select>
+          </label>
+        </div>
+      </details>
+
+      <div class="panel-sub">
+        <div class="panel-sub-title">Что можно настроить</div>
+        <div id="schemaSections" class="schema-sections"></div>
+      </div>
+
+      <div class="panel-sub">
+        <div class="panel-sub-title">Состав системы и связи</div>
+        <div id="listTargetRows" class="list-targets"></div>
+        <div id="listOpsMeta" class="muted small"></div>
+        <div id="listOpsQueue" class="list-op-queue"></div>
+      </div>
+
+      <div class="toolbar">
+        <button id="stageAssetBtn" type="button">Сохранить эти настройки в мод</button>
+        <button id="previewAssetBtn" type="button">Применить добавление и настроить его</button>
+        <button id="clearStagedBtn" type="button">Очистить все изменения</button>
+      </div>
+      <div id="stagedMeta" class="muted small"></div>
+      <div id="stagedList" class="staged-list"></div>
+    </section>
+
+    <section class="panel">
+      <h2>3) Выпустить готовый .pak</h2>
+      <div class="build-grid">
+        <label>Имя файла .pak
+          <input id="modNameInput" type="text" placeholder="pakchunk99-my-mod-WindowsNoEditor">
+        </label>
+        <label><input id="installCheck" type="checkbox" checked> Сразу установить мод в игру</label>
+        <label><input id="zipCheck" type="checkbox" checked> Сделать архив для отправки</label>
+        <label><input id="seedCheck" type="checkbox" checked> Автоматически добавить нужные игровые файлы</label>
+      </div>
+      <div class="toolbar">
+        <button id="buildBtn" type="button" class="primary">Собрать готовый мод</button>
+      </div>
+      <pre id="buildOutput" class="output"></pre>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
