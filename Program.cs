@@ -31,7 +31,11 @@ internal static class Program
     private static async Task<int> MainCoreAsync(string[] args)
     {
         var openBrowser = !args.Any(x => x.Equals("--no-browser", StringComparison.OrdinalIgnoreCase));
-        var builder = WebApplication.CreateBuilder(args);
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = args,
+            ContentRootPath = AppContext.BaseDirectory
+        });
         var appUpdate = AppUpdateService.Create(builder.Configuration, args);
 
         StudioRuntime studio;
