@@ -234,6 +234,7 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerSubpresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _vehicleSpawnPresetReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _ammoItemReferenceOptionsCache;
     private List<StudioModFieldOptionDto>? _itemSpawningCooldownGroupFieldOptionsCache;
     private List<SideEffectTemplateInfo>? _sideEffectTemplateCache;
 
@@ -631,6 +632,11 @@ internal sealed class StudioRuntime
             return GetItemAssetReferenceOptions(term, limit);
         }
 
+        if (normalizedPicker is "ammo-item-asset" or "ammo-item-reference" or "ammunition-item-asset")
+        {
+            return GetAmmoItemReferenceOptions(term, limit);
+        }
+
         List<StudioReferenceOptionDto> allOptions;
         lock (_sync)
         {
@@ -771,6 +777,89 @@ internal sealed class StudioRuntime
             .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
             .Take(limit)
             .ToList();
+    }
+
+    private List<StudioReferenceOptionDto> GetAmmoItemReferenceOptions(string? term, int limit)
+    {
+        List<StudioReferenceOptionDto> allOptions;
+        lock (_sync)
+        {
+            allOptions = _ammoItemReferenceOptionsCache ??= BuildAmmoItemReferenceOptions();
+        }
+
+        IEnumerable<StudioReferenceOptionDto> query = allOptions;
+        if (!string.IsNullOrWhiteSpace(term))
+        {
+            var trimmed = term.Trim();
+            var searchTerms = ExpandReferenceSearchTerms("ammo-item-asset", trimmed).ToList();
+            var normalizedTerms = searchTerms
+                .Select(NormalizeLooseSearch)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            query = query.Where(option => MatchesReferenceSearch(option, searchTerms, normalizedTerms));
+        }
+
+        return query
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToList();
+    }
+
+    private List<StudioReferenceOptionDto> BuildAmmoItemReferenceOptions()
+    {
+        var result = new List<StudioReferenceOptionDto>(512);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var catalog = GetItemCatalog();
+
+        foreach (var item in catalog.Items)
+        {
+            if (!IsAmmoItemReferenceCandidate(item.RelativePath))
+            {
+                continue;
+            }
+
+            var value = BuildBlueprintClassReferenceFromRelativePath(item.RelativePath);
+            if (!seen.Add(value))
+            {
+                continue;
+            }
+
+            var displayName = string.IsNullOrWhiteSpace(item.ItemName)
+                ? LocalizeAssetStem(item.ItemId)
+                : item.ItemName;
+            result.Add(new StudioReferenceOptionDto(value, PrefixReferenceOptionLabel("Патрон", displayName)));
+        }
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool IsAmmoItemReferenceCandidate(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.StartsWith("scum/content/conz_files/items/ammunition/", StringComparison.Ordinal)
+            || !normalized.EndsWith(".uasset", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (normalized.Contains("/ammunition_class/", StringComparison.Ordinal)
+            || normalized.Contains("/ammoboxes/", StringComparison.Ordinal)
+            || normalized.Contains("/crafting/", StringComparison.Ordinal)
+            || normalized.Contains("/ui/", StringComparison.Ordinal)
+            || normalized.Contains("/item_icons/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var fileName = Path.GetFileNameWithoutExtension(normalized);
+        return !string.IsNullOrWhiteSpace(fileName)
+            && !fileName.EndsWith("_es", StringComparison.OrdinalIgnoreCase)
+            && IsLikelyPlayableItemAsset(normalized);
     }
 
     private List<StudioReferenceOptionDto> GetCraftingIngredientReferenceOptions(string? term, int limit)
@@ -2623,6 +2712,40 @@ internal sealed class StudioRuntime
                 || normalizedTerm.Contains("жидк", StringComparison.Ordinal))
             {
                 Add("water", "liquid", "bottle", "вода", "жидкость");
+            }
+        }
+
+        if (normalizedPicker == "ammoitemasset"
+            || normalizedPicker == "ammoitemreference"
+            || normalizedPicker == "ammunitionitemasset")
+        {
+            if (normalizedTerm.Contains("патрон", StringComparison.Ordinal)
+                || normalizedTerm.Contains("боеприп", StringComparison.Ordinal))
+            {
+                Add("ammo", "ammunition", "патрон", "боеприпас");
+            }
+
+            if (normalizedTerm.Contains("брон", StringComparison.Ordinal)
+                || normalizedTerm.Contains("ap", StringComparison.Ordinal))
+            {
+                Add("ap", "armor piercing", "бронебой");
+            }
+
+            if (normalizedTerm.Contains("трас", StringComparison.Ordinal)
+                || normalizedTerm.Contains("tr", StringComparison.Ordinal))
+            {
+                Add("tr", "tracer", "трассер");
+            }
+
+            if (normalizedTerm.Contains("крафт", StringComparison.Ordinal)
+                || normalizedTerm.Contains("crafted", StringComparison.Ordinal))
+            {
+                Add("crafted", "самодельный");
+            }
+
+            if (normalizedTerm.Contains("дроб", StringComparison.Ordinal))
+            {
+                Add("12 gauge", "birdshot", "buckshot", "slug", "дробь");
             }
         }
 
@@ -8553,6 +8676,38 @@ internal sealed class StudioRuntime
                 .Replace("size y", "высота в инвентаре", StringComparison.OrdinalIgnoreCase);
         }
 
+        if (path.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label.Replace("max ammo count", "максимум патронов в пачке", StringComparison.OrdinalIgnoreCase);
+            label = ReplaceSemanticLabelPart(label, "ammo count", "патронов в пачке");
+            label = ReplaceSemanticLabelPart(label, "item location", "зоны появления");
+            label = ReplaceSemanticLabelPart(label, "add impulse on hit", "физический толчок при попадании");
+            label = ReplaceSemanticLabelPart(label, "projectile data", "данные пули");
+            label = ReplaceSemanticLabelPart(label, "muzzle velocity", "скорость пули");
+            label = ReplaceSemanticLabelPart(label, "initial damage in game event", "базовый урон в игровом событии");
+            label = ReplaceSemanticLabelPart(label, "initial damage", "базовый урон");
+            label = ReplaceSemanticLabelPart(label, "начальный damage", "базовый урон");
+            label = ReplaceSemanticLabelPart(label, "damage in game event", "урон в игровом событии");
+            label = ReplaceSemanticLabelPart(label, "target type multiplier", "множитель по типу цели");
+            label = ReplaceSemanticLabelPart(label, "target тип multiplier", "множитель по типу цели");
+            label = ReplaceSemanticLabelPart(label, "multipliers", "множители");
+            label = ReplaceSemanticLabelPart(label, "multiplier", "множитель");
+            label = ReplaceSemanticLabelPart(label, "penetration factor", "пробитие");
+            label = ReplaceSemanticLabelPart(label, "trace scale multiplier", "длина трассера");
+            label = ReplaceSemanticLabelPart(label, "noise loudness on hit", "шум от попадания");
+            label = ReplaceSemanticLabelPart(label, "use fixed timestep", "фиксированный шаг расчёта");
+            label = ReplaceSemanticLabelPart(label, "fixed timestep", "шаг расчёта");
+            label = ReplaceSemanticLabelPart(label, "can ever have paint job component", "разрешена перекраска");
+            label = ReplaceSemanticLabelPart(label, "swimming movement speed modifier", "скорость плавания");
+            label = ReplaceSemanticLabelPart(label, "diving movement speed modifier", "скорость ныряния");
+            label = ReplaceSemanticLabelPart(label, "should drop when entering combat mode", "ронять предмет в боевом режиме");
+            label = label.Replace("базовый уровень урон in game event", "базовый урон в игровом событии", StringComparison.OrdinalIgnoreCase);
+            label = label.Replace("базовый уровень урон", "базовый урон", StringComparison.OrdinalIgnoreCase);
+            label = label.Replace("базовый урон in game event", "базовый урон в игровом событии", StringComparison.OrdinalIgnoreCase);
+            label = label.Replace("ld максимум draw дистанция", "дальность отображения (lod)", StringComparison.OrdinalIgnoreCase);
+            label = label.Replace("ld maximum draw distance", "дальность отображения (lod)", StringComparison.OrdinalIgnoreCase);
+        }
+
         if (path.Contains("/spawnequipment/", StringComparison.OrdinalIgnoreCase))
         {
             label = label
@@ -8635,6 +8790,15 @@ internal sealed class StudioRuntime
                 @"денежная награда\s*/\s*элемент\s+e\s*currency\s*тип::([a-z0-9_]+)",
                 match => $"денежная награда / {LocalizeQuestCurrencyType(match.Groups[1].Value)}",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        if (path.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("максимум ammo count", "максимум патронов в пачке", StringComparison.OrdinalIgnoreCase)
+                .Replace("ammo count", "патронов в пачке", StringComparison.OrdinalIgnoreCase)
+                .Replace("базовый уровень урон в игровом событии", "базовый урон в игровом событии", StringComparison.OrdinalIgnoreCase)
+                .Replace("базовый уровень урон", "базовый урон", StringComparison.OrdinalIgnoreCase);
         }
 
         return CapitalizeFirst(label.Trim());
@@ -9462,7 +9626,8 @@ internal sealed class StudioRuntime
             "mesh slice", "части 3d-модели", "override materials", "переопределение материалов",
             "asset user data", "query token stream", "token stream version",
             "net update frequency", "частота обновления сети",
-            "служебный поток условий", "служебная версия потока условий"
+            "служебный поток условий", "служебная версия потока условий",
+            "дальность отображения (lod)", "ld максимум draw", "ld maximum draw"
         };
 
         if (hardBlockedTechnicalTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
@@ -11907,9 +12072,61 @@ internal sealed class StudioRuntime
             return "Сколько здоровья снимает одно попадание.";
         }
 
+        if (label.Contains("патрон по умолчанию", StringComparison.Ordinal))
+        {
+            return "Какой тип патрона это оружие использует как базовый. Выбирай совместимый калибр, иначе оружие может работать некорректно.";
+        }
+
         if (label.Contains("патронов в магазине", StringComparison.Ordinal))
         {
             return "Максимум патронов, которые вмещает оружие.";
+        }
+
+        if (label.Contains("максимум патронов в пачке", StringComparison.Ordinal))
+        {
+            return "Сколько патронов находится в одной пачке или стопке этого боеприпаса.";
+        }
+
+        if (label.Contains("скорость пули", StringComparison.Ordinal))
+        {
+            return "Стартовая скорость полёта пули. Более высокие значения обычно дают более ровную траекторию и меньшее падение на дистанции.";
+        }
+
+        if (label.Contains("базовый урон в игровом событии", StringComparison.Ordinal))
+        {
+            return "Базовый урон этой пули именно в режимах игровых событий.";
+        }
+
+        if (label.Contains("базовый урон", StringComparison.Ordinal)
+            && relativePath.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Базовый урон этой пули в обычном режиме игры.";
+        }
+
+        if (label.Contains("множитель по типу цели", StringComparison.Ordinal))
+        {
+            return "Тонкая настройка урона по разным типам целей. 1.0 = без изменений, ниже = слабее, выше = сильнее.";
+        }
+
+        if (label.Contains("пробитие", StringComparison.Ordinal)
+            && relativePath.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Насколько уверенно пуля проходит через цели и преграды.";
+        }
+
+        if (label.Contains("длина трассера", StringComparison.Ordinal))
+        {
+            return "Визуальная длина следа пули. Почти не влияет на баланс, но влияет на заметность трассера.";
+        }
+
+        if (label.Contains("шум от попадания", StringComparison.Ordinal))
+        {
+            return "Громкость звука при попадании этой пули.";
+        }
+
+        if (label.Contains("разрешена перекраска", StringComparison.Ordinal))
+        {
+            return "Разрешает использовать перекраску для этого типа боеприпаса.";
         }
 
         if (label.Contains("скорострельност", StringComparison.Ordinal))
@@ -12176,6 +12393,15 @@ internal sealed class StudioRuntime
             return (
                 "foreign-substance-all",
                 "Найди вещество, которое должно запускать этот эффект, и выбери его из списка.");
+        }
+
+        if (path.Contains("/items/weapons/", StringComparison.Ordinal)
+            && (label.Contains("патрон по умолчанию", StringComparison.Ordinal)
+                || label.Contains("default ammunition", StringComparison.Ordinal)))
+        {
+            return (
+                "ammo-item-asset",
+                "Найди тип патрона, который оружие должно считать базовым, и выбери его из списка.");
         }
 
         if (path.Contains("/items/crafting/recipes/", StringComparison.Ordinal)
