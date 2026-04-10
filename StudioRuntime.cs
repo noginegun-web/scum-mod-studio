@@ -16,10 +16,18 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
+    private const string DataTableRowAssetPrefix = "datatable-row::";
+    private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
+    private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
+    private const string ItemSpawningParametersTableRelativePath = "scum/content/conz_files/data/tables/items/spawning/itemspawningparameters.uasset";
+    private const string ItemSpawningCooldownGroupsTableRelativePath = "scum/content/conz_files/data/tables/items/spawning/itemspawningcooldowngroups.uasset";
     private const string StarterSpawnFieldPrefix = "starter-spawn:";
     private const string RecipeFieldPrefix = "recipe:";
+    private const string CraftingUiDataRegistryRelativePath = "scum/content/conz_files/ui/crafting/craftinguidata.uasset";
     private const string ForeignSubstanceAttributeFieldPrefix = "foreign-substance-attribute:";
+    private const string WeaponSyntheticFieldPrefix = "weapon-field:";
     private const string SyntheticSideEffectsTargetPath = "synthetic:side-effects";
+    private const string SyntheticCraftingUiCategoryRecipesTargetPrefix = "synthetic:crafting-ui-category-recipes:";
     private const string SyntheticCargoMajorSpawnerOptionsTargetPath = "synthetic:cargo-major-spawner-options";
     private const string SyntheticCargoMajorSpawnerPresetOptionsTargetPath = "synthetic:cargo-major-spawner-preset-options";
     private const string SyntheticCargoMinorSpawnerOptionsTargetPath = "synthetic:cargo-minor-spawner-options";
@@ -136,6 +144,16 @@ internal sealed class StudioRuntime
         new("EPlantGrowthStage::Ripening", "Созревание")
     ];
 
+    private static readonly List<StudioModFieldOptionDto> ItemRarityOptions =
+    [
+        new("EItemRarity::ExtremelyRare", "Чрезвычайно редкий"),
+        new("EItemRarity::VeryRare", "Очень редкий"),
+        new("EItemRarity::Rare", "Редкий"),
+        new("EItemRarity::Uncommon", "Необычный"),
+        new("EItemRarity::Common", "Обычный"),
+        new("EItemRarity::Abundant", "Частый")
+    ];
+
     private static readonly RecipeSkillLevelSpec[] RecipeSkillLevels =
     [
         new("noskill", "NoSkill", "без навыка"),
@@ -183,6 +201,8 @@ internal sealed class StudioRuntime
     private List<StudioAssetDto>? _gameAssetsCache;
     private List<StudioModCategoryDto>? _modCategoriesCache;
     private List<StudioModAssetDto>? _modAssetsCache;
+    private List<StudioModCategoryDto>? _visibleModCategoriesCache;
+    private List<StudioModAssetDto>? _visibleModAssetsCache;
     private List<StudioReferenceOptionDto>? _foreignSubstanceAttributeReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _foreignSubstanceReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _bodyEffectSideEffectReferenceOptionsCache;
@@ -192,6 +212,8 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _cargoDropEncounterClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _encounterNpcClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _craftingIngredientGroupReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _craftingItemRecipeReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _craftingPlaceableRecipeReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _skillReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _skillBlueprintReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _questGiverReferenceOptionsCache;
@@ -208,6 +230,9 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _plantDiseaseReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _regularItemSpawnerPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerPresetReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _advancedItemSpawnerSubpresetReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _vehicleSpawnPresetReferenceOptionsCache;
+    private List<StudioModFieldOptionDto>? _itemSpawningCooldownGroupFieldOptionsCache;
     private List<SideEffectTemplateInfo>? _sideEffectTemplateCache;
 
     private sealed class GameplayTagQueryNode
@@ -534,7 +559,9 @@ internal sealed class StudioRuntime
         {
             _modAssetsCache ??= BuildModAssets();
             _modCategoriesCache ??= BuildModCategories(_modAssetsCache);
-            return _modCategoriesCache.ToList();
+            _visibleModAssetsCache ??= BuildVisibleModAssets(_modAssetsCache);
+            _visibleModCategoriesCache ??= BuildModCategories(_visibleModAssetsCache);
+            return _visibleModCategoriesCache.ToList();
         }
     }
 
@@ -548,7 +575,9 @@ internal sealed class StudioRuntime
         {
             _modAssetsCache ??= BuildModAssets();
             _modCategoriesCache ??= BuildModCategories(_modAssetsCache);
-            allAssets = _modAssetsCache;
+            _visibleModAssetsCache ??= BuildVisibleModAssets(_modAssetsCache);
+            _visibleModCategoriesCache ??= BuildModCategories(_visibleModAssetsCache);
+            allAssets = _visibleModAssetsCache;
         }
 
         IEnumerable<StudioModAssetDto> query = allAssets;
@@ -621,6 +650,22 @@ internal sealed class StudioRuntime
                     _cargoDropEncounterClassReferenceOptionsCache ??= BuildCargoDropEncounterClassReferenceOptions(),
                 "encounter-npc-class" =>
                     _encounterNpcClassReferenceOptionsCache ??= BuildEncounterNpcClassReferenceOptions(),
+                "crafting-item-recipe-asset" or "crafting-item-recipe" =>
+                    _craftingItemRecipeReferenceOptionsCache ??= BuildCraftingRecipeReferenceOptions(
+                        recipeClassName: "ItemCraftingRecipe",
+                        labelPrefix: "Рецепт предмета"),
+                "crafting-placeable-recipe-asset" or "crafting-placeable-recipe" =>
+                    _craftingPlaceableRecipeReferenceOptionsCache ??= BuildCraftingRecipeReferenceOptions(
+                        recipeClassName: "PlaceableCraftingRecipe",
+                        labelPrefix: "Рецепт строительства"),
+                "crafting-recipe-asset" or "crafting-recipe" =>
+                    (_craftingItemRecipeReferenceOptionsCache ??= BuildCraftingRecipeReferenceOptions(
+                        recipeClassName: "ItemCraftingRecipe",
+                        labelPrefix: "Рецепт предмета"))
+                    .Concat(_craftingPlaceableRecipeReferenceOptionsCache ??= BuildCraftingRecipeReferenceOptions(
+                        recipeClassName: "PlaceableCraftingRecipe",
+                        labelPrefix: "Рецепт строительства"))
+                    .ToList(),
                 "skill-asset" or "skill-reference" =>
                     _skillReferenceOptionsCache ??= BuildSkillReferenceOptions(),
                 "skill-blueprint-asset" or "skill-blueprint-reference" =>
@@ -665,6 +710,10 @@ internal sealed class StudioRuntime
                     _regularItemSpawnerPresetReferenceOptionsCache ??= BuildRegularItemSpawnerPresetReferenceOptions(),
                 "advanced-item-spawner-preset" or "container-loot-preset" or "examine-data-preset" =>
                     _advancedItemSpawnerPresetReferenceOptionsCache ??= BuildAdvancedItemSpawnerPresetReferenceOptions(),
+                "advanced-item-spawner-subpreset" or "container-subpreset-preset" =>
+                    _advancedItemSpawnerSubpresetReferenceOptionsCache ??= BuildAdvancedItemSpawnerSubpresetReferenceOptions(),
+                "vehicle-spawn-preset" or "vehicle-preset" =>
+                    _vehicleSpawnPresetReferenceOptionsCache ??= BuildVehicleSpawnPresetReferenceOptions(),
                 _ => []
             };
         }
@@ -878,6 +927,56 @@ internal sealed class StudioRuntime
             AddOption(
                 BuildBlueprintClassReferenceFromRelativePath(assetInfo.RelativePath),
                 BuildCraftingIngredientReferenceLabel(assetInfo.RelativePath));
+        }
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private List<StudioReferenceOptionDto> BuildCraftingRecipeReferenceOptions(string recipeClassName, string labelPrefix)
+    {
+        var result = new List<StudioReferenceOptionDto>(1024);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _modAssetsCache ??= BuildModAssets();
+
+        void AddOption(string value, string label)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !seen.Add(value))
+            {
+                return;
+            }
+
+            result.Add(new StudioReferenceOptionDto(value, label));
+        }
+
+        foreach (var assetInfo in _modAssetsCache.Where(assetInfo =>
+                     assetInfo.CategoryId.Equals("crafting-recipes", StringComparison.OrdinalIgnoreCase)))
+        {
+            var relativePath = PathUtil.NormalizeRelative(assetInfo.RelativePath);
+            if (!IsCraftingRecipeAsset(relativePath))
+            {
+                continue;
+            }
+
+            var expectedClassName = ResolveCraftingRecipeReferenceClassName(relativePath);
+            if (!string.Equals(expectedClassName, recipeClassName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var value = BuildGameObjectReferenceFromRelativePath(
+                relativePath,
+                classPackage: "/Script/ConZ",
+                className: expectedClassName);
+
+            var stem = Path.GetFileNameWithoutExtension(relativePath);
+            var localizedName = LocalizeAssetStem(
+                stem.StartsWith("CR_", StringComparison.OrdinalIgnoreCase)
+                    ? stem[3..]
+                    : stem);
+            AddOption(value, $"{labelPrefix}: {localizedName}");
         }
 
         return result
@@ -1505,6 +1604,54 @@ internal sealed class StudioRuntime
             .ToList();
     }
 
+    private List<StudioReferenceOptionDto> BuildAdvancedItemSpawnerSubpresetReferenceOptions()
+    {
+        var result = new List<StudioReferenceOptionDto>(192);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _gameAssetsCache ??= BuildGameAssetRows();
+
+        foreach (var assetInfo in _gameAssetsCache)
+        {
+            var relativePath = PathUtil.NormalizeRelative(assetInfo.RelativePath);
+            if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                || !IsAdvancedItemSpawnerPresetAsset(relativePath)
+                || IsCargoDropPackagePresetAsset(relativePath)
+                || IsAlwaysHiddenCatalogLane(relativePath))
+            {
+                continue;
+            }
+
+            if (!TryDescribeAdvancedItemSpawnerPresetAsset(relativePath, out var descriptor))
+            {
+                continue;
+            }
+
+            var value = BuildBlueprintClassReferenceFromRelativePath(relativePath);
+            if (!seen.Add(value))
+            {
+                continue;
+            }
+
+            result.Add(new StudioReferenceOptionDto(value, descriptor.DisplayName));
+        }
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private List<StudioReferenceOptionDto> BuildVehicleSpawnPresetReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            relativePath =>
+                relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && relativePath.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase),
+            "/Script/ConZ",
+            "VehiclePreset",
+            assetInfo => $"Пресет транспорта: {ResolveVehicleSpawnPresetOptionDisplayName(assetInfo.RelativePath)}");
+    }
+
     private static string ResolveAdvancedItemSpawnerPresetDisplayName(string relativePath)
     {
         var normalized = PathUtil.NormalizeRelative(relativePath);
@@ -1512,13 +1659,32 @@ internal sealed class StudioRuntime
             .Replace('\\', '/')
             .Split('/', StringSplitOptions.RemoveEmptyEntries);
         var spawnerIndex = Array.FindIndex(segments, segment => segment.Equals("spawnerpresets2", StringComparison.OrdinalIgnoreCase));
-        var context = spawnerIndex >= 0 && spawnerIndex + 1 < segments.Length - 1
-            ? string.Join(" / ", segments[(spawnerIndex + 1)..^1].Select(segment => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(segment)))))
+        var contextSegments = spawnerIndex >= 0 && spawnerIndex + 1 < segments.Length - 1
+            ? segments[(spawnerIndex + 1)..^1].ToList()
+            : [];
+        if (contextSegments.Count > 0 && contextSegments[0].Equals("Buildings", StringComparison.OrdinalIgnoreCase))
+        {
+            contextSegments.RemoveAt(0);
+        }
+
+        var context = contextSegments.Count > 0
+            ? string.Join(" / ", contextSegments.Select(segment => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(segment)))))
             : string.Empty;
-        var name = CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(Path.GetFileNameWithoutExtension(normalized))));
+
+        var stem = Path.GetFileNameWithoutExtension(normalized);
+        if (stem.StartsWith("Examine_", StringComparison.OrdinalIgnoreCase))
+        {
+            stem = stem["Examine_".Length..];
+        }
+
+        var name = CapitalizeFirst(
+            NormalizeLocalizedLabel(
+                LocalizeCommonGameplayTerms(
+                    HumanizeCamel(stem.Replace('_', ' ')))));
+
         return string.IsNullOrWhiteSpace(context)
-            ? $"Расширенный пресет лута: {name}"
-            : $"Расширенный пресет лута: {context} / {name}";
+            ? name
+            : $"{context} / {name}";
     }
 
     private static string ResolveCargoDropLootPresetDisplayName(string relativePath)
@@ -2447,7 +2613,10 @@ internal sealed class StudioRuntime
             }
         }
 
-        if (normalizedPicker == "advanceditemspawnerpreset" || normalizedPicker == "containerlootpreset")
+        if (normalizedPicker == "advanceditemspawnerpreset"
+            || normalizedPicker == "containerlootpreset"
+            || normalizedPicker == "advanceditemspawnersubpreset"
+            || normalizedPicker == "containersubpresetpreset")
         {
             if (normalizedTerm.Contains("здан", StringComparison.Ordinal)
                 || normalizedTerm.Contains("build", StringComparison.Ordinal))
@@ -2468,6 +2637,12 @@ internal sealed class StudioRuntime
             if (normalizedTerm.Contains("воен", StringComparison.Ordinal))
             {
                 Add("military", "военный");
+            }
+
+            if (normalizedTerm.Contains("бунк", StringComparison.Ordinal)
+                || normalizedTerm.Contains("locker", StringComparison.Ordinal))
+            {
+                Add("bunker", "locker", "оружейный шкаф");
             }
         }
 
@@ -2500,6 +2675,27 @@ internal sealed class StudioRuntime
                 || normalizedTerm.Contains("goods", StringComparison.Ordinal))
             {
                 Add("общие товары", "general goods");
+            }
+        }
+
+        if (normalizedPicker == "vehiclespawnpreset" || normalizedPicker == "vehiclepreset")
+        {
+            if (normalizedTerm.Contains("маш", StringComparison.Ordinal)
+                || normalizedTerm.Contains("авто", StringComparison.Ordinal)
+                || normalizedTerm.Contains("трансп", StringComparison.Ordinal))
+            {
+                Add("vehicle", "car", "transport", "spawn preset", "машина", "транспорт");
+            }
+
+            if (normalizedTerm.Contains("байк", StringComparison.Ordinal)
+                || normalizedTerm.Contains("мото", StringComparison.Ordinal))
+            {
+                Add("bike", "motorcycle", "city bike", "dirt bike", "mountain bike");
+            }
+
+            if (normalizedTerm.Contains("тракт", StringComparison.Ordinal))
+            {
+                Add("tractor");
             }
         }
 
@@ -2822,7 +3018,7 @@ internal sealed class StudioRuntime
                 warnings.Count > 0 ? warnings : ["Не удалось подготовить исходный файл ассета."]);
         }
 
-        return BuildSchemaFromPreparedSource(assetId, normalized, category, sourceMode, sourcePath, warnings);
+        return BuildSchemaFromPreparedSource(assetId, normalized, category, sourceMode, sourcePath, selection, warnings);
     }
 
     public StudioModAssetSchemaDto PreviewModdingAssetSchema(StudioSchemaPreviewRequestDto request)
@@ -2879,7 +3075,7 @@ internal sealed class StudioRuntime
         var hasListEdits = request.ListEdits is { Count: > 0 };
         if (!hasFieldEdits && !hasListEdits)
         {
-            return BuildSchemaFromPreparedSource(request.AssetId, normalized, category, sourceMode, sourcePath, warnings);
+            return BuildSchemaFromPreparedSource(request.AssetId, normalized, category, sourceMode, sourcePath, selection, warnings);
         }
 
         var previewRoot = Path.Combine(_runtimePaths.TempRoot, "schema-preview", DateTime.Now.ToString("yyyyMMdd-HHmmss"), Guid.NewGuid().ToString("N"));
@@ -2943,7 +3139,7 @@ internal sealed class StudioRuntime
         }
 
         warnings.Insert(0, "Показан результат с уже сохранёнными изменениями этой системы.");
-        return BuildSchemaFromPreparedSource(request.AssetId, normalized, category, "preview", previewAssetPath, warnings);
+        return BuildSchemaFromPreparedSource(request.AssetId, normalized, category, "preview", previewAssetPath, selection, warnings);
     }
 
     private StudioModAssetSchemaDto BuildSchemaFromPreparedSource(
@@ -2952,6 +3148,7 @@ internal sealed class StudioRuntime
         ModCategory category,
         string sourceMode,
         string sourcePath,
+        AssetSelection selection,
         List<string> warnings)
     {
         var extension = Path.GetExtension(normalized).ToLowerInvariant();
@@ -2964,7 +3161,7 @@ internal sealed class StudioRuntime
 
             if (extension.Equals(".uasset", StringComparison.OrdinalIgnoreCase))
             {
-                return BuildUassetSchema(assetId, normalized, category, sourceMode, sourcePath, warnings);
+                return BuildUassetSchema(assetId, normalized, category, sourceMode, sourcePath, selection, warnings);
             }
 
             warnings.Add("Для этого формата доступен только просмотр и копирование в пак.");
@@ -3032,12 +3229,25 @@ internal sealed class StudioRuntime
                 supportsSafe));
         }
 
+        AppendSyntheticItemSpawningRowAssets(result);
+
         result.Sort((a, b) =>
         {
             var categoryCompare = string.Compare(a.CategoryName, b.CategoryName, StringComparison.OrdinalIgnoreCase);
             if (categoryCompare != 0)
             {
                 return categoryCompare;
+            }
+
+            if (a.CategoryId.Equals("crafting-recipes", StringComparison.OrdinalIgnoreCase)
+                && b.CategoryId.Equals("crafting-recipes", StringComparison.OrdinalIgnoreCase))
+            {
+                var aIsRegistry = IsCraftingUiDataRegistryAsset(a.RelativePath);
+                var bIsRegistry = IsCraftingUiDataRegistryAsset(b.RelativePath);
+                if (aIsRegistry != bIsRegistry)
+                {
+                    return aIsRegistry ? -1 : 1;
+                }
             }
 
             var displayCompare = string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
@@ -3049,6 +3259,380 @@ internal sealed class StudioRuntime
             return string.Compare(a.RelativePath, b.RelativePath, StringComparison.OrdinalIgnoreCase);
         });
         return result;
+    }
+
+    private List<StudioModAssetDto> BuildVisibleModAssets(List<StudioModAssetDto> rawAssets)
+    {
+        var result = new List<StudioModAssetDto>(rawAssets.Count);
+        foreach (var asset in rawAssets)
+        {
+            if (ShouldShowAssetInVisibleCatalog(asset))
+            {
+                result.Add(asset);
+            }
+        }
+
+        return result;
+    }
+
+    private bool ShouldShowAssetInVisibleCatalog(StudioModAssetDto asset)
+    {
+        if (asset.AssetId.StartsWith(DataTableRowAssetPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var relativePath = PathUtil.NormalizeRelative(asset.RelativePath);
+        if (IsAlwaysHiddenCatalogLane(relativePath))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsAlwaysHiddenCatalogLane(string relativePath)
+    {
+        var path = relativePath.ToLowerInvariant();
+        var fileName = Path.GetFileNameWithoutExtension(path);
+        return path.Contains("/items/weapons/weapon_clips/", StringComparison.Ordinal)
+               || path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
+               || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
+               || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
+               || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal)
+               || (path.Contains("/items/crafting/ingredients/", StringComparison.Ordinal)
+                   && fileName.StartsWith("ci_", StringComparison.Ordinal))
+               || path.Contains("/items/fishing/attachmentsockets/", StringComparison.Ordinal)
+               || path.Contains("/items/weapons/turrets/turret_01_wip/", StringComparison.Ordinal)
+               || path.Contains("/quests/interactables/", StringComparison.Ordinal)
+               || path.Contains("/quests/tasksdata/actionmatchers/", StringComparison.Ordinal)
+               || path.EndsWith("/quests/bp_noticeboard.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/quests/bp_questbin.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/quests/bp_questmanager.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/quests/bp_questbin_mailbox.uasset", StringComparison.Ordinal)
+               || path.Contains("/wwiseaudio/", StringComparison.Ordinal)
+               || path.Contains("/foliage/farming/models/", StringComparison.Ordinal)
+               || path.EndsWith("/foliage/farming/bp_garden.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/foliage/farming/bp_gardenmanager.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/economy/table_tradeabledesc.uasset", StringComparison.Ordinal)
+               || (path.Contains("/economy/traderservices/", StringComparison.Ordinal)
+                   && fileName.StartsWith("servicebp_", StringComparison.Ordinal))
+               || path.EndsWith("/worldevents/bp_worldeventmanager.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/encounters/bp_globalencountermanager.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/encounters/encountermanagercommondata.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/encounters/bp_encounterstaticzone.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/encounters/encounterzones/bp_mediumthreatzone.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/characters/npcs/bp_guardedzonemanager.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/encounters/encounterclasses/bb_encounters/bp_basebbflyingattackerencounter.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/encounters/encounterclasses/bp_encounterspawnairbornecharactersbase.uasset", StringComparison.Ordinal)
+               || (path.Contains("radiation", StringComparison.Ordinal)
+                   && path.Contains("/manual/codex/", StringComparison.Ordinal))
+               || (path.Contains("radiation", StringComparison.Ordinal)
+                   && path.Contains("/models/", StringComparison.Ordinal))
+               || (path.Contains("radiation", StringComparison.Ordinal)
+                   && path.Contains("/particles/", StringComparison.Ordinal))
+               || (path.Contains("radiation", StringComparison.Ordinal)
+                   && path.Contains("/items/postspawnactions/", StringComparison.Ordinal));
+    }
+
+    private void AppendSyntheticItemSpawningRowAssets(List<StudioModAssetDto> output)
+    {
+        AppendSyntheticDataTableRowAssets(
+            output,
+            ItemSpawningParametersLaneId,
+            ItemSpawningParametersTableRelativePath,
+            "item-spawning",
+            "Лут и спавн предметов",
+            BuildItemSpawningParametersRowDisplayName,
+            BuildItemSpawningParametersRowSummary);
+
+        AppendSyntheticDataTableRowAssets(
+            output,
+            ItemSpawningCooldownGroupsLaneId,
+            ItemSpawningCooldownGroupsTableRelativePath,
+            "item-spawning",
+            "Лут и спавн предметов",
+            BuildItemSpawningCooldownGroupDisplayName,
+            BuildItemSpawningCooldownGroupSummary);
+    }
+
+    private void AppendSyntheticDataTableRowAssets(
+        List<StudioModAssetDto> output,
+        string laneId,
+        string tableRelativePath,
+        string categoryId,
+        string categoryName,
+        Func<UAsset, StructPropertyData, string> displayNameFactory,
+        Func<UAsset, StructPropertyData, string> summaryFactory)
+    {
+        if (!TryLoadGameDataTableAsset(tableRelativePath, out var asset, out var dataTableExport))
+        {
+            return;
+        }
+
+        foreach (var row in dataTableExport.Table.Data)
+        {
+            var rowName = row.Name?.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(rowName))
+            {
+                continue;
+            }
+
+            output.Add(new StudioModAssetDto(
+                $"{DataTableRowAssetPrefix}{laneId}::{rowName}",
+                tableRelativePath,
+                categoryId,
+                categoryName,
+                displayNameFactory(asset, row),
+                summaryFactory(asset, row),
+                "uasset",
+                true));
+        }
+    }
+
+    private bool TryLoadGameDataTableAsset(string tableRelativePath, out UAsset asset, out DataTableExport dataTableExport)
+    {
+        asset = null!;
+        dataTableExport = null!;
+        var warnings = new List<string>(2);
+        if (!TryResolveGameAssetSource(tableRelativePath, out var sourcePath, warnings, includeCompanions: true)
+            || string.IsNullOrWhiteSpace(sourcePath)
+            || !File.Exists(sourcePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var readableSourcePath = PrepareIsolatedAssetReadSource(sourcePath);
+            asset = new UAsset(readableSourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            return TryGetFirstDataTableExport(asset, out dataTableExport, out _);
+        }
+        catch
+        {
+            asset = null!;
+            dataTableExport = null!;
+            return false;
+        }
+    }
+
+    private string BuildItemSpawningParametersRowDisplayName(UAsset asset, StructPropertyData row)
+    {
+        return $"Правило спавна: {LocalizeItemSpawningRowName(GetDataTableRowName(row))}";
+    }
+
+    private string BuildItemSpawningParametersRowSummary(UAsset asset, StructPropertyData row)
+    {
+        var parts = new List<string>(4);
+        var maxOccurrences = FindStructChildProperty<IntPropertyData>(row, "MaxOccurrences", out _);
+        if (maxOccurrences is not null)
+        {
+            parts.Add($"максимум {maxOccurrences.Value}");
+        }
+
+        var enabledLocations = GetEnabledItemSpawningLocations(row).Take(3).ToList();
+        if (enabledLocations.Count > 0)
+        {
+            parts.Add($"зоны: {string.Join(", ", enabledLocations)}");
+        }
+
+        var variations = FindStructChildProperty<ArrayPropertyData>(row, "Variations", out _);
+        if ((variations?.Value?.Length ?? 0) > 0)
+        {
+            parts.Add($"вариантов: {variations!.Value!.Length}");
+        }
+
+        var cooldownGroupLabel = ResolveItemSpawningCooldownGroupFromRow(row);
+        if (!string.IsNullOrWhiteSpace(cooldownGroupLabel))
+        {
+            parts.Add($"откат: {cooldownGroupLabel}");
+        }
+
+        return parts.Count > 0
+            ? $"{CapitalizeFirst(string.Join("; ", parts))}."
+            : "Где предмет может появляться, сколько его можно держать в мире и к какой группе отката он привязан.";
+    }
+
+    private string BuildItemSpawningCooldownGroupDisplayName(UAsset asset, StructPropertyData row)
+    {
+        return $"Группа отката: {LocalizeItemSpawningCooldownGroupName(GetDataTableRowName(row))}";
+    }
+
+    private string BuildItemSpawningCooldownGroupSummary(UAsset asset, StructPropertyData row)
+    {
+        var parts = new List<string>(2);
+        var cooldownStruct = FindStructChildProperty<StructPropertyData>(row, "cooldown", out _);
+        if (TryExtractFloatInterval(cooldownStruct, out var min, out var max))
+        {
+            parts.Add(min == max
+                ? $"откат {FormatCompactNumber(min)} сек"
+                : $"откат {FormatCompactNumber(min)}-{FormatCompactNumber(max)} сек");
+        }
+
+        var isAffected = FindStructChildProperty<BoolPropertyData>(row, "IsAffectedByLowerGroups", out _);
+        if (isAffected is not null)
+        {
+            parts.Add(isAffected.Value
+                ? "учитывает более низкие группы"
+                : "не зависит от более низких групп");
+        }
+
+        return parts.Count > 0
+            ? $"{CapitalizeFirst(string.Join("; ", parts))}."
+            : "Общая группа отката, которую используют правила спавна предметов.";
+    }
+
+    private List<string> GetEnabledItemSpawningLocations(StructPropertyData row)
+    {
+        var allowedLocations = FindStructChildProperty<StructPropertyData>(row, "AllowedLocations", out _);
+        if (allowedLocations is null)
+        {
+            return [];
+        }
+
+        var result = new List<string>(8);
+        foreach (var child in allowedLocations.Value)
+        {
+            if (child is BoolPropertyData boolProperty && boolProperty.Value)
+            {
+                var localized = LocalizeItemSpawningLocationName(child.Name?.ToString() ?? string.Empty);
+                if (!string.IsNullOrWhiteSpace(localized))
+                {
+                    result.Add(localized);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private string ResolveItemSpawningCooldownGroupFromRow(StructPropertyData row)
+    {
+        var cooldownGroup = FindStructChildProperty<StructPropertyData>(row, "CooldownGroup", out _);
+        if (cooldownGroup is null)
+        {
+            return string.Empty;
+        }
+
+        var rowNameProperty = FindStructChildProperty<NamePropertyData>(cooldownGroup, "RowName", out _);
+        var rowName = rowNameProperty?.Value?.ToString() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(rowName) || rowName.Equals("None", StringComparison.OrdinalIgnoreCase))
+        {
+            return "без группы";
+        }
+
+        return LocalizeItemSpawningCooldownGroupName(rowName);
+    }
+
+    private static bool TryExtractFloatInterval(StructPropertyData? intervalStruct, out double min, out double max)
+    {
+        min = 0d;
+        max = 0d;
+        if (intervalStruct is null)
+        {
+            return false;
+        }
+
+        var minProperty = FindStructChildProperty<FloatPropertyData>(intervalStruct, "Min", out _);
+        var maxProperty = FindStructChildProperty<FloatPropertyData>(intervalStruct, "Max", out _);
+        if (minProperty is null || maxProperty is null)
+        {
+            return false;
+        }
+
+        min = minProperty.Value;
+        max = maxProperty.Value;
+        return true;
+    }
+
+    private static string GetDataTableRowName(StructPropertyData row)
+    {
+        return row.Name?.ToString() ?? string.Empty;
+    }
+
+    private static string FormatCompactNumber(double value)
+    {
+        return value.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
+    private static string LocalizeItemSpawningRowName(string rowName)
+    {
+        if (string.IsNullOrWhiteSpace(rowName))
+        {
+            return "Неизвестное правило";
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(rowName)));
+    }
+
+    private static string LocalizeItemSpawningCooldownGroupName(string rowName)
+    {
+        if (string.IsNullOrWhiteSpace(rowName))
+        {
+            return "Без группы";
+        }
+
+        var parts = rowName
+            .Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(part => part.Trim())
+            .ToArray();
+        if (parts.Length >= 2 && parts[0].Equals("Weapons", StringComparison.OrdinalIgnoreCase))
+        {
+            var group = parts[1].ToLowerInvariant() switch
+            {
+                "handguns" => "пистолеты",
+                "shotguns" => "дробовики",
+                "smgs" => "пистолеты-пулемёты",
+                "assaultrifles" => "штурмовые винтовки",
+                "rifles" => "винтовки",
+                "dmrsnipers" => "DMR и снайперские винтовки",
+                "lmgs" => "пулемёты",
+                "rpgs" => "гранатомёты",
+                "explosives" => "взрывчатка",
+                _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(parts[1])))
+            };
+
+            if (parts.Length >= 4 && parts[2].Equals("Tier", StringComparison.OrdinalIgnoreCase))
+            {
+                var tier = parts[3].ToLowerInvariant() switch
+                {
+                    "low" => "низкий tier",
+                    "mid" => "средний tier",
+                    "high" => "высокий tier",
+                    "veryhigh" => "очень высокий tier",
+                    _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(parts[3])))
+                };
+
+                return $"{group} / {tier}";
+            }
+
+            return group;
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(rowName.Replace('.', ' '))));
+    }
+
+    private static string LocalizeItemSpawningLocationName(string rawName)
+    {
+        return rawName.ToLowerInvariant() switch
+        {
+            "coastal" => "берег",
+            "continantal" => "материк",
+            "mountain" => "горы",
+            "urban" => "город",
+            "rural" => "деревня",
+            "industrial" => "промзона",
+            "police" => "полиция",
+            "militarybasic" => "военная база: базовый уровень",
+            "militarymedium" => "военная база: средний уровень",
+            "militaryadvanced" => "военная база: высокий уровень",
+            "militaryww2" => "военные объекты WW2",
+            "sport" => "спорт",
+            "market" => "рынок",
+            "gasstation" => "заправка",
+            "airfield" => "аэродром",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(rawName)))
+        };
     }
 
     private static List<StudioModCategoryDto> BuildModCategories(List<StudioModAssetDto> assets)
@@ -3233,12 +3817,37 @@ internal sealed class StudioRuntime
         ModCategory category,
         string sourceMode,
         string sourcePath,
+        AssetSelection selection,
         List<string> warnings)
     {
         var fields = new List<StudioModFieldDto>(512);
         var listTargets = new List<StudioModListTargetDto>(120);
         var readableSourcePath = PrepareIsolatedAssetReadSource(sourcePath);
         var asset = new UAsset(readableSourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+        if (!string.IsNullOrWhiteSpace(selection.SyntheticLaneId)
+            && !string.IsNullOrWhiteSpace(selection.SyntheticRowName))
+        {
+            return BuildSyntheticDataTableRowSchema(
+                assetId,
+                normalizedRelativePath,
+                category,
+                sourceMode,
+                asset,
+                selection,
+                warnings);
+        }
+
+        if (IsCraftingUiDataRegistryAsset(normalizedRelativePath))
+        {
+            return BuildCraftingUiDataSchema(
+                assetId,
+                normalizedRelativePath,
+                category,
+                sourceMode,
+                asset,
+                warnings);
+        }
+
         if (IsCraftingRecipeAsset(normalizedRelativePath))
         {
             return BuildCraftingRecipeSchema(
@@ -3312,6 +3921,381 @@ internal sealed class StudioRuntime
             prettyFields.Take(800).ToList(),
             listTargets.Take(200).ToList(),
             warnings);
+    }
+
+    private StudioModAssetSchemaDto BuildSyntheticDataTableRowSchema(
+        string assetId,
+        string normalizedRelativePath,
+        ModCategory category,
+        string sourceMode,
+        UAsset asset,
+        AssetSelection selection,
+        List<string> warnings)
+    {
+        if (!TryGetFirstDataTableExport(asset, out var dataTableExport, out var exportIndex))
+        {
+            warnings.Add("Не удалось открыть игровую таблицу для анализа.");
+            return new StudioModAssetSchemaDto(
+                assetId,
+                normalizedRelativePath,
+                category.Id,
+                category.Name,
+                sourceMode,
+                "uasset",
+                [],
+                [],
+                warnings);
+        }
+
+        if (!TryFindDataTableRow(dataTableExport, selection.SyntheticRowName ?? string.Empty, out var row, out var rowIndex))
+        {
+            warnings.Add("Не удалось найти нужную строку в игровой таблице.");
+            return new StudioModAssetSchemaDto(
+                assetId,
+                normalizedRelativePath,
+                category.Id,
+                category.Name,
+                sourceMode,
+                "uasset",
+                [],
+                [],
+                warnings);
+        }
+
+        return (selection.SyntheticLaneId ?? string.Empty).ToLowerInvariant() switch
+        {
+            ItemSpawningParametersLaneId => BuildItemSpawningParametersRowSchema(
+                assetId,
+                normalizedRelativePath,
+                category,
+                sourceMode,
+                asset,
+                exportIndex,
+                row,
+                rowIndex,
+                warnings),
+            ItemSpawningCooldownGroupsLaneId => BuildItemSpawningCooldownGroupRowSchema(
+                assetId,
+                normalizedRelativePath,
+                category,
+                sourceMode,
+                asset,
+                exportIndex,
+                row,
+                rowIndex,
+                warnings),
+            _ => new StudioModAssetSchemaDto(
+                assetId,
+                normalizedRelativePath,
+                category.Id,
+                category.Name,
+                sourceMode,
+                "uasset",
+                [],
+                [],
+                ["Эта строка таблицы пока не поддерживается в студии."])
+        };
+    }
+
+    private StudioModAssetSchemaDto BuildItemSpawningParametersRowSchema(
+        string assetId,
+        string normalizedRelativePath,
+        ModCategory category,
+        string sourceMode,
+        UAsset asset,
+        int exportIndex,
+        StructPropertyData row,
+        int rowIndex,
+        List<string> warnings)
+    {
+        var fields = new List<StudioModFieldDto>(64);
+        var listTargets = new List<StudioModListTargetDto>(8);
+        var values = row.Value ?? [];
+        for (var i = 0; i < values.Count; i++)
+        {
+            var child = values[i];
+            var childName = child.Name?.ToString() ?? GetReadablePropertyName(child, i);
+            if (string.Equals(childName, "CooldownGroup", StringComparison.OrdinalIgnoreCase)
+                && child is StructPropertyData cooldownGroupStruct)
+            {
+                AppendItemSpawningCooldownGroupField(fields, cooldownGroupStruct, exportIndex, rowIndex, i);
+                continue;
+            }
+
+            if (string.Equals(childName, "Variations", StringComparison.OrdinalIgnoreCase)
+                && child is ArrayPropertyData variationsArray)
+            {
+                AppendItemSpawningVariationsListTarget(
+                    asset,
+                    listTargets,
+                    variationsArray,
+                    exportIndex,
+                    rowIndex,
+                    i,
+                    normalizedRelativePath);
+                continue;
+            }
+
+            CollectUassetFields(
+                asset,
+                child,
+                $"e:{exportIndex}/r:{rowIndex}/p:{i}",
+                $"Правило спавна {LocalizeItemSpawningRowName(GetDataTableRowName(row))}.{GetReadablePropertyName(child, i)}",
+                normalizedRelativePath,
+                fields,
+                listTargets,
+                depth: 0);
+        }
+
+        if (fields.Count == 0)
+        {
+            warnings.Add(ResolveNoSafeFieldWarning(normalizedRelativePath, listTargets.Count > 0));
+        }
+
+        return new StudioModAssetSchemaDto(
+            assetId,
+            normalizedRelativePath,
+            category.Id,
+            category.Name,
+            sourceMode,
+            "uasset",
+            fields.Take(800).ToList(),
+            listTargets.Take(200).ToList(),
+            warnings);
+    }
+
+    private static void AppendItemSpawningVariationsListTarget(
+        UAsset asset,
+        List<StudioModListTargetDto> listTargets,
+        ArrayPropertyData variationsArray,
+        int exportIndex,
+        int rowIndex,
+        int propertyIndex,
+        string relativePath)
+    {
+        var values = variationsArray.Value ?? [];
+        var itemKind = ResolveItemSpawningArrayItemKind(variationsArray, values);
+        List<string>? entryLabels = null;
+        if (itemKind.Equals("reference", StringComparison.OrdinalIgnoreCase))
+        {
+            entryLabels = values
+                .Select((value, index) => ResolveArrayEntryLabel(asset, relativePath, "Варианты предмета", value, index))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToList();
+        }
+
+        listTargets.Add(new StudioModListTargetDto(
+            $"e:{exportIndex}/r:{rowIndex}/p:{propertyIndex}",
+            "Варианты предмета",
+            ResolveListTargetDescription(relativePath, "Варианты предмета"),
+            itemKind,
+            values.Length,
+            SupportsAddClone: false,
+            SupportsRemove: values.Length > 0,
+            SupportsClear: values.Length > 0,
+            SupportsAddEmpty: false,
+            SupportsAddReference: itemKind.Equals("reference", StringComparison.OrdinalIgnoreCase),
+            ReferencePickerKind: itemKind.Equals("reference", StringComparison.OrdinalIgnoreCase) ? "item-asset" : null,
+            ReferencePickerPrompt: itemKind.Equals("reference", StringComparison.OrdinalIgnoreCase)
+                ? "Найди предмет, который должен входить в варианты появления для этого правила спавна."
+                : null,
+            EntryLabels: entryLabels));
+    }
+
+    private static string ResolveItemSpawningArrayItemKind(ArrayPropertyData arrayProperty, PropertyData[] values)
+    {
+        if (values.Length > 0)
+        {
+            return ResolveUassetArrayItemKind(values);
+        }
+
+        var arrayType = arrayProperty.ArrayType?.ToString() ?? string.Empty;
+        if (arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase)
+            || arrayType.Equals("SoftObjectProperty", StringComparison.OrdinalIgnoreCase)
+            || arrayType.Equals("SoftObjectPathProperty", StringComparison.OrdinalIgnoreCase))
+        {
+            return "reference";
+        }
+
+        return "unknown";
+    }
+
+    private StudioModAssetSchemaDto BuildItemSpawningCooldownGroupRowSchema(
+        string assetId,
+        string normalizedRelativePath,
+        ModCategory category,
+        string sourceMode,
+        UAsset asset,
+        int exportIndex,
+        StructPropertyData row,
+        int rowIndex,
+        List<string> warnings)
+    {
+        var fields = new List<StudioModFieldDto>(24);
+        var listTargets = new List<StudioModListTargetDto>(4);
+        var values = row.Value ?? [];
+        for (var i = 0; i < values.Count; i++)
+        {
+            var child = values[i];
+            if (child is StructPropertyData intervalStruct
+                && string.Equals(child.Name?.ToString(), "cooldown", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendItemSpawningCooldownIntervalFields(fields, intervalStruct, exportIndex, rowIndex, i);
+                continue;
+            }
+
+            CollectUassetFields(
+                asset,
+                child,
+                $"e:{exportIndex}/r:{rowIndex}/p:{i}",
+                $"Группа отката {LocalizeItemSpawningCooldownGroupName(GetDataTableRowName(row))}.{GetReadablePropertyName(child, i)}",
+                normalizedRelativePath,
+                fields,
+                listTargets,
+                depth: 0);
+        }
+
+        if (fields.Count == 0)
+        {
+            warnings.Add(ResolveNoSafeFieldWarning(normalizedRelativePath, listTargets.Count > 0));
+        }
+
+        return new StudioModAssetSchemaDto(
+            assetId,
+            normalizedRelativePath,
+            category.Id,
+            category.Name,
+            sourceMode,
+            "uasset",
+            fields.Take(800).ToList(),
+            listTargets.Take(200).ToList(),
+            warnings);
+    }
+
+    private static void AppendItemSpawningCooldownIntervalFields(
+        List<StudioModFieldDto> fields,
+        StructPropertyData intervalStruct,
+        int exportIndex,
+        int rowIndex,
+        int propertyIndex)
+    {
+        var minProperty = FindStructChildProperty<FloatPropertyData>(intervalStruct, "Min", out var minIndex);
+        if (minProperty is not null)
+        {
+            var currentValue = minProperty.Value.ToString(CultureInfo.InvariantCulture);
+            fields.Add(new StudioModFieldDto(
+                $"e:{exportIndex}/r:{rowIndex}/p:{propertyIndex}/p:{minIndex}",
+                "Время отката (минимум)",
+                "Минимальная пауза перед тем, как эта группа отката снова разрешит появление предметов.",
+                "Откат появления",
+                "float",
+                "number",
+                currentValue,
+                true,
+                "0",
+                "86400",
+                null,
+                null,
+                null,
+                currentValue));
+        }
+
+        var maxProperty = FindStructChildProperty<FloatPropertyData>(intervalStruct, "Max", out var maxIndex);
+        if (maxProperty is not null)
+        {
+            var currentValue = maxProperty.Value.ToString(CultureInfo.InvariantCulture);
+            fields.Add(new StudioModFieldDto(
+                $"e:{exportIndex}/r:{rowIndex}/p:{propertyIndex}/p:{maxIndex}",
+                "Время отката (максимум)",
+                "Максимальная пауза перед тем, как эта группа отката снова разрешит появление предметов.",
+                "Откат появления",
+                "float",
+                "number",
+                currentValue,
+                true,
+                "0",
+                "86400",
+                null,
+                null,
+                null,
+                currentValue));
+        }
+    }
+
+    private void AppendItemSpawningCooldownGroupField(
+        List<StudioModFieldDto> fields,
+        StructPropertyData cooldownGroupStruct,
+        int exportIndex,
+        int rowIndex,
+        int propertyIndex)
+    {
+        var rowNameProperty = FindStructChildProperty<NamePropertyData>(cooldownGroupStruct, "RowName", out var rowNameIndex);
+        if (rowNameProperty is null)
+        {
+            return;
+        }
+
+        var currentValue = rowNameProperty.Value?.ToString();
+        if (string.IsNullOrWhiteSpace(currentValue))
+        {
+            currentValue = "None";
+        }
+
+        fields.Add(new StudioModFieldDto(
+            $"e:{exportIndex}/r:{rowIndex}/p:{propertyIndex}/p:{rowNameIndex}",
+            "Группа отката",
+            "Выбери общую группу отката, которая управляет задержкой повторного появления этого предмета. Если группа пустая, предмет работает без общей таблицы отката.",
+            "Откат появления",
+            "name",
+            "select",
+            currentValue,
+            true,
+            null,
+            null,
+            GetItemSpawningCooldownGroupFieldOptions(),
+            null,
+            null,
+            currentValue.Equals("None", StringComparison.OrdinalIgnoreCase)
+                ? "Без группы отката"
+                : LocalizeItemSpawningCooldownGroupName(currentValue)));
+    }
+
+    private List<StudioModFieldOptionDto> GetItemSpawningCooldownGroupFieldOptions()
+    {
+        lock (_sync)
+        {
+            return _itemSpawningCooldownGroupFieldOptionsCache ??= BuildItemSpawningCooldownGroupFieldOptions();
+        }
+    }
+
+    private List<StudioModFieldOptionDto> BuildItemSpawningCooldownGroupFieldOptions()
+    {
+        var options = new List<StudioModFieldOptionDto>
+        {
+            new("None", "Без группы отката")
+        };
+
+        if (!TryLoadGameDataTableAsset(ItemSpawningCooldownGroupsTableRelativePath, out _, out var dataTableExport))
+        {
+            return options;
+        }
+
+        foreach (var row in dataTableExport.Table.Data)
+        {
+            var rowName = row.Name?.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(rowName))
+            {
+                continue;
+            }
+
+            options.Add(new StudioModFieldOptionDto(
+                rowName,
+                LocalizeItemSpawningCooldownGroupName(rowName)));
+        }
+
+        return options
+            .DistinctBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private StudioModAssetSchemaDto BuildCraftingRecipeSchema(
@@ -3652,6 +4636,232 @@ internal sealed class StudioRuntime
             warnings);
     }
 
+    private StudioModAssetSchemaDto BuildCraftingUiDataSchema(
+        string assetId,
+        string normalizedRelativePath,
+        ModCategory category,
+        string sourceMode,
+        UAsset asset,
+        List<string> warnings)
+    {
+        if (!TryGetFirstNormalExport(asset, out var normalExport, out var exportIndex))
+        {
+            warnings.Add("Не удалось открыть реестр крафта для анализа.");
+            return new StudioModAssetSchemaDto(
+                assetId,
+                normalizedRelativePath,
+                category.Id,
+                category.Name,
+                sourceMode,
+                "uasset",
+                [],
+                [],
+                warnings);
+        }
+
+        var fields = new List<StudioModFieldDto>(4);
+        var listTargets = new List<StudioModListTargetDto>(64);
+
+        var itemCategories = FindTopLevelProperty<ArrayPropertyData>(normalExport, "ItemCategories", out var itemCategoriesIndex);
+        var placeableCategories = FindTopLevelProperty<ArrayPropertyData>(normalExport, "PlaceableCategories", out var placeableCategoriesIndex);
+
+        fields.Add(new StudioModFieldDto(
+            "crafting-registry:item-categories",
+            "Категорий предметного крафта",
+            "Сколько категорий предметов использует меню крафта.",
+            "Обзор",
+            "int",
+            "text",
+            ((itemCategories?.Value ?? []).Length).ToString(CultureInfo.InvariantCulture),
+            false,
+            null,
+            null,
+            null));
+
+        fields.Add(new StudioModFieldDto(
+            "crafting-registry:placeable-categories",
+            "Категорий строительства",
+            "Сколько категорий строительства и базы использует меню крафта.",
+            "Обзор",
+            "int",
+            "text",
+            ((placeableCategories?.Value ?? []).Length).ToString(CultureInfo.InvariantCulture),
+            false,
+            null,
+            null,
+            null));
+
+        if (itemCategories is not null)
+        {
+            AppendCraftingUiCategoryRecipeTargets(
+                asset,
+                normalizedRelativePath,
+                exportIndex,
+                itemCategories,
+                itemCategoriesIndex,
+                isPlaceable: false,
+                listTargets);
+        }
+
+        if (placeableCategories is not null)
+        {
+            AppendCraftingUiCategoryRecipeTargets(
+                asset,
+                normalizedRelativePath,
+                exportIndex,
+                placeableCategories,
+                placeableCategoriesIndex,
+                isPlaceable: true,
+                listTargets);
+        }
+
+        if (listTargets.Count == 0)
+        {
+            warnings.Add("В реестре крафта не найдены категории с массивами рецептов.");
+        }
+
+        return new StudioModAssetSchemaDto(
+            assetId,
+            normalizedRelativePath,
+            category.Id,
+            category.Name,
+            sourceMode,
+            "uasset",
+            fields,
+            listTargets,
+            warnings);
+    }
+
+    private void AppendCraftingUiCategoryRecipeTargets(
+        UAsset asset,
+        string normalizedRelativePath,
+        int exportIndex,
+        ArrayPropertyData categories,
+        int categoriesPropertyIndex,
+        bool isPlaceable,
+        List<StudioModListTargetDto> output)
+    {
+        var categoryValues = categories.Value ?? [];
+        for (var i = 0; i < categoryValues.Length; i++)
+        {
+            if (categoryValues[i] is not StructPropertyData categoryStruct)
+            {
+                continue;
+            }
+
+            var tagStruct = FindStructChildProperty<StructPropertyData>(categoryStruct, "Tag", out _);
+            var tagValue = ResolveGameplayTagStructValue(tagStruct);
+            var categoryLabel = ResolveCraftingUiCategoryLabel(tagValue, isPlaceable);
+            var recipes = EnsureStructObjectArrayChild(asset, categoryStruct, "Recipes");
+            var recipeValues = recipes.Value ?? [];
+            var entryLabels = recipeValues
+                .Select((value, entryIndex) => ResolveArrayEntryLabel(asset, normalizedRelativePath, "Рецепты категории", value, entryIndex))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToList();
+            var pickerKind = isPlaceable
+                ? "crafting-placeable-recipe-asset"
+                : "crafting-item-recipe-asset";
+
+            output.Add(new StudioModListTargetDto(
+                $"{SyntheticCraftingUiCategoryRecipesTargetPrefix}{exportIndex}:{categoriesPropertyIndex}:{i}",
+                $"Общий пул крафта: {categoryLabel}",
+                "Какие рецепты входят в эту категорию меню крафта. Добавляй новые рецепты из игры или убирай лишние без ручного редактирования внутренних структур.",
+                "reference",
+                recipeValues.Length,
+                SupportsAddClone: false,
+                SupportsRemove: recipeValues.Length > 0,
+                SupportsClear: recipeValues.Length > 0,
+                SupportsAddEmpty: false,
+                SupportsAddReference: true,
+                ReferencePickerKind: pickerKind,
+                ReferencePickerPrompt: isPlaceable
+                    ? "Найди рецепт строительства, который должен появиться в этой категории."
+                    : "Найди рецепт предмета, который должен появиться в этой категории.",
+                EntryLabels: entryLabels));
+        }
+    }
+
+    private static string ResolveGameplayTagStructValue(StructPropertyData? tagStruct)
+    {
+        if (tagStruct is null)
+        {
+            return string.Empty;
+        }
+
+        var nameProperty = tagStruct.Value
+            .OfType<NamePropertyData>()
+            .FirstOrDefault(property => string.Equals(property.Name?.ToString(), "TagName", StringComparison.OrdinalIgnoreCase));
+        return nameProperty?.Value?.ToString() ?? string.Empty;
+    }
+
+    private static string ResolveCraftingUiCategoryLabel(string tagValue, bool isPlaceable)
+    {
+        if (string.IsNullOrWhiteSpace(tagValue))
+        {
+            return isPlaceable ? "Категория строительства" : "Категория предметов";
+        }
+
+        var normalized = tagValue.StartsWith("CraftingCategory.", StringComparison.OrdinalIgnoreCase)
+            ? tagValue["CraftingCategory.".Length..]
+            : tagValue;
+        var parts = normalized.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0)
+        {
+            return isPlaceable ? "Категория строительства" : "Категория предметов";
+        }
+
+        var localizedParts = new List<string>(parts.Length);
+        foreach (var part in parts)
+        {
+            var localized = ResolveCraftingUiCategoryTokenLabel(part);
+            if (string.IsNullOrWhiteSpace(localized))
+            {
+                continue;
+            }
+
+            localizedParts.Add(localized);
+        }
+
+        if (localizedParts.Count == 0)
+        {
+            return isPlaceable ? "Категория строительства" : "Категория предметов";
+        }
+
+        return string.Join(" / ", localizedParts);
+    }
+
+    private static string ResolveCraftingUiCategoryTokenLabel(string token)
+    {
+        return token switch
+        {
+            "Items" => "Предметы",
+            "Placeables" => "Постройки",
+            "BaseBuilding" => "База",
+            "Ammunition" => "Боеприпасы",
+            "Bullets" => "Пули",
+            "ArrowsAndBolts" => "Стрелы и болты",
+            "MeleeWeapons" => "Ближний бой",
+            "RangedWeapons" => "Дальний бой",
+            "Firearms" => "Огнестрел",
+            "Attachments" => "Обвес и крепления",
+            "BowsAndCrossbows" => "Луки и арбалеты",
+            "Explosives" => "Взрывчатка",
+            "Clothing" => "Одежда",
+            "Equipment" => "Снаряжение",
+            "GeneralBuildingElements" => "Общие элементы",
+            "OutdoorElements" => "Уличные элементы",
+            "Furniture" => "Мебель",
+            "Utility" => "Служебные объекты",
+            "Storage" => "Хранилища",
+            "Lights" => "Освещение",
+            "Defenses" => "Оборона",
+            "Traps" => "Ловушки",
+            "Flags" => "Флаги",
+            "Favorites" => "Избранное",
+            _ => LocalizeAssetStem(token)
+        };
+    }
+
     private StudioModAssetSchemaDto BuildStarterSpawnEquipmentSchema(
         string assetId,
         string normalizedRelativePath,
@@ -3851,6 +5061,60 @@ internal sealed class StudioRuntime
                && path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsCraftingUiDataRegistryAsset(string relativePath)
+    {
+        var path = PathUtil.NormalizeRelative(relativePath);
+        return path.Equals(CraftingUiDataRegistryRelativePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveCraftingRecipeReferenceClassName(string relativePath)
+    {
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        return path.Contains("/items/crafting/recipes/placeables/", StringComparison.Ordinal)
+            ? "PlaceableCraftingRecipe"
+            : "ItemCraftingRecipe";
+    }
+
+    private static bool TryGetFirstDataTableExport(UAsset asset, out DataTableExport dataTableExport, out int exportIndex)
+    {
+        for (var i = 0; i < asset.Exports.Count; i++)
+        {
+            if (asset.Exports[i] is not DataTableExport candidate)
+            {
+                continue;
+            }
+
+            dataTableExport = candidate;
+            exportIndex = i;
+            return true;
+        }
+
+        dataTableExport = null!;
+        exportIndex = -1;
+        return false;
+    }
+
+    private static bool TryFindDataTableRow(DataTableExport dataTableExport, string rowName, out StructPropertyData row, out int rowIndex)
+    {
+        var rows = dataTableExport.Table.Data;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var candidateName = rows[i].Name?.ToString() ?? string.Empty;
+            if (!string.Equals(candidateName, rowName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            row = rows[i];
+            rowIndex = i;
+            return true;
+        }
+
+        row = null!;
+        rowIndex = -1;
+        return false;
+    }
+
     private static bool TryGetFirstNormalExport(UAsset asset, out NormalExport normalExport, out int exportIndex)
     {
         for (var i = 0; i < asset.Exports.Count; i++)
@@ -3929,6 +5193,12 @@ internal sealed class StudioRuntime
             && TryFindForeignSubstanceModifierExport(asset, out var normalExport, out _))
         {
             AppendForeignSubstanceAttributeFields(normalExport, output);
+        }
+
+        if (IsRangedWeaponAssetPath(relativePath)
+            && TryFindWeaponOwnerExport(asset, out var weaponExport, out _))
+        {
+            AppendSyntheticWeaponFields(weaponExport, output);
         }
     }
 
@@ -4161,6 +5431,50 @@ internal sealed class StudioRuntime
             string.Equals(import.ObjectName?.ToString(), "PrisonerForeignSubstance_AttributeModifier", StringComparison.OrdinalIgnoreCase));
     }
 
+    private static bool IsRangedWeaponAssetPath(string relativePath)
+    {
+        return relativePath.Contains("/items/weapons/ranged_weapons/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryFindWeaponOwnerExport(UAsset asset, out NormalExport export, out int exportIndex)
+    {
+        var anchorProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "DamagePerShot",
+            "MaxLoadedAmmo",
+            "EventMaxAmmo",
+            "DefaultAmmunitionItemClass",
+            "ROF",
+            "MaxRange",
+            "ViewKickMultiplier",
+            "MaxRecoilOffset",
+            "RecoilRecoverySpeed",
+            "UseCustomWeaponViewKickData",
+            "WeaponViewKickData"
+        };
+
+        for (var i = 0; i < asset.Exports.Count; i++)
+        {
+            if (asset.Exports[i] is not NormalExport candidate)
+            {
+                continue;
+            }
+
+            var hasAnchorProperty = candidate.Data.Any(property =>
+                anchorProperties.Any(anchor => PropertyNamesMatch(property.Name?.ToString(), anchor)));
+            if (!hasAnchorProperty)
+            {
+                continue;
+            }
+
+            export = candidate;
+            exportIndex = i;
+            return true;
+        }
+
+        return TryGetFirstNormalExport(asset, out export, out exportIndex);
+    }
+
     private static FloatPropertyData? FindTopLevelFloatPropertyLoose(NormalExport export, string propertyName)
     {
         return export.Data
@@ -4263,6 +5577,39 @@ internal sealed class StudioRuntime
 
             output.Add(new StudioModFieldDto(
                 $"{ForeignSubstanceAttributeFieldPrefix}{spec.Item1}",
+                spec.Item2,
+                spec.Item3,
+                spec.Item4,
+                "float",
+                "number",
+                "0",
+                true,
+                "-100",
+                "100",
+                null));
+        }
+    }
+
+    private static void AppendSyntheticWeaponFields(
+        NormalExport export,
+        List<StudioModFieldDto> output)
+    {
+        var specs = new[]
+        {
+            ("ViewKickMultiplier", "Сила отдачи камеры", "Насколько резко экран и оружие дёргаются при выстреле. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Отдача"),
+            ("MaxRecoilOffset", "Максимальная отдача", "Насколько сильно оружие может уводить вверх или в сторону при стрельбе. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Отдача"),
+            ("RecoilRecoverySpeed", "Скорость возврата после отдачи", "Как быстро оружие возвращается под контроль после выстрела. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Отдача")
+        };
+
+        foreach (var spec in specs)
+        {
+            if (FindTopLevelFloatPropertyLoose(export, spec.Item1) is not null)
+            {
+                continue;
+            }
+
+            output.Add(new StudioModFieldDto(
+                $"{WeaponSyntheticFieldPrefix}{spec.Item1}",
                 spec.Item2,
                 spec.Item3,
                 spec.Item4,
@@ -4630,6 +5977,12 @@ internal sealed class StudioRuntime
             return true;
         }
 
+        if (TryDescribeAdvancedItemSpawnerPresetAsset(relativePath, out var advancedDescriptor))
+        {
+            displayName = TrimReferenceDescriptorPrefix(advancedDescriptor.DisplayName, "Контейнерный пресет:");
+            return true;
+        }
+
         return false;
     }
 
@@ -4993,7 +6346,9 @@ internal sealed class StudioRuntime
                 {
                     entryLabels = BuildCurvePointEntryLabels(values.Length);
                 }
-                else if (ResolveUassetArrayItemKind(values).Equals("reference", StringComparison.OrdinalIgnoreCase))
+                else if (ResolveUassetArrayItemKind(values).Equals("reference", StringComparison.OrdinalIgnoreCase)
+                    || (ResolveUassetArrayItemKind(values).Equals("struct", StringComparison.OrdinalIgnoreCase)
+                        && IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, listLabel)))
                 {
                     entryLabels = values
                         .Select((value, index) => ResolveArrayEntryLabel(asset, relativePath, listLabel, value, index))
@@ -5166,9 +6521,21 @@ internal sealed class StudioRuntime
         {
             prefix = "пресет";
         }
+        else if (IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, parentLabel))
+        {
+            prefix = "подпакет";
+        }
+        else if (IsVehicleSpawnPresetListSurface(relativePath, parentLabel))
+        {
+            prefix = "пресет транспорта";
+        }
         else if (IsItemSpawnerPresetItemListSurface(relativePath, parentLabel))
         {
             prefix = "предмет";
+        }
+        else if (IsItemSpawningVariationListSurface(relativePath, parentLabel))
+        {
+            prefix = "вариант";
         }
         else if (path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal))
         {
@@ -5223,6 +6590,8 @@ internal sealed class StudioRuntime
                 => $"{prefix} {ResolveGameEventLoadoutEntryLabel(ExtractSoftObjectReference(softObjectValue.Value))}",
             SoftObjectPathPropertyData softObjectPathValue when IsGameEventMarkerAsset(relativePath) && IsGameEventLoadoutListLabel(parentLabel)
                 => $"{prefix} {ResolveGameEventLoadoutEntryLabel(ExtractSoftObjectReference(softObjectPathValue.Value))}",
+            StructPropertyData structValue when IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, parentLabel)
+                => ResolveAdvancedSpawnerSubpresetEntryLabel(asset, structValue, prefix, fallbackIndex),
             ObjectPropertyData objectValue when (normalizedParent.Contains("sideeffects", StringComparison.Ordinal)
                                                 || parentLabel.Contains("побочные эффекты", StringComparison.OrdinalIgnoreCase))
                 && TryResolveSideEffectClassFromObjectReference(asset, objectValue.Value, out var sideEffectClassName)
@@ -5241,6 +6610,31 @@ internal sealed class StudioRuntime
             EnumPropertyData enumValue => $"{prefix} {LocalizeAssetStem(enumValue.Value?.ToString() ?? string.Empty)}",
             _ => $"{prefix} {fallbackIndex + 1}"
         };
+    }
+
+    private static string ResolveAdvancedSpawnerSubpresetEntryLabel(
+        UAsset asset,
+        StructPropertyData structValue,
+        string prefix,
+        int fallbackIndex)
+    {
+        var presetLabel = TryFindStructReferenceChild(structValue, "Preset", out var presetProperty)
+            ? presetProperty switch
+            {
+                ObjectPropertyData objectValue => ResolveAdvancedItemSpawnerReferenceLabel(ResolveObjectReferenceLabel(asset, objectValue.Value)),
+                SoftObjectPropertyData softObjectValue => ResolveAdvancedItemSpawnerReferenceLabel(ExtractSoftObjectReference(softObjectValue.Value)),
+                SoftObjectPathPropertyData softObjectPathValue => ResolveAdvancedItemSpawnerReferenceLabel(ExtractSoftObjectReference(softObjectPathValue.Value)),
+                _ => $"{fallbackIndex + 1}"
+            }
+            : $"{fallbackIndex + 1}";
+
+        var rarityValue = FindStructChildProperty<EnumPropertyData>(structValue, "Rarity", out _)?.Value?.ToString();
+        if (!string.IsNullOrWhiteSpace(rarityValue))
+        {
+            return $"{prefix} {presetLabel} / редкость {LocalizeItemRarity(rarityValue)}";
+        }
+
+        return $"{prefix} {presetLabel}";
     }
 
     private static string NormalizeListTargetLabel(string relativePath, string userLabel)
@@ -5392,6 +6786,11 @@ internal sealed class StudioRuntime
             return "Кривая приготовления / точки кривой";
         }
 
+        if (path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal))
+        {
+            return "Кривая отказов оружия / точки кривой";
+        }
+
         if (path.Contains("/minigames/lockpicking/", StringComparison.Ordinal))
         {
             return "Кривая взлома / точки кривой";
@@ -5439,6 +6838,17 @@ internal sealed class StudioRuntime
         return ShortenReadableReferenceLabel(rawReference);
     }
 
+    private static string ResolveAdvancedItemSpawnerReferenceLabel(string rawReference)
+    {
+        if (TryResolveRelativeAssetPathFromGameReference(rawReference, out var relativePath)
+            && TryDescribeAdvancedItemSpawnerPresetAsset(relativePath, out var descriptor))
+        {
+            return TrimReferenceDescriptorPrefix(descriptor.DisplayName, "Контейнерный пресет:");
+        }
+
+        return ShortenReadableReferenceLabel(rawReference);
+    }
+
     private static string ResolveCargoLootObjectEntryLabel(UAsset asset, FPackageIndex packageIndex)
     {
         if (TryExtractObjectReferencePickerValue(asset, packageIndex, out var rawValue, out var displayValue))
@@ -5457,6 +6867,26 @@ internal sealed class StudioRuntime
         }
 
         return ResolveCargoLootReferenceLabel(ResolveObjectReferenceLabel(asset, packageIndex));
+    }
+
+    private static string LocalizeItemRarity(string rawValue)
+    {
+        var value = (rawValue ?? string.Empty).Trim();
+        if (value.StartsWith("EItemRarity::", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value["EItemRarity::".Length..];
+        }
+
+        return value.ToLowerInvariant() switch
+        {
+            "extremelyrare" => "чрезвычайно редкий",
+            "veryrare" => "очень редкий",
+            "rare" => "редкий",
+            "uncommon" => "необычный",
+            "common" => "обычный",
+            "abundant" => "частый",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(value)))
+        };
     }
 
     private static bool IsPlantSpeciesListSurface(string relativePath, string label)
@@ -5507,6 +6937,27 @@ internal sealed class StudioRuntime
     {
         return !string.IsNullOrWhiteSpace(relativePath)
             && relativePath.Contains("/items/spawnerpresets/examine_data_presets/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsVehicleSpawnGroupAsset(string relativePath)
+    {
+        return !string.IsNullOrWhiteSpace(relativePath)
+            && relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+            && relativePath.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsVehicleSpawnPresetListSurface(string relativePath, string label)
+    {
+        if (!IsVehicleSpawnGroupAsset(relativePath) || string.IsNullOrWhiteSpace(label))
+        {
+            return false;
+        }
+
+        var normalized = label.ToLowerInvariant();
+        var normalizedKey = NormalizeAssetKey(label);
+        return normalized.Contains("доступные варианты транспорта", StringComparison.Ordinal)
+            || normalized.Contains("vehicle presets", StringComparison.Ordinal)
+            || normalizedKey.Contains("vehiclepresets", StringComparison.Ordinal);
     }
 
     private static bool IsRegularItemSpawnerPresetAsset(string relativePath)
@@ -5567,6 +7018,43 @@ internal sealed class StudioRuntime
     {
         return IsRegularItemSpawnerPresetAsset(relativePath)
             && IsItemSpawnerPresetItemListSurface(relativePath, label);
+    }
+
+    private static bool IsAdvancedItemSpawnerPresetItemListSurface(string relativePath, string label)
+    {
+        if (!IsCargoDropPackagePresetAsset(relativePath) || string.IsNullOrWhiteSpace(label))
+        {
+            return false;
+        }
+
+        var normalized = label.ToLowerInvariant();
+        var normalizedKey = NormalizeAssetKey(label);
+        return normalized.Contains("предметы контейнерного набора", StringComparison.Ordinal)
+            || normalized.Contains("fixed items", StringComparison.Ordinal)
+            || normalizedKey.Contains("fixeditems", StringComparison.Ordinal);
+    }
+
+    private static bool IsAdvancedItemSpawnerPresetSubpresetListSurface(string relativePath, string label)
+    {
+        if (!IsAdvancedItemSpawnerPresetAsset(relativePath)
+            || IsCargoDropPackagePresetAsset(relativePath)
+            || string.IsNullOrWhiteSpace(label))
+        {
+            return false;
+        }
+
+        var normalized = label.ToLowerInvariant();
+        var normalizedKey = NormalizeAssetKey(label);
+        return normalized.Contains("готовые подпакеты лута", StringComparison.Ordinal)
+            || normalized.Contains("подпакеты лута", StringComparison.Ordinal)
+            || normalized.Contains("subpresets", StringComparison.Ordinal)
+            || normalizedKey.Contains("subpresets", StringComparison.Ordinal);
+    }
+
+    private static bool IsItemSpawningVariationListSurface(string relativePath, string label)
+    {
+        return relativePath.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase)
+            && label.Contains("варианты предмета", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsGameEventMarkerAsset(string relativePath)
@@ -6324,6 +7812,11 @@ internal sealed class StudioRuntime
         label = LocalizeCommonGameplayTerms(label);
 
         var path = relativePath.ToLowerInvariant();
+        if (path.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = NormalizeItemSpawningUserLabel(label);
+        }
+
         if (path.Contains("/bodyeffects/", StringComparison.OrdinalIgnoreCase) || path.Contains("movementsettings", StringComparison.OrdinalIgnoreCase))
         {
             label = label
@@ -6631,6 +8124,26 @@ internal sealed class StudioRuntime
                 .Replace("max duration", "максимальная длительность", StringComparison.OrdinalIgnoreCase);
         }
 
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase)
+            && path.Contains("radiation", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("fuel amount spawn percentage range", "топливо при появлении", StringComparison.OrdinalIgnoreCase)
+                .Replace("fuel amount появление percentage range", "топливо при появлении", StringComparison.OrdinalIgnoreCase)
+                .Replace("battery charge spawn percentage range", "заряд аккумулятора при появлении", StringComparison.OrdinalIgnoreCase)
+                .Replace("батарейка charge появление percentage range", "заряд аккумулятора при появлении", StringComparison.OrdinalIgnoreCase)
+                .Replace("spawn health percentage range", "состояние транспорта при появлении", StringComparison.OrdinalIgnoreCase)
+                .Replace("появление health percentage range", "состояние транспорта при появлении", StringComparison.OrdinalIgnoreCase)
+                .Replace("spawn chance", "шанс появления", StringComparison.OrdinalIgnoreCase)
+                .Replace("появление шанс", "шанс появления", StringComparison.OrdinalIgnoreCase)
+                .Replace("is functionality attachment", "влияет на работоспособность транспорта", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = ReplaceSemanticLabelPart(label, "vehicle presets", "доступные варианты транспорта");
+        }
+
         if (path.Contains("/characters/spawnerpresets/fish", StringComparison.OrdinalIgnoreCase))
         {
             label = ReplaceSemanticLabelPart(label, "fish spawn data", "виды рыбы");
@@ -6654,11 +8167,18 @@ internal sealed class StudioRuntime
             label = ReplaceSemanticLabelPart(label, "use item zone", "учитывать игровую зону предмета");
             label = ReplaceSemanticLabelPart(label, "use item rarity", "учитывать редкость предмета");
             label = ReplaceSemanticLabelPart(label, "use item spawn group", "учитывать группу появления предмета");
+            label = ReplaceSemanticLabelPart(label, "use item появление group", "учитывать группу появления предмета");
+            label = ReplaceSemanticLabelPart(label, "use item group", "учитывать группу появления предмета");
             label = ReplaceSemanticLabelPart(label, "probability", "шанс появления предмета");
             label = ReplaceSemanticLabelPart(label, "initial damage", "начальная повреждённость");
+            label = ReplaceSemanticLabelPart(label, "начальный damage", "начальная повреждённость");
             label = ReplaceSemanticLabelPart(label, "randomize damage", "разброс повреждённости");
             label = ReplaceSemanticLabelPart(label, "initial usage", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "начальный usage", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "начальный расход за крафт", "начальный ресурс или заряд");
             label = ReplaceSemanticLabelPart(label, "randomize usage", "разброс ресурса или заряда");
+            label = ReplaceSemanticLabelPart(label, "randomize расход за крафт", "разброс ресурса или заряда");
+            label = ReplaceSemanticLabelPart(label, "random расход за крафт", "разброс ресурса или заряда");
             label = ReplaceSemanticLabelPart(label, "initial dirtiness", "начальная грязь");
             label = ReplaceSemanticLabelPart(label, "randomize dirtiness", "разброс грязи");
             label = ReplaceSemanticLabelPart(label, "min ammo count", "минимум патронов");
@@ -6678,7 +8198,46 @@ internal sealed class StudioRuntime
             label = ReplaceSemanticLabelPart(label, "use item zone", "учитывать игровую зону предмета");
             label = ReplaceSemanticLabelPart(label, "use item rarity", "учитывать редкость предмета");
             label = ReplaceSemanticLabelPart(label, "use item spawn group", "учитывать группу появления предмета");
+            label = ReplaceSemanticLabelPart(label, "use item появление group", "учитывать группу появления предмета");
+            label = ReplaceSemanticLabelPart(label, "use item group", "учитывать группу появления предмета");
             label = ReplaceSemanticLabelPart(label, "probability", "шанс появления набора");
+            label = ReplaceSemanticLabelPart(label, "initial damage", "начальная повреждённость");
+            label = ReplaceSemanticLabelPart(label, "начальный damage", "начальная повреждённость");
+            label = ReplaceSemanticLabelPart(label, "randomize damage", "разброс повреждённости");
+            label = ReplaceSemanticLabelPart(label, "initial usage", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "начальный usage", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "начальный расход за крафт", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "randomize usage", "разброс ресурса или заряда");
+            label = ReplaceSemanticLabelPart(label, "randomize расход за крафт", "разброс ресурса или заряда");
+            label = ReplaceSemanticLabelPart(label, "random расход за крафт", "разброс ресурса или заряда");
+            label = ReplaceSemanticLabelPart(label, "initial dirtiness", "начальная грязь");
+            label = ReplaceSemanticLabelPart(label, "randomize dirtiness", "разброс грязи");
+            label = ReplaceSemanticLabelPart(label, "min ammo count", "минимум патронов");
+            label = ReplaceSemanticLabelPart(label, "max ammo count", "максимум патронов");
+            label = ReplaceSemanticLabelPart(label, "min stack amount", "минимум в стопке");
+            label = ReplaceSemanticLabelPart(label, "max stack amount", "максимум в стопке");
+        }
+
+        if (path.Contains("/items/spawnerpresets2/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = ReplaceSemanticLabelPart(label, "always spawn", "всегда выдавать");
+            label = ReplaceSemanticLabelPart(label, "always появление", "всегда выдавать");
+            label = ReplaceSemanticLabelPart(label, "probability", "шанс появления набора");
+            label = ReplaceSemanticLabelPart(label, "fixed items", "предметы контейнерного набора");
+            label = ReplaceSemanticLabelPart(label, "subpresets", "готовые подпакеты лута");
+            label = ReplaceSemanticLabelPart(label, "preset", "готовый подпакет");
+            label = ReplaceSemanticLabelPart(label, "rarity", "редкость набора");
+            label = ReplaceSemanticLabelPart(label, "quantity", "сколько предметов выдавать");
+            label = ReplaceSemanticLabelPart(label, "allow duplicates", "разрешать повторы предметов");
+            label = ReplaceSemanticLabelPart(label, "should filter items by zone", "учитывать игровую зону предмета");
+            label = ReplaceSemanticLabelPart(label, "initial damage", "начальная повреждённость");
+            label = ReplaceSemanticLabelPart(label, "начальный damage", "начальная повреждённость");
+            label = ReplaceSemanticLabelPart(label, "random damage", "разброс повреждённости");
+            label = ReplaceSemanticLabelPart(label, "initial usage", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "начальный usage", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "начальный расход за крафт", "начальный ресурс или заряд");
+            label = ReplaceSemanticLabelPart(label, "random usage", "разброс ресурса или заряда");
+            label = ReplaceSemanticLabelPart(label, "random расход за крафт", "разброс ресурса или заряда");
         }
 
         if (path.Contains("/foliage/farming/", StringComparison.OrdinalIgnoreCase))
@@ -6827,6 +8386,27 @@ internal sealed class StudioRuntime
                 .Replace(" / maximum participants", " / максимум участников", StringComparison.OrdinalIgnoreCase);
         }
 
+        if (path.Contains("/items/weapons/", StringComparison.OrdinalIgnoreCase))
+        {
+            var normalizedWeaponLabel = NormalizeAssetKey(label);
+            if (normalizedWeaponLabel.Contains("usecustommalfunctionchances", StringComparison.Ordinal))
+            {
+                label = "использовать свой шанс неисправности";
+            }
+            else if (normalizedWeaponLabel.Contains("malfunctionchancesvaluemin", StringComparison.Ordinal))
+            {
+                label = "общий шанс неисправности (минимум)";
+            }
+            else if (normalizedWeaponLabel.Contains("malfunctionchancesvaluemax", StringComparison.Ordinal))
+            {
+                label = "общий шанс неисправности (максимум)";
+            }
+            else if (normalizedWeaponLabel.Contains("malfunctionchances", StringComparison.Ordinal))
+            {
+                label = "общий шанс неисправности";
+            }
+        }
+
         if (path.Contains("/quests/", StringComparison.OrdinalIgnoreCase))
         {
             label = Regex.Replace(
@@ -6865,6 +8445,24 @@ internal sealed class StudioRuntime
         }
 
         return CapitalizeFirst(label.Trim());
+    }
+
+    private static string NormalizeItemSpawningUserLabel(string label)
+    {
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return label;
+        }
+
+        return label
+            .Replace("Разрешённые зоны / военные WW 2", "Разрешённые зоны / военные (WW2)", StringComparison.OrdinalIgnoreCase)
+            .Replace("Разрешённые зоны / берег", "Разрешённые зоны / побережье", StringComparison.OrdinalIgnoreCase)
+            .Replace("Разрешённые зоны / деревня", "Разрешённые зоны / сельская местность", StringComparison.OrdinalIgnoreCase)
+            .Replace("Откат на одного бойца / min", "Откат на одного бойца (минимум)", StringComparison.OrdinalIgnoreCase)
+            .Replace("Откат на одного бойца / max", "Откат на одного бойца (максимум)", StringComparison.OrdinalIgnoreCase)
+            .Replace("Время отката / min", "Время отката (минимум)", StringComparison.OrdinalIgnoreCase)
+            .Replace("Время отката / max", "Время отката (максимум)", StringComparison.OrdinalIgnoreCase)
+            .Replace("Группа отката / row name", "Группа отката", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryGetExportContextLabel(string relativePath, string exportName, out string contextLabel)
@@ -7006,6 +8604,31 @@ internal sealed class StudioRuntime
             ("ingredients", "ингредиенты"),
             ("allowed types", "варианты ингредиента"),
             ("allowed items", "варианты предмета"),
+            ("max occurrences", "максимум копий в мире"),
+            ("allowed locations", "разрешённые зоны"),
+            ("cooldown per squad member", "откат на одного бойца"),
+            ("cooldown group", "группа отката"),
+            ("is subject to allow traps config", "подчиняться серверному правилу ловушек"),
+            ("should override initial and random usage", "переопределять ресурс предмета"),
+            ("initial usage override", "начальный ресурс"),
+            ("random usage override", "случайная добавка к ресурсу"),
+            ("spawn rotation randomization", "случайный разброс поворота"),
+            ("is affected by lower groups", "учитывать более низкие группы"),
+            ("coastal", "побережье"),
+            ("continantal", "континент"),
+            ("mountain", "горы"),
+            ("urban", "город"),
+            ("rural", "сельская местность"),
+            ("industrial", "промзона"),
+            ("police", "полиция"),
+            ("military basic", "военные (база)"),
+            ("military medium", "военные (средний уровень)"),
+            ("military advanced", "военные (продвинутый уровень)"),
+            ("military ww2", "военные (ww2)"),
+            ("sport", "спорт"),
+            ("market", "рынок"),
+            ("gas station", "заправка"),
+            ("airfield", "аэродром"),
             ("possible ingredient", "возможный предмет"),
             ("character classes", "классы персонажей"),
             ("possible characters", "персонажи для события"),
@@ -7561,6 +9184,20 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (relativePath.Contains("/items/weapons/", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(userLabel, "Общий шанс неисправности", StringComparison.OrdinalIgnoreCase))
+        {
+            if (fieldPath.EndsWith("/p:0/p:0", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Общий шанс неисправности (минимум)";
+            }
+
+            if (fieldPath.EndsWith("/p:0/p:1", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Общий шанс неисправности (максимум)";
+            }
+        }
+
         return userLabel;
     }
 
@@ -7723,10 +9360,29 @@ internal sealed class StudioRuntime
             var allowedSpawnerTokens = new[]
             {
                 "всегда выдавать", "шанс появления набора", "учитывать игровую зону предмета",
-                "учитывать редкость предмета", "учитывать группу появления предмета"
+                "учитывать редкость предмета", "учитывать группу появления предмета",
+                "начальная повреждённость", "разброс повреждённости",
+                "начальный ресурс или заряд", "разброс ресурса или заряда",
+                "начальная грязь", "разброс грязи",
+                "минимум патронов", "максимум патронов",
+                "минимум в стопке", "максимум в стопке"
             };
 
             return allowedSpawnerTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
+        if (IsAdvancedItemSpawnerPresetAsset(relativePath))
+        {
+            var allowedAdvancedSpawnerTokens = new[]
+            {
+                "всегда выдавать", "шанс появления набора",
+                "сколько предметов выдавать", "разрешать повторы предметов", "учитывать игровую зону предмета",
+                "готовый подпакет", "редкость набора",
+                "начальная повреждённость", "разброс повреждённости",
+                "начальный ресурс или заряд", "разброс ресурса или заряда"
+            };
+
+            return allowedAdvancedSpawnerTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
         if (IsRegularItemSpawnerPresetAsset(relativePath))
@@ -7746,6 +9402,22 @@ internal sealed class StudioRuntime
             return allowedSpawnerTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
+        if (path.Contains("/data/tables/items/spawning/", StringComparison.Ordinal))
+        {
+            var allowedItemSpawningTokens = new[]
+            {
+                "максимум копий в мире", "разрешённые зоны", "откат на одного бойца", "группа отката",
+                "подчиняться серверному правилу ловушек", "варианты предмета",
+                "переопределять ресурс предмета", "начальный ресурс", "случайная добавка к ресурсу",
+                "случайный разброс поворота", "учитывать более низкие группы", "время отката",
+                "побережье", "континент", "горы", "город", "сельская местность", "промзона",
+                "полиция", "военные (база)", "военные (средний уровень)", "военные (продвинутый уровень)",
+                "военные (ww2)", "спорт", "рынок", "заправка", "аэродром"
+            };
+
+            return allowedItemSpawningTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
         if (IsGameEventMarkerAsset(relativePath))
         {
             var allowedGameEventTokens = new[]
@@ -7762,14 +9434,46 @@ internal sealed class StudioRuntime
             return allowedGameEventTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
+        if (path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (path.Contains("/items/weapons/weapon_clips/", StringComparison.Ordinal))
+        {
+            var allowedWeaponClipTokens = new[]
+            {
+                "патронов в магазине", "патронов для события", "патрон по умолчанию",
+                "вес", "ширина в инвентаре", "высота в инвентаре"
+            };
+
+            return allowedWeaponClipTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
+        if (path.Contains("/items/weapons/ranged_weapons/", StringComparison.Ordinal))
+        {
+            var allowedRangedWeaponTokens = new[]
+            {
+                "урон за выстрел", "патронов в магазине", "патронов для события", "патрон по умолчанию",
+                "сила отдачи", "сила отдачи камеры", "максимальная отдача", "скорость возврата после отдачи",
+                "максимальная дальность", "скорострельность", "вес", "ширина в инвентаре", "высота в инвентаре",
+                "общий шанс неисправности", "использовать свой шанс неисправности",
+                "уровень шума", "урон со временем"
+            };
+
+            return allowedRangedWeaponTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
         if (path.Contains("/items/weapons/", StringComparison.Ordinal))
         {
             var allowedWeaponTokens = new[]
             {
                 "урон за выстрел", "патронов в магазине", "патронов для события", "патрон по умолчанию",
-                "сила отдачи", "максимальная отдача", "скорость возврата после отдачи",
-                "максимальная дальность", "скорострельность", "вес", "ширина в инвентаре", "высота в инвентаре",
-                "уровень шума", "урон со временем"
+                "вес", "ширина в инвентаре", "высота в инвентаре",
+                "общий шанс неисправности", "использовать свой шанс неисправности"
             };
 
             return allowedWeaponTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
@@ -7956,9 +9660,25 @@ internal sealed class StudioRuntime
             return IsExamineDataPresetItemListSurface(relativePath, userLabel);
         }
 
+        if (IsCargoDropPackagePresetAsset(relativePath))
+        {
+            return IsAdvancedItemSpawnerPresetItemListSurface(relativePath, userLabel);
+        }
+
+        if (IsAdvancedItemSpawnerPresetAsset(relativePath))
+        {
+            return IsAdvancedItemSpawnerPresetItemListSurface(relativePath, userLabel)
+                || IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, userLabel);
+        }
+
         if (IsRegularItemSpawnerPresetAsset(relativePath))
         {
             return IsRegularItemSpawnerPresetItemListSurface(relativePath, userLabel);
+        }
+
+        if (path.Contains("/data/tables/items/spawning/", StringComparison.Ordinal))
+        {
+            return IsItemSpawningVariationListSurface(relativePath, userLabel);
         }
 
         if (path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal))
@@ -7967,9 +9687,19 @@ internal sealed class StudioRuntime
                 || label.Contains("крепления", StringComparison.Ordinal);
         }
 
+        if (IsStandaloneGameplayCurvePointsSurface(relativePath, userLabel))
+        {
+            return true;
+        }
+
         if (IsGameEventMarkerAsset(relativePath))
         {
             return IsGameEventLoadoutListLabel(userLabel);
+        }
+
+        if (IsVehicleSpawnGroupAsset(relativePath))
+        {
+            return IsVehicleSpawnPresetListSurface(relativePath, userLabel);
         }
 
         if (path.Contains("/items/weapons/", StringComparison.Ordinal))
@@ -8055,6 +9785,27 @@ internal sealed class StudioRuntime
         return false;
     }
 
+    private static bool IsStandaloneGameplayCurvePointsSurface(string relativePath, string userLabel)
+    {
+        if (!userLabel.Contains("точки кривой", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var path = relativePath.ToLowerInvariant();
+        return path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal)
+            || path.Contains("/cooking/data/curves/", StringComparison.Ordinal)
+            || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
+            || path.Contains("/data/batteryeffectscurves/", StringComparison.Ordinal)
+            || path.Contains("/curves/falling/", StringComparison.Ordinal)
+            || path.Contains("/curves/landing/", StringComparison.Ordinal)
+            || path.Contains("/minigames/lockpicking/", StringComparison.Ordinal)
+            || path.Contains("/basebuilding/energydamagecurves/", StringComparison.Ordinal)
+            || path.Contains("/characters/mechanoids/sentry/curves/", StringComparison.Ordinal)
+            || path.Contains("/characters/zombies2/data/observingcurve", StringComparison.Ordinal)
+            || path.Contains("/vehicles/", StringComparison.Ordinal);
+    }
+
     private static bool IsQuestRewardVariantsLabel(string relativePath, string userLabel)
     {
         if (!relativePath.Contains("/quests/", StringComparison.OrdinalIgnoreCase))
@@ -8105,6 +9856,12 @@ internal sealed class StudioRuntime
             return "Правила события";
         }
 
+        if (IsVehicleSpawnGroupAsset(relativePath)
+            && IsVehicleSpawnPresetListSurface(relativePath, userLabel))
+        {
+            return "Группа спавна транспорта";
+        }
+
         if (label.Contains("когда начинается эта ступень", StringComparison.Ordinal)
             || label.Contains("насколько сильно действует эта ступень", StringComparison.Ordinal)
             || label.Contains("положение точки кривой", StringComparison.Ordinal)
@@ -8123,6 +9880,42 @@ internal sealed class StudioRuntime
             if (path.Contains("/minigames/lockpicking/", StringComparison.Ordinal))
             {
                 return "Взлом";
+            }
+
+            if (path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal))
+            {
+                return "Отказы оружия";
+            }
+
+            if (path.Contains("/data/batteryeffectscurves/", StringComparison.Ordinal))
+            {
+                return "Батареи и фонари";
+            }
+
+            if (path.Contains("/curves/falling/", StringComparison.Ordinal)
+                || path.Contains("/curves/landing/", StringComparison.Ordinal))
+            {
+                return "Падение и приземление";
+            }
+
+            if (path.Contains("/basebuilding/energydamagecurves/", StringComparison.Ordinal))
+            {
+                return "База и энергия";
+            }
+
+            if (path.Contains("/characters/mechanoids/sentry/curves/", StringComparison.Ordinal))
+            {
+                return "Турели и механоиды";
+            }
+
+            if (path.Contains("/characters/zombies2/data/observingcurve", StringComparison.Ordinal))
+            {
+                return "Восприятие зомби";
+            }
+
+            if (path.Contains("/vehicles/", StringComparison.Ordinal))
+            {
+                return "Транспорт";
             }
 
             if (path.Contains("/skills/", StringComparison.Ordinal))
@@ -8245,6 +10038,33 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (path.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("переопределять ресурс предмета", StringComparison.Ordinal)
+                || label.Contains("начальный ресурс", StringComparison.Ordinal)
+                || label.Contains("случайная добавка к ресурсу", StringComparison.Ordinal))
+            {
+                return "Состояние появления";
+            }
+
+            if (label.Contains("разрешённые зоны", StringComparison.Ordinal)
+                || label.Contains("побережье", StringComparison.Ordinal)
+                || label.Contains("континент", StringComparison.Ordinal)
+                || label.Contains("горы", StringComparison.Ordinal)
+                || label.Contains("город", StringComparison.Ordinal)
+                || label.Contains("сельская местность", StringComparison.Ordinal)
+                || label.Contains("промзона", StringComparison.Ordinal)
+                || label.Contains("полиция", StringComparison.Ordinal)
+                || label.Contains("военные", StringComparison.Ordinal)
+                || label.Contains("спорт", StringComparison.Ordinal)
+                || label.Contains("рынок", StringComparison.Ordinal)
+                || label.Contains("заправка", StringComparison.Ordinal)
+                || label.Contains("аэродром", StringComparison.Ordinal))
+            {
+                return "Зоны появления";
+            }
+        }
+
         if (path.Contains("/items/spawnerpresets/examine_data_presets/", StringComparison.OrdinalIgnoreCase))
         {
             if (IsExamineDataPresetItemListSurface(relativePath, userLabel))
@@ -8252,7 +10072,51 @@ internal sealed class StudioRuntime
                 return "Состав набора";
             }
 
+            if (label.Contains("патрон", StringComparison.Ordinal)
+                || label.Contains("стопке", StringComparison.Ordinal))
+            {
+                return "Количество выдачи";
+            }
+
+            if (label.Contains("поврежд", StringComparison.Ordinal)
+                || label.Contains("ресурс", StringComparison.Ordinal)
+                || label.Contains("заряд", StringComparison.Ordinal)
+                || label.Contains("гряз", StringComparison.Ordinal))
+            {
+                return "Состояние предметов";
+            }
+
             return "Правила появления";
+        }
+
+        if (IsAdvancedItemSpawnerPresetAsset(relativePath))
+        {
+            if (IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, userLabel)
+                || label.Contains("готовый подпакет", StringComparison.Ordinal)
+                || label.Contains("редкость набора", StringComparison.Ordinal))
+            {
+                return "Подпакеты лута";
+            }
+
+            if (IsCargoDropPackagePresetAsset(relativePath)
+                && IsAdvancedItemSpawnerPresetItemListSurface(relativePath, userLabel))
+            {
+                return "Состав набора";
+            }
+
+            if (label.Contains("сколько предметов выдавать", StringComparison.Ordinal))
+            {
+                return "Количество выдачи";
+            }
+
+            if (label.Contains("поврежд", StringComparison.Ordinal)
+                || label.Contains("ресурс", StringComparison.Ordinal)
+                || label.Contains("заряд", StringComparison.Ordinal))
+            {
+                return "Состояние предметов";
+            }
+
+            return "Правила набора";
         }
 
         if (IsRegularItemSpawnerPresetAsset(relativePath))
@@ -8272,6 +10136,45 @@ internal sealed class StudioRuntime
                 || label.Contains("ресурс", StringComparison.Ordinal)
                 || label.Contains("заряд", StringComparison.Ordinal)
                 || label.Contains("гряз", StringComparison.Ordinal))
+            {
+                return "Состояние предмета";
+            }
+
+            return "Правила появления";
+        }
+
+        if (path.Contains("/data/tables/items/spawning/", StringComparison.Ordinal))
+        {
+            if (label.Contains("варианты предмета", StringComparison.Ordinal))
+            {
+                return "Варианты предмета";
+            }
+
+            if (label.Contains("разрешённые зоны", StringComparison.Ordinal)
+                || label.Contains("побережье", StringComparison.Ordinal)
+                || label.Contains("континент", StringComparison.Ordinal)
+                || label.Contains("горы", StringComparison.Ordinal)
+                || label.Contains("город", StringComparison.Ordinal)
+                || label.Contains("сельская местность", StringComparison.Ordinal)
+                || label.Contains("промзона", StringComparison.Ordinal)
+                || label.Contains("полиция", StringComparison.Ordinal)
+                || label.Contains("военные", StringComparison.Ordinal)
+                || label.Contains("спорт", StringComparison.Ordinal)
+                || label.Contains("рынок", StringComparison.Ordinal)
+                || label.Contains("заправка", StringComparison.Ordinal)
+                || label.Contains("аэродром", StringComparison.Ordinal))
+            {
+                return "Зоны появления";
+            }
+
+            if (label.Contains("откат", StringComparison.Ordinal)
+                || label.Contains("группа отката", StringComparison.Ordinal))
+            {
+                return "Откат появления";
+            }
+
+            if (label.Contains("ресурс", StringComparison.Ordinal)
+                || label.Contains("ловуш", StringComparison.Ordinal))
             {
                 return "Состояние предмета";
             }
@@ -8571,6 +10474,17 @@ internal sealed class StudioRuntime
             return "Тайминги";
         }
 
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && path.Contains("radiation", StringComparison.Ordinal)
+            && (label.Contains("состояние транспорта при появлении", StringComparison.Ordinal)
+                || label.Contains("топливо при появлении", StringComparison.Ordinal)
+                || label.Contains("заряд аккумулятора при появлении", StringComparison.Ordinal)
+                || label.Contains("шанс появления", StringComparison.Ordinal)
+                || label.Contains("работоспособность транспорта", StringComparison.Ordinal)))
+        {
+            return "Радиационный транспорт";
+        }
+
         if (label.Contains("опасное для жизни", StringComparison.Ordinal)
             || label.Contains("диапазон тяжести", StringComparison.Ordinal)
             || label.Contains("нижняя граница", StringComparison.Ordinal)
@@ -8595,6 +10509,12 @@ internal sealed class StudioRuntime
             || label.Contains("тошнот", StringComparison.Ordinal))
         {
             return "Опьянение";
+        }
+
+        if (path.Contains("/items/weapons/", StringComparison.Ordinal)
+            && label.Contains("неисправност", StringComparison.Ordinal))
+        {
+            return "Неисправности";
         }
 
         if (path.Contains("radiation", StringComparison.OrdinalIgnoreCase) || label.Contains("радиац", StringComparison.Ordinal))
@@ -8781,6 +10701,190 @@ internal sealed class StudioRuntime
             if (label.Contains("учитывать группу появления предмета", StringComparison.Ordinal))
             {
                 return "Если включено, игра дополнительно учитывает группу появления, к которой относится предмет.";
+            }
+
+            if (label.Contains("начальная повреждённость", StringComparison.Ordinal))
+            {
+                return "С каким базовым износом или повреждением будут появляться предметы из этого набора.";
+            }
+
+            if (label.Contains("разброс повреждённости", StringComparison.Ordinal))
+            {
+                return "Насколько сильно игра может случайно менять износ предметов вокруг базового значения при выдаче этого набора.";
+            }
+
+            if (label.Contains("начальный ресурс или заряд", StringComparison.Ordinal))
+            {
+                return "С каким количеством ресурса, топлива, заряда или оставшихся использований будут появляться предметы из этого набора.";
+            }
+
+            if (label.Contains("разброс ресурса или заряда", StringComparison.Ordinal))
+            {
+                return "Насколько сильно игра может случайно менять стартовый ресурс или заряд предметов внутри этого набора.";
+            }
+
+            if (label.Contains("начальная грязь", StringComparison.Ordinal))
+            {
+                return "Насколько чистыми или грязными будут появляться предметы из этого набора.";
+            }
+
+            if (label.Contains("разброс грязи", StringComparison.Ordinal))
+            {
+                return "Насколько сильно игра может случайно менять уровень грязи у предметов внутри этого набора.";
+            }
+
+            if (label.Contains("минимум патронов", StringComparison.Ordinal) || label.Contains("максимум патронов", StringComparison.Ordinal))
+            {
+                return "Минимальное и максимальное количество патронов, которое могут получить оружие или магазины из этого набора.";
+            }
+
+            if (label.Contains("минимум в стопке", StringComparison.Ordinal) || label.Contains("максимум в стопке", StringComparison.Ordinal))
+            {
+                return "Минимальный и максимальный размер стопки для предметов, которые могут складываться при выдаче из этого набора.";
+            }
+        }
+
+        if (IsAdvancedItemSpawnerPresetAsset(relativePath))
+        {
+            if (label.Contains("готовый подпакет", StringComparison.Ordinal))
+            {
+                return "Какой готовый контейнерный подпакет может выбирать этот контейнер внутри своего пресета.";
+            }
+
+            if (label.Contains("редкость набора", StringComparison.Ordinal))
+            {
+                return "Насколько редким должен считаться этот подпакет при выборе внутри контейнера.";
+            }
+
+            if (label.Contains("всегда выдавать", StringComparison.Ordinal))
+            {
+                return "Если включено, этот контейнерный пресет не будет пропускаться после выбора и обязательно выдаст свой результат.";
+            }
+
+            if (label.Contains("шанс появления набора", StringComparison.Ordinal))
+            {
+                return "Чем выше это число, тем чаще контейнер, шкафчик или другой объект поиска будет выбирать именно этот готовый пресет.";
+            }
+
+            if (label.Contains("сколько предметов выдавать", StringComparison.Ordinal))
+            {
+                return IsCargoDropPackagePresetAsset(relativePath)
+                    ? "Минимум и максимум предметов, которые контейнер возьмёт из этого готового набора при одном выборе."
+                    : "Минимум и максимум предметов, которые этот контейнерный пресет попытается выдать за одно срабатывание.";
+            }
+
+            if (label.Contains("разрешать повторы предметов", StringComparison.Ordinal))
+            {
+                return "Если включено, контейнер может выбрать один и тот же предмет из набора несколько раз за одну выдачу.";
+            }
+
+            if (label.Contains("учитывать игровую зону предмета", StringComparison.Ordinal))
+            {
+                return IsCargoDropPackagePresetAsset(relativePath)
+                    ? "Если включено, игра дополнительно проверяет, подходит ли зона грузового дропа для предметов внутри этого набора."
+                    : "Если включено, игра дополнительно проверяет, подходит ли зона поиска или спавна для предметов этого контейнерного пресета.";
+            }
+
+            if (label.Contains("начальная повреждённость", StringComparison.Ordinal))
+            {
+                return "С каким базовым износом или повреждением будут появляться предметы из этого контейнерного пресета.";
+            }
+
+            if (label.Contains("разброс повреждённости", StringComparison.Ordinal))
+            {
+                return "Насколько сильно игра может случайно менять износ предметов вокруг базового значения при выдаче из этого пресета.";
+            }
+
+            if (label.Contains("начальный ресурс или заряд", StringComparison.Ordinal))
+            {
+                return "С каким количеством ресурса, топлива, заряда или оставшихся использований будут появляться предметы из этого контейнерного пресета.";
+            }
+
+            if (label.Contains("разброс ресурса или заряда", StringComparison.Ordinal))
+            {
+                return "Насколько сильно игра может случайно менять стартовый ресурс или заряд предметов внутри этого контейнерного пресета.";
+            }
+        }
+
+        if (relativePath.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("максимум копий в мире", StringComparison.Ordinal))
+            {
+                return "Сколько экземпляров этого предмета игра старается держать одновременно во всём мире через это правило появления.";
+            }
+
+            if (label.Contains("разрешённые зоны", StringComparison.Ordinal))
+            {
+                return "В каких типах местности или лут-зон это правило вообще может сработать.";
+            }
+
+            if (label.Contains("побережье", StringComparison.Ordinal)
+                || label.Contains("континент", StringComparison.Ordinal)
+                || label.Contains("горы", StringComparison.Ordinal)
+                || label.Contains("город", StringComparison.Ordinal)
+                || label.Contains("сельская местность", StringComparison.Ordinal)
+                || label.Contains("промзона", StringComparison.Ordinal)
+                || label.Contains("полиция", StringComparison.Ordinal)
+                || label.Contains("военные (база)", StringComparison.Ordinal)
+                || label.Contains("военные (средний уровень)", StringComparison.Ordinal)
+                || label.Contains("военные (продвинутый уровень)", StringComparison.Ordinal)
+                || label.Contains("военные (ww2)", StringComparison.Ordinal)
+                || label.Contains("спорт", StringComparison.Ordinal)
+                || label.Contains("рынок", StringComparison.Ordinal)
+                || label.Contains("заправка", StringComparison.Ordinal)
+                || label.Contains("аэродром", StringComparison.Ordinal))
+            {
+                return "Если включено, правило может использоваться в этой зоне поиска и появления предметов.";
+            }
+
+            if (label.Contains("откат на одного бойца", StringComparison.Ordinal))
+            {
+                return "Сколько времени добавлять к откату этого предмета за каждого игрока в отряде или команде, если система использует персональный масштаб появления.";
+            }
+
+            if (label.Contains("группа отката", StringComparison.Ordinal))
+            {
+                return "Общая группа отката. Предметы в одной группе делят между собой паузу повторного появления.";
+            }
+
+            if (label.Contains("подчиняться серверному правилу ловушек", StringComparison.Ordinal))
+            {
+                return "Если включено, это правило будет учитывать серверную настройку, которая может отдельно разрешать или запрещать появление ловушек.";
+            }
+
+            if (label.Contains("варианты предмета", StringComparison.Ordinal))
+            {
+                return "Какие похожие игровые предметы система может выбрать вместо основного предмета в этом правиле появления.";
+            }
+
+            if (label.Contains("переопределять ресурс предмета", StringComparison.Ordinal))
+            {
+                return "Если включено, игра использует указанные ниже значения ресурса вместо обычных настроек самого предмета.";
+            }
+
+            if (label.Contains("начальный ресурс", StringComparison.Ordinal))
+            {
+                return "Базовый процент ресурса, топлива, заряда или прочности, с которым предмет будет появляться по этому правилу.";
+            }
+
+            if (label.Contains("случайная добавка к ресурсу", StringComparison.Ordinal))
+            {
+                return "Насколько сильно игра может случайно увеличить или уменьшить стартовый ресурс вокруг базового значения.";
+            }
+
+            if (label.Contains("случайный разброс поворота", StringComparison.Ordinal))
+            {
+                return "Насколько сильно игра может случайно повернуть предмет при появлении, чтобы одинаковые объекты не лежали всегда под одним углом.";
+            }
+
+            if (label.Contains("время отката", StringComparison.Ordinal))
+            {
+                return "Минимальная и максимальная пауза перед тем, как группа снова разрешит появление предметов.";
+            }
+
+            if (label.Contains("учитывать более низкие группы", StringComparison.Ordinal))
+            {
+                return "Если включено, эта группа отката будет дополнительно смотреть на более низкие ступени той же ветки и не позволит спавниться слишком часто.";
             }
         }
 
@@ -9516,9 +11620,14 @@ internal sealed class StudioRuntime
             return "Список или параметр анимаций, которые может использовать система.";
         }
 
-        if (label.Contains("опасное для жизни", StringComparison.Ordinal)
-            || label.Contains("нижняя граница", StringComparison.Ordinal)
-            || label.Contains("верхняя граница", StringComparison.Ordinal))
+        var isRadiationVehiclePreset =
+            relativePath.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase)
+            && relativePath.Contains("radiation", StringComparison.OrdinalIgnoreCase);
+
+        if (!isRadiationVehiclePreset
+            && (label.Contains("опасное для жизни", StringComparison.Ordinal)
+                || label.Contains("нижняя граница", StringComparison.Ordinal)
+                || label.Contains("верхняя граница", StringComparison.Ordinal)))
         {
             return "Порог, при котором эффект переходит в более опасную стадию.";
         }
@@ -9531,6 +11640,57 @@ internal sealed class StudioRuntime
         if (label.Contains("длитель", StringComparison.Ordinal) || label.Contains("время", StringComparison.Ordinal))
         {
             return "Время действия эффекта или процесса.";
+        }
+
+        if (relativePath.Contains("/items/weapons/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("использовать свой шанс неисправности", StringComparison.Ordinal))
+            {
+                return "Если включено, оружие использует свой собственный диапазон общей неисправности из этого ассета, а не базовое значение родителя.";
+            }
+
+            if (label.Contains("общий шанс неисправности (минимум)", StringComparison.Ordinal))
+            {
+                return "Нижняя граница базового диапазона общей неисправности оружия. Конкретные типы осечки и поломки дальше уточняются отдельной кривой отказов и внутренними правилами оружия.";
+            }
+
+            if (label.Contains("общий шанс неисправности (максимум)", StringComparison.Ordinal))
+            {
+                return "Верхняя граница базового диапазона общей неисправности оружия. Конкретные типы осечки и поломки дальше уточняются отдельной кривой отказов и внутренними правилами оружия.";
+            }
+
+            if (label.Contains("общий шанс неисправности", StringComparison.Ordinal))
+            {
+                return "Базовый диапазон общей неисправности этого оружия. Он задаёт общий риск отказа, а конкретные типы осечки и поломки дальше уточняются отдельной кривой отказов и внутренними правилами оружия.";
+            }
+        }
+
+        if (isRadiationVehiclePreset)
+        {
+            if (label.Contains("шанс появления", StringComparison.Ordinal))
+            {
+                return "Насколько часто этот вариант радиационного транспорта может быть выбран системой появления.";
+            }
+
+            if (label.Contains("состояние транспорта при появлении", StringComparison.Ordinal))
+            {
+                return "Диапазон состояния транспорта при появлении. Ниже минимума и выше максимума система не выдаёт.";
+            }
+
+            if (label.Contains("топливо при появлении", StringComparison.Ordinal))
+            {
+                return "Диапазон стартового топлива для этой машины при появлении в радиационной зоне.";
+            }
+
+            if (label.Contains("заряд аккумулятора при появлении", StringComparison.Ordinal))
+            {
+                return "Диапазон стартового заряда аккумулятора для этой машины при появлении в радиационной зоне.";
+            }
+
+            if (label.Contains("влияет на работоспособность транспорта", StringComparison.Ordinal))
+            {
+                return "Если включено, отсутствие или поломка этого узла влияет на возможность нормально использовать транспорт.";
+            }
         }
 
         if (label.Contains("шанс появления", StringComparison.Ordinal)
@@ -9771,6 +11931,12 @@ internal sealed class StudioRuntime
             return PlantGrowthStageOptions;
         }
 
+        if (currentValue.StartsWith("EItemRarity::", StringComparison.OrdinalIgnoreCase)
+            || userLabel.Contains("редкость набора", StringComparison.OrdinalIgnoreCase))
+        {
+            return ItemRarityOptions;
+        }
+
         return null;
     }
 
@@ -9867,6 +12033,14 @@ internal sealed class StudioRuntime
             return (
                 "item-asset",
                 "Найди пакет семян, который должен использоваться для посадки этой культуры.");
+        }
+
+        if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
+            && label.Contains("готовый подпакет", StringComparison.Ordinal))
+        {
+            return (
+                "advanced-item-spawner-subpreset",
+                "Найди совместимый контейнерный подпакет, который этот контейнер сможет выбирать.");
         }
 
         if (valueType == "object"
@@ -9976,7 +12150,62 @@ internal sealed class StudioRuntime
             return ("0", "10");
         }
 
+        if (relativePath.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("максимум копий в мире", StringComparison.Ordinal))
+            {
+                return ("0", "1000");
+            }
+
+            if (label.Contains("откат на одного бойца", StringComparison.Ordinal)
+                || label.Contains("время отката", StringComparison.Ordinal))
+            {
+                return ("0", "86400");
+            }
+
+            if (label.Contains("начальный ресурс", StringComparison.Ordinal)
+                || label.Contains("случайная добавка к ресурсу", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+
+            if (label.Contains("случайный разброс поворота", StringComparison.Ordinal))
+            {
+                return ("0", "360");
+            }
+        }
+
         if ((IsExamineDataPresetAsset(relativePath) || IsRegularItemSpawnerPresetAsset(relativePath))
+            && (label.Contains("шанс появления", StringComparison.Ordinal)
+                || label.Contains("probability", StringComparison.Ordinal)))
+        {
+            return ("0", "100");
+        }
+
+        if (IsExamineDataPresetAsset(relativePath)
+            && (label.Contains("поврежд", StringComparison.Ordinal)
+                || label.Contains("ресурс", StringComparison.Ordinal)
+                || label.Contains("заряд", StringComparison.Ordinal)
+                || label.Contains("гряз", StringComparison.Ordinal)))
+        {
+            return ("0", "100");
+        }
+
+        if (IsAdvancedItemSpawnerPresetAsset(relativePath)
+            && label.Contains("сколько предметов выдавать", StringComparison.Ordinal))
+        {
+            return ("0", "20");
+        }
+
+        if (IsAdvancedItemSpawnerPresetAsset(relativePath)
+            && (label.Contains("поврежд", StringComparison.Ordinal)
+                || label.Contains("ресурс", StringComparison.Ordinal)
+                || label.Contains("заряд", StringComparison.Ordinal)))
+        {
+            return ("0", "100");
+        }
+
+        if (IsAdvancedItemSpawnerPresetAsset(relativePath)
             && (label.Contains("шанс появления", StringComparison.Ordinal)
                 || label.Contains("probability", StringComparison.Ordinal)))
         {
@@ -9988,6 +12217,23 @@ internal sealed class StudioRuntime
                 || label.Contains("ресурс", StringComparison.Ordinal)
                 || label.Contains("заряд", StringComparison.Ordinal)
                 || label.Contains("гряз", StringComparison.Ordinal)))
+        {
+            return ("0", "100");
+        }
+
+        if (relativePath.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase)
+            && relativePath.Contains("radiation", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("шанс появления", StringComparison.Ordinal)
+                || label.Contains("состояние транспорта при появлении", StringComparison.Ordinal)
+                || label.Contains("топливо при появлении", StringComparison.Ordinal)
+                || label.Contains("заряд аккумулятора при появлении", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+        }
+
+        if (label.Contains("общий шанс неисправности", StringComparison.Ordinal))
         {
             return ("0", "100");
         }
@@ -10140,6 +12386,22 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (path.Contains("/data/tables/items/spawning/", StringComparison.Ordinal)
+            && label.Contains("варианты предмета", StringComparison.Ordinal))
+        {
+            return "Какие похожие варианты может выбрать система вместо основного предмета в этом правиле появления.";
+        }
+
+        if (IsCargoDropPackagePresetAsset(relativePath) && IsAdvancedItemSpawnerPresetItemListSurface(relativePath, userLabel))
+        {
+            return "Какие конкретные предметы входят в этот готовый контейнерный набор грузового дропа. Сюда можно добавлять или убирать вещи по одной.";
+        }
+
+        if (IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, userLabel))
+        {
+            return "Какие готовые подпакеты лута может выбирать этот контейнер. Новый элемент добавляется через безопасное копирование совместимого шаблона с заменой самой ссылки на подпакет.";
+        }
+
         if (label.Contains("точки кривой", StringComparison.Ordinal))
         {
             if (path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal))
@@ -10157,6 +12419,37 @@ internal sealed class StudioRuntime
                 return "Ключевые точки кривой взлома. Добавляй новую точку, чтобы менять затухание, приближение или другой эффект мини-игры по этапам.";
             }
 
+            if (path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой отказов оружия. Они задают, как меняется шанс осечки или поломки при износе и нагрузке.";
+            }
+
+            if (path.Contains("/data/batteryeffectscurves/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой батареи и света. Они задают, как меняется сила света, глюки и другие эффекты по мере разряда.";
+            }
+
+            if (path.Contains("/curves/falling/", StringComparison.Ordinal)
+                || path.Contains("/curves/landing/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой падения и приземления. Они задают, как меняется урон и реакция при росте скорости и силы удара.";
+            }
+
+            if (path.Contains("/basebuilding/energydamagecurves/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой энергоурона базы. Они задают, как защитные и энергетические системы наносят урон при разных значениях силы.";
+            }
+
+            if (path.Contains("/characters/mechanoids/sentry/curves/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой турели. Они задают, как меняются её реакции, прицеливание и другие параметры поведения.";
+            }
+
+            if (path.Contains("/characters/zombies2/data/observingcurve", StringComparison.Ordinal))
+            {
+                return "Ключевые точки кривой восприятия зомби. Они задают, как быстро зомби замечает цель при разных условиях.";
+            }
+
             if (path.Contains("/skills/", StringComparison.Ordinal))
             {
                 return "Ключевые точки кривой навыка. Добавляй новую ступень, чтобы задать, как бонус меняется от низкого опыта к высокому.";
@@ -10166,6 +12459,11 @@ internal sealed class StudioRuntime
             {
                 return "Ключевые точки кривой транспорта. Они задают, как меняется урон или эффект при росте скорости и силы столкновения.";
             }
+        }
+
+        if (IsVehicleSpawnPresetListSurface(relativePath, userLabel))
+        {
+            return "Какие варианты транспорта может выбрать эта группа спавна. Можно добавлять совместимые пресеты машин и убирать ненужные.";
         }
 
         if (IsCargoDropMajorSpawnerOptionsSurface(relativePath, userLabel))
@@ -10461,6 +12759,16 @@ internal sealed class StudioRuntime
                 "Найди совместимый контейнерный набор грузового дропа, который контейнер должен уметь выбирать.");
         }
 
+        if (IsVehicleSpawnPresetListSurface(relativePath, userLabel)
+            && (values.Length == 0
+                || values.All(value => value is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)))
+        {
+            return (
+                true,
+                "vehicle-spawn-preset",
+                "Найди пресет транспорта, который группа сможет выбрать при спавне, и нажми добавить.");
+        }
+
         if (relativePath.Contains("/bodyeffects/symptoms/", StringComparison.OrdinalIgnoreCase)
             && label.Contains("связанные вещества эффекта", StringComparison.Ordinal)
             && (values.Length == 0 || values.All(value => value is ObjectPropertyData)))
@@ -10527,6 +12835,26 @@ internal sealed class StudioRuntime
                 "Найди предмет, который этот контейнер, тайник или грузовой дроп должен уметь выдавать.");
         }
 
+        if (IsCargoDropPackagePresetAsset(relativePath)
+            && IsAdvancedItemSpawnerPresetItemListSurface(relativePath, userLabel)
+            && (values.Length == 0
+                || values.All(value => value is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)))
+        {
+            return (
+                true,
+                "item-asset",
+                "Найди предмет, который должен входить в этот контейнерный набор грузового дропа.");
+        }
+
+        if (IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, userLabel)
+            && (values.Length == 0 || values.All(value => value is StructPropertyData)))
+        {
+            return (
+                true,
+                "advanced-item-spawner-subpreset",
+                "Найди готовый контейнерный подпакет, который должен входить в этот пресет.");
+        }
+
         if (IsRegularItemSpawnerPresetAsset(relativePath)
             && IsRegularItemSpawnerPresetItemListSurface(relativePath, userLabel)
             && (values.Length == 0
@@ -10536,6 +12864,17 @@ internal sealed class StudioRuntime
                 true,
                 "item-asset",
                 "Найди предмет, который может появиться по этому пресету.");
+        }
+
+        if (relativePath.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase)
+            && IsItemSpawningVariationListSurface(relativePath, userLabel)
+            && (values.Length == 0
+                || values.All(value => value is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)))
+        {
+            return (
+                true,
+                "item-asset",
+                "Найди предмет, который должен входить в варианты появления для этого правила спавна.");
         }
 
         if (IsGameEventMarkerAsset(relativePath) && IsGameEventLoadoutListLabel(userLabel))
@@ -10744,6 +13083,13 @@ internal sealed class StudioRuntime
 
         if (categoryId.Equals("crafting-recipes", StringComparison.OrdinalIgnoreCase))
         {
+            if (IsCraftingUiDataRegistryAsset(relativePath))
+            {
+                return new ModAssetDescriptor(
+                    "Крафт: общий пул рецептов",
+                    "Главный список категорий и рецептов, которые видит игрок в меню крафта. Здесь можно добавлять или убирать рецепты по категориям.");
+            }
+
             var baseName = stem.StartsWith("CR_", StringComparison.OrdinalIgnoreCase) ? stem[3..] : stem;
             return new ModAssetDescriptor(
                 $"Рецепт: {LocalizeAssetStem(baseName)}",
@@ -10795,6 +13141,11 @@ internal sealed class StudioRuntime
 
         if (categoryId.Equals("radiation", StringComparison.OrdinalIgnoreCase))
         {
+            if (TryDescribeRadiationAsset(relativePath, out var radiationDescriptor))
+            {
+                return radiationDescriptor;
+            }
+
             return new ModAssetDescriptor(
                 $"Радиация: {cleanStem}",
                 "Интенсивность, нарастание и связанные параметры радиации.");
@@ -10864,6 +13215,11 @@ internal sealed class StudioRuntime
 
         if (categoryId.Equals("weapons-items", StringComparison.OrdinalIgnoreCase))
         {
+            if (TryDescribeAdvancedItemSpawnerPresetAsset(relativePath, out var advancedSpawnerDescriptor))
+            {
+                return advancedSpawnerDescriptor;
+            }
+
             if (TryDescribeRegularItemSpawnerPresetAsset(relativePath, out var regularSpawnerDescriptor))
             {
                 return regularSpawnerDescriptor;
@@ -10879,6 +13235,15 @@ internal sealed class StudioRuntime
                 return new ModAssetDescriptor(
                     $"Набор события: {cleanStem}",
                     "Главный предмет, дополнительные вещи и крепления для выбора в игровом событии.");
+            }
+
+            if (lowerStem.StartsWith("weaponmalfunctionprobability_", StringComparison.Ordinal)
+                && relativePath.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.OrdinalIgnoreCase))
+            {
+                var curveName = stem["WeaponMalfunctionProbability_".Length..];
+                return new ModAssetDescriptor(
+                    $"Кривая отказов оружия: {LocalizeCompactGameplayName(curveName)}",
+                    "Ключевые точки кривой отказов оружия. Здесь можно менять, как растёт риск осечки, плохого патрона или другой неисправности.");
             }
 
             if (lowerStem.StartsWith("weapon_", StringComparison.Ordinal))
@@ -11902,6 +14267,30 @@ internal sealed class StudioRuntime
         return true;
     }
 
+    private static bool TryDescribeAdvancedItemSpawnerPresetAsset(string relativePath, out ModAssetDescriptor descriptor)
+    {
+        descriptor = null!;
+        if (!IsAdvancedItemSpawnerPresetAsset(relativePath))
+        {
+            return false;
+        }
+
+        if (IsCargoDropPackagePresetAsset(relativePath))
+        {
+            var cargoDisplayName = ResolveCargoDropPackagePresetDisplayName(relativePath);
+            descriptor = new ModAssetDescriptor(
+                $"Контейнерный набор дропа: {cargoDisplayName}",
+                "Готовый набор предметов для контейнера грузового дропа: какие вещи входят внутрь, можно ли повторять одинаковые предметы и сколько штук брать за один выбор.");
+            return true;
+        }
+
+        var displayName = ResolveAdvancedItemSpawnerPresetDisplayName(relativePath);
+        descriptor = new ModAssetDescriptor(
+            $"Контейнерный пресет: {displayName}",
+            "Готовый пресет лута для ящика, шкафа, коробки или другой точки поиска. Здесь можно менять шанс срабатывания, количество выдачи и состояние предметов.");
+        return true;
+    }
+
     private static bool TryDescribeExamineDataPresetAsset(string relativePath, out ModAssetDescriptor descriptor)
     {
         descriptor = null!;
@@ -12050,6 +14439,24 @@ internal sealed class StudioRuntime
         var stem = Path.GetFileNameWithoutExtension(relativePath);
         var lowerStem = stem.ToLowerInvariant();
         var cleanStem = LocalizeAssetStem(stem);
+        var path = relativePath.ToLowerInvariant();
+
+        if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal))
+        {
+            descriptor = new ModAssetDescriptor(
+                $"Группа спавна транспорта: {ResolveVehicleSpawnGroupDisplayName(stem)}",
+                "Какие пресеты транспорта может выбирать эта группа автоматического спавна.");
+            return true;
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && lowerStem.Contains("spawnpreset", StringComparison.Ordinal))
+        {
+            descriptor = new ModAssetDescriptor(
+                $"Пресет транспорта: {ResolveVehicleSpawnPresetOptionDisplayName(relativePath)}",
+                "Готовый пресет транспорта для автоматического появления: состав узлов, состояние и шанс выбора.");
+            return true;
+        }
 
         if (lowerStem.Contains("collisiondamagepropagationcurve", StringComparison.Ordinal))
         {
@@ -12105,6 +14512,189 @@ internal sealed class StudioRuntime
         }
 
         return false;
+    }
+
+    private static string ResolveVehicleSpawnGroupDisplayName(string stem)
+    {
+        if (string.IsNullOrWhiteSpace(stem))
+        {
+            return "без названия";
+        }
+
+        var key = stem.StartsWith("VSG_", StringComparison.OrdinalIgnoreCase)
+            ? stem["VSG_".Length..]
+            : stem;
+
+        return key.ToLowerInvariant() switch
+        {
+            "default" => "базовая группа",
+            "city" => "город",
+            "bicycle" => "велосипеды",
+            "motorcycle" => "мотоциклы",
+            "wheelbarrow" => "тачки",
+            "boat" => "лодки",
+            "militaryrubberboat" => "военная надувная лодка",
+            "hydroplane" => "гидросамолёт",
+            "civilianairplane" => "гражданский самолёт",
+            "sup" => "сапборд",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(key)))
+        };
+    }
+
+    private static string ResolveVehicleSpawnPresetOptionDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        var lowerStem = stem.ToLowerInvariant();
+
+        if (lowerStem.Contains("radiationzone", StringComparison.Ordinal))
+        {
+            var vehicleName = ResolveRadiationVehiclePresetName(lowerStem);
+            var condition = ResolveRadiationVehiclePresetCondition(lowerStem);
+            return string.IsNullOrWhiteSpace(condition)
+                ? vehicleName
+                : $"{vehicleName} ({condition})";
+        }
+
+        var match = Regex.Match(
+            lowerStem,
+            @"^(?<name>[a-z0-9]+)spawnpreset(?:_|$)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(stem)));
+        }
+
+        return match.Groups["name"].Value.ToLowerInvariant() switch
+        {
+            "laika" => "Laika",
+            "rager" => "Rager",
+            "wolfswagen" => "Wolfswagen",
+            "ris" => "RIS",
+            "cruiser" => "Cruiser",
+            "citybike" => "City Bike",
+            "mountainbike" => "Mountain Bike",
+            "dirtbike" => "Dirt Bike",
+            "sidecarbike" => "Sidecar Bike",
+            "tractor" => "Tractor",
+            "wheelbarrowmetal" => "Тачка (металлическая)",
+            "kingletduster" => "Kinglet Duster",
+            "kingletmariner" => "Kinglet Mariner",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(match.Groups["name"].Value)))
+        };
+    }
+
+    private static bool TryDescribeRadiationAsset(string relativePath, out ModAssetDescriptor descriptor)
+    {
+        descriptor = null!;
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        var lowerStem = stem.ToLowerInvariant();
+        var path = relativePath.ToLowerInvariant();
+
+        if (path.Contains("/characters/prisoner/blueprints/bodyeffects/conditions/radiation/", StringComparison.Ordinal))
+        {
+            if (lowerStem.Contains("acuteradiationsyndrome", StringComparison.Ordinal))
+            {
+                descriptor = new ModAssetDescriptor(
+                    "Радиация: острый радиационный синдром",
+                    "Тяжёлая стадия облучения: пороги, интенсивность и влияние на состояние персонажа.");
+                return true;
+            }
+
+            if (lowerStem.Contains("radiationpresence", StringComparison.Ordinal))
+            {
+                descriptor = new ModAssetDescriptor(
+                    "Радиация: фоновое облучение",
+                    "Базовый эффект облучения персонажа и его нарастание в радиационных зонах.");
+                return true;
+            }
+
+            descriptor = new ModAssetDescriptor(
+                $"Радиация: {LocalizeAssetStem(stem)}",
+                "Состояние облучения персонажа: тяжесть, скорость накопления и последствия.");
+            return true;
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && lowerStem.Contains("spawnpreset", StringComparison.Ordinal)
+            && lowerStem.Contains("radiationzone", StringComparison.Ordinal))
+        {
+            var vehicleName = ResolveRadiationVehiclePresetName(lowerStem);
+            var condition = ResolveRadiationVehiclePresetCondition(lowerStem);
+            var displayName = string.IsNullOrWhiteSpace(condition)
+                ? $"Радиационный транспорт: {vehicleName}"
+                : $"Радиационный транспорт: {vehicleName} ({condition})";
+
+            descriptor = new ModAssetDescriptor(
+                displayName,
+                "Какой вариант транспорта может появиться в радиационной зоне и в каком стартовом состоянии.");
+            return true;
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
+            && lowerStem.Contains("radiation", StringComparison.Ordinal))
+        {
+            var location = lowerStem.Contains("city", StringComparison.Ordinal)
+                ? "город"
+                : lowerStem.Contains("default", StringComparison.Ordinal)
+                    ? "общая зона"
+                    : LocalizeAssetStem(stem);
+            descriptor = new ModAssetDescriptor(
+                $"Радиация: группа спавна транспорта ({location})",
+                "Какие пресеты транспорта использует радиационная зона при автоматическом выборе машины.");
+            return true;
+        }
+
+        if (path.Contains("/items/postspawnactions/", StringComparison.Ordinal)
+            && lowerStem.Contains("radiation", StringComparison.Ordinal))
+        {
+            descriptor = new ModAssetDescriptor(
+                "Радиация: пост-действие предмета",
+                "Служебное действие после спавна, связанное с радиационной зоной или её лутом.");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string ResolveRadiationVehiclePresetName(string lowerStem)
+    {
+        var match = Regex.Match(
+            lowerStem,
+            @"^(?<name>[a-z0-9]+)spawnpreset(?:_|$)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return LocalizeAssetStem(lowerStem);
+        }
+
+        var rawName = match.Groups["name"].Value.ToLowerInvariant();
+        return rawName switch
+        {
+            "laika" => "Laika",
+            "rager" => "Rager",
+            "wolfswagen" => "Wolfswagen",
+            _ => CapitalizeFirst(LocalizeAssetStem(rawName))
+        };
+    }
+
+    private static string ResolveRadiationVehiclePresetCondition(string lowerStem)
+    {
+        if (lowerStem.Contains("nobattery", StringComparison.Ordinal))
+        {
+            return "без аккумулятора";
+        }
+
+        if (lowerStem.Contains("nodriverseat", StringComparison.Ordinal))
+        {
+            return "без водительского сиденья";
+        }
+
+        if (lowerStem.Contains("notires", StringComparison.Ordinal))
+        {
+            return "без колёс";
+        }
+
+        return string.Empty;
     }
 
     private static bool TryDescribeNpcEncounterAsset(string relativePath, out ModAssetDescriptor descriptor)
@@ -12741,6 +15331,11 @@ internal sealed class StudioRuntime
     private static bool IsStudioCategoryEnabled(string categoryId, string normalizedPath)
     {
         var path = normalizedPath.ToLowerInvariant();
+        if (IsCraftingUiDataRegistryAsset(path))
+        {
+            return true;
+        }
+
         if (categoryId is "weapons-items"
             && path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal))
         {
@@ -12870,6 +15465,7 @@ internal sealed class StudioRuntime
         if (categoryId is "vehicles")
         {
             return path.Contains("hitdamagevsvehiclespeed", StringComparison.Ordinal)
+                || path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
                 || (path.Contains("/vehicles/", StringComparison.Ordinal)
                     && (path.Contains("damage", StringComparison.Ordinal)
                         || path.Contains("collision", StringComparison.Ordinal)
@@ -12920,12 +15516,19 @@ internal sealed class StudioRuntime
                 || fileName.StartsWith("DA_PlantDisease_", StringComparison.OrdinalIgnoreCase);
         }
 
+        if (categoryId is "item-spawning")
+        {
+            return false;
+        }
+
         if (categoryId is "weapons-items")
         {
             return (path.Contains("/items/weapons/", StringComparison.Ordinal)
+                    || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
                     || path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal)
                     || path.Contains("/items/equipment/active_items/", StringComparison.Ordinal)
                     || path.Contains("/items/spawnerpresets/examine_data_presets/", StringComparison.Ordinal)
+                    || path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
                     || path.Contains("/gameresources/food/", StringComparison.Ordinal))
                 && !path.Contains("/item_icons/", StringComparison.Ordinal)
                 && !path.Contains("/stringtables/", StringComparison.Ordinal);
@@ -13379,6 +15982,12 @@ internal sealed class StudioRuntime
             return true;
         }
 
+        if (TryParseDataTableRowAssetId(assetId, out var syntheticRelativePath, out var syntheticLaneId, out var syntheticRowName))
+        {
+            selection = new AssetSelection(assetId, syntheticRelativePath, null, syntheticLaneId, syntheticRowName);
+            return true;
+        }
+
         if (TryParseGameAssetId(assetId, out var gameRelativePath))
         {
             selection = new AssetSelection(assetId, gameRelativePath, null);
@@ -13407,6 +16016,45 @@ internal sealed class StudioRuntime
 
         relativePath = PathUtil.NormalizeRelative(raw);
         return true;
+    }
+
+    private static bool TryParseDataTableRowAssetId(
+        string assetId,
+        out string relativePath,
+        out string laneId,
+        out string rowName)
+    {
+        relativePath = string.Empty;
+        laneId = string.Empty;
+        rowName = string.Empty;
+        if (string.IsNullOrWhiteSpace(assetId)
+            || !assetId.StartsWith(DataTableRowAssetPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var payload = assetId[DataTableRowAssetPrefix.Length..];
+        var parts = payload.Split(new[] { "::" }, 2, StringSplitOptions.None);
+        if (parts.Length != 2)
+        {
+            return false;
+        }
+
+        laneId = parts[0].Trim();
+        rowName = parts[1].Trim();
+        if (string.IsNullOrWhiteSpace(laneId) || string.IsNullOrWhiteSpace(rowName))
+        {
+            return false;
+        }
+
+        relativePath = laneId.ToLowerInvariant() switch
+        {
+            ItemSpawningParametersLaneId => ItemSpawningParametersTableRelativePath,
+            ItemSpawningCooldownGroupsLaneId => ItemSpawningCooldownGroupsTableRelativePath,
+            _ => string.Empty
+        };
+
+        return !string.IsNullOrWhiteSpace(relativePath);
     }
 
     private string? ResolveAssetSourcePath(AssetSelection selection, string sourceMode, List<string> warnings, bool includeCompanions = false)
@@ -14480,6 +17128,8 @@ internal sealed class StudioRuntime
         var runRoot = Path.Combine(_runtimePaths.TempRoot, "asset-edits", DateTime.Now.ToString("yyyyMMdd-HHmmss"));
         Directory.CreateDirectory(runRoot);
 
+        var preparedEdits = new List<(StudioAssetEditDto EditRequest, AssetSelection Selection, string SourcePath, bool HasFieldEdits, bool HasListEdits)>();
+
         foreach (var editRequest in request.AssetEdits)
         {
             if (string.IsNullOrWhiteSpace(editRequest.AssetId))
@@ -14509,6 +17159,56 @@ internal sealed class StudioRuntime
                 continue;
             }
 
+            preparedEdits.Add((editRequest, selection, sourcePath, hasFieldEdits, hasListEdits));
+        }
+
+        if (preparedEdits.Count == 0)
+        {
+            return result;
+        }
+
+        var groupedEdits = new Dictionary<string, List<(StudioAssetEditDto EditRequest, AssetSelection Selection, string SourcePath, bool HasFieldEdits, bool HasListEdits)>>(StringComparer.OrdinalIgnoreCase);
+        var groupSourcePaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var groupSelections = new Dictionary<string, AssetSelection>(StringComparer.OrdinalIgnoreCase);
+        var groupOrder = new List<string>();
+
+        foreach (var prepared in preparedEdits)
+        {
+            var groupKey = PathUtil.NormalizeRelative(prepared.Selection.TargetRelativePath).ToLowerInvariant();
+            if (!groupedEdits.TryGetValue(groupKey, out var group))
+            {
+                group = [];
+                groupedEdits[groupKey] = group;
+                groupSourcePaths[groupKey] = prepared.SourcePath;
+                groupSelections[groupKey] = prepared.Selection;
+                groupOrder.Add(groupKey);
+            }
+            else
+            {
+                var existingSourcePath = groupSourcePaths[groupKey];
+                if (!string.Equals(
+                        Path.GetFullPath(existingSourcePath),
+                        Path.GetFullPath(prepared.SourcePath),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    warnings.Add(
+                        $"Для {prepared.Selection.TargetRelativePath} найдены правки с разными источниками. Использую первый источник: {Path.GetFileName(existingSourcePath)}.");
+                }
+            }
+
+            group.Add(prepared);
+        }
+
+        foreach (var groupKey in groupOrder)
+        {
+            var editsForAsset = groupedEdits[groupKey];
+            if (editsForAsset.Count == 0)
+            {
+                continue;
+            }
+
+            var sourcePath = groupSourcePaths[groupKey];
+            var selection = groupSelections[groupKey];
             var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
             var editDir = Path.Combine(runRoot, Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(editDir);
@@ -14520,27 +17220,33 @@ internal sealed class StudioRuntime
             if (extension.Equals(".uasset", StringComparison.OrdinalIgnoreCase))
             {
                 changed = false;
-                if (hasListEdits)
+                foreach (var prepared in editsForAsset)
                 {
-                    changed |= ApplyUassetListEdits(editedAssetPath, editRequest.ListEdits!, warnings);
-                }
+                    if (prepared.HasListEdits)
+                    {
+                        changed |= ApplyUassetListEdits(editedAssetPath, prepared.EditRequest.ListEdits!, warnings);
+                    }
 
-                if (hasFieldEdits)
-                {
-                    changed |= ApplyUassetEdits(editedAssetPath, editRequest.Edits!, warnings);
+                    if (prepared.HasFieldEdits)
+                    {
+                        changed |= ApplyUassetEdits(editedAssetPath, prepared.EditRequest.Edits!, warnings);
+                    }
                 }
             }
             else if (extension.Equals(".json", StringComparison.OrdinalIgnoreCase))
             {
                 changed = false;
-                if (hasListEdits)
+                foreach (var prepared in editsForAsset)
                 {
-                    changed |= ApplyJsonListEdits(editedAssetPath, editRequest.ListEdits!, warnings);
-                }
+                    if (prepared.HasListEdits)
+                    {
+                        changed |= ApplyJsonListEdits(editedAssetPath, prepared.EditRequest.ListEdits!, warnings);
+                    }
 
-                if (hasFieldEdits)
-                {
-                    changed |= ApplyJsonEdits(editedAssetPath, editRequest.Edits!, warnings);
+                    if (prepared.HasFieldEdits)
+                    {
+                        changed |= ApplyJsonEdits(editedAssetPath, prepared.EditRequest.Edits!, warnings);
+                    }
                 }
             }
             else
@@ -14687,6 +17393,11 @@ internal sealed class StudioRuntime
             return TryApplyForeignSubstanceAttributeFieldEdit(asset, edit, warnings, out applied);
         }
 
+        if (edit.FieldPath.StartsWith(WeaponSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return TryApplyWeaponSyntheticFieldEdit(asset, edit, warnings, out applied);
+        }
+
         return false;
     }
 
@@ -14761,6 +17472,60 @@ internal sealed class StudioRuntime
             EnsureTopLevelFloatProperty(asset, export, propertyName).Value = value;
         }
 
+        applied = true;
+        return true;
+    }
+
+    private static bool TryApplyWeaponSyntheticFieldEdit(
+        UAsset asset,
+        StudioFieldEditDto edit,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var propertyName = edit.FieldPath[WeaponSyntheticFieldPrefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            warnings.Add("UAsset edit skipped: не указан параметр оружия.");
+            return true;
+        }
+
+        var allowedProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ViewKickMultiplier",
+            "MaxRecoilOffset",
+            "RecoilRecoverySpeed"
+        };
+        if (!allowedProperties.Contains(propertyName))
+        {
+            warnings.Add($"UAsset edit skipped: неподдерживаемый параметр оружия {propertyName}");
+            return true;
+        }
+
+        if (!TryFindWeaponOwnerExport(asset, out var export, out _))
+        {
+            warnings.Add($"UAsset edit skipped: экспорт для {propertyName} не найден.");
+            return true;
+        }
+
+        if (!float.TryParse(edit.Value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} (ожидается float)");
+            return true;
+        }
+
+        var conflictingProperty = export.Data
+            .OfType<PropertyData>()
+            .FirstOrDefault(property =>
+                PropertyNamesMatch(property.Name?.ToString(), propertyName)
+                && property is not FloatPropertyData);
+        if (conflictingProperty is not null)
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как число.");
+            return true;
+        }
+
+        EnsureTopLevelFloatProperty(asset, export, propertyName).Value = value;
         applied = true;
         return true;
     }
@@ -15812,6 +18577,16 @@ internal sealed class StudioRuntime
                 continue;
             }
 
+            if (listEdit.TargetPath.StartsWith(SyntheticCraftingUiCategoryRecipesTargetPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                if (TryApplySyntheticCraftingUiCategoryRecipesListEdit(asset, listEdit, warnings))
+                {
+                    applied++;
+                }
+
+                continue;
+            }
+
             if (string.Equals(listEdit.TargetPath, SyntheticCargoMajorSpawnerOptionsTargetPath, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(listEdit.TargetPath, SyntheticCargoMajorSpawnerPresetOptionsTargetPath, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(listEdit.TargetPath, SyntheticCargoMinorSpawnerOptionsTargetPath, StringComparison.OrdinalIgnoreCase))
@@ -16148,6 +18923,75 @@ internal sealed class StudioRuntime
         return false;
     }
 
+    private bool TryApplySyntheticCraftingUiCategoryRecipesListEdit(
+        UAsset asset,
+        StudioListEditDto listEdit,
+        List<string> warnings)
+    {
+        if (!TryResolveCraftingUiCategoryRecipesArray(asset, listEdit.TargetPath, out var recipes, out var values, out var categoryLabel, out var error))
+        {
+            warnings.Add($"List edit skipped: {error} ({listEdit.TargetPath})");
+            return false;
+        }
+
+        var action = (listEdit.Action ?? string.Empty).Trim().ToLowerInvariant();
+        if (action == "add-reference")
+        {
+            if (!TryCreateReferenceListItem(asset, recipes, values, listEdit, out var created, out error))
+            {
+                warnings.Add($"List edit skipped: {error} ({listEdit.TargetPath})");
+                return false;
+            }
+
+            if (ContainsEquivalentReference(asset, values, created))
+            {
+                warnings.Add($"List edit skipped: такой рецепт уже есть в категории «{categoryLabel}».");
+                return false;
+            }
+
+            var expanded = new PropertyData[values.Length + 1];
+            Array.Copy(values, expanded, values.Length);
+            expanded[^1] = created;
+            recipes.Value = expanded;
+            return true;
+        }
+
+        if (action == "remove-index")
+        {
+            if (values.Length == 0)
+            {
+                warnings.Add($"List edit skipped: категория «{categoryLabel}» пока не содержит рецептов.");
+                return false;
+            }
+
+            var index = listEdit.Index ?? (values.Length - 1);
+            if (index < 0 || index >= values.Length)
+            {
+                warnings.Add($"List edit skipped: неверный index={index} для {listEdit.TargetPath}");
+                return false;
+            }
+
+            var reduced = values.ToList();
+            reduced.RemoveAt(index);
+            recipes.Value = reduced.ToArray();
+            return true;
+        }
+
+        if (action == "clear")
+        {
+            if (values.Length == 0)
+            {
+                return false;
+            }
+
+            recipes.Value = [];
+            return true;
+        }
+
+        warnings.Add($"List edit skipped: действие {listEdit.Action} не поддерживается для пула рецептов категории.");
+        return false;
+    }
+
     private bool TryApplySyntheticCargoDropListEdit(
         UAsset asset,
         StudioListEditDto listEdit,
@@ -16348,6 +19192,11 @@ internal sealed class StudioRuntime
             return TryCreateFishSpeciesListItem(asset, arrayProperty, values, listEdit, rawReference, out property, out error);
         }
 
+        if (IsAdvancedItemSpawnerSubpresetArray(arrayProperty))
+        {
+            return TryCreateAdvancedItemSpawnerSubpresetListItem(asset, arrayProperty, values, listEdit, rawReference, out property, out error);
+        }
+
         if (values.Length > 0)
         {
             var sourceIndex = listEdit.SourceIndex ?? (values.Length - 1);
@@ -16505,6 +19354,14 @@ internal sealed class StudioRuntime
             && propertyName.Equals("FishSpawnData", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsAdvancedItemSpawnerSubpresetArray(ArrayPropertyData arrayProperty)
+    {
+        var arrayType = arrayProperty.ArrayType?.ToString() ?? string.Empty;
+        var propertyName = arrayProperty.Name?.ToString() ?? string.Empty;
+        return arrayType.Equals("StructProperty", StringComparison.OrdinalIgnoreCase)
+            && propertyName.Equals("Subpresets", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool TryCreateFishSpeciesListItem(
         UAsset asset,
         ArrayPropertyData arrayProperty,
@@ -16553,6 +19410,57 @@ internal sealed class StudioRuntime
         }
 
         property = fishStruct;
+        return true;
+    }
+
+    private static bool TryCreateAdvancedItemSpawnerSubpresetListItem(
+        UAsset asset,
+        ArrayPropertyData arrayProperty,
+        PropertyData[] values,
+        StudioListEditDto listEdit,
+        string? rawReference,
+        out PropertyData property,
+        out string error)
+    {
+        property = null!;
+        error = string.Empty;
+
+        PropertyData created;
+        if (values.Length > 0)
+        {
+            var sourceIndex = listEdit.SourceIndex ?? (values.Length - 1);
+            if (sourceIndex < 0 || sourceIndex >= values.Length)
+            {
+                error = $"неверный sourceIndex={sourceIndex}";
+                return false;
+            }
+
+            if (values[sourceIndex].Clone() is not PropertyData cloned)
+            {
+                error = $"не удалось подготовить новый подпакет по шаблону {sourceIndex}";
+                return false;
+            }
+
+            created = cloned;
+        }
+        else if (!TryCreateEmptyArrayListItem(asset, arrayProperty, out created, out error))
+        {
+            return false;
+        }
+
+        if (created is not StructPropertyData subpresetStruct
+            || !TryFindStructReferenceChild(subpresetStruct, "Preset", out var presetReference))
+        {
+            error = "в шаблоне подпакета не найдено поле Preset";
+            return false;
+        }
+
+        if (!TryAssignReferenceCloneValue(asset, presetReference, rawReference, out error))
+        {
+            return false;
+        }
+
+        property = subpresetStruct;
         return true;
     }
 
@@ -16871,6 +19779,61 @@ internal sealed class StudioRuntime
         return true;
     }
 
+    private static bool TryResolveCraftingUiCategoryRecipesArray(
+        UAsset asset,
+        string targetPath,
+        out ArrayPropertyData recipes,
+        out PropertyData[] values,
+        out string categoryLabel,
+        out string error)
+    {
+        recipes = null!;
+        values = [];
+        categoryLabel = "Категория крафта";
+        error = string.Empty;
+
+        if (!TryParseSyntheticCraftingUiCategoryRecipesTarget(targetPath, out var exportIndex, out var categoriesIndex, out var categoryIndex))
+        {
+            error = "не удалось разобрать путь категории пула крафта";
+            return false;
+        }
+
+        if (exportIndex < 0
+            || exportIndex >= asset.Exports.Count
+            || asset.Exports[exportIndex] is not NormalExport export)
+        {
+            error = "не найден экспорт реестра крафта";
+            return false;
+        }
+
+        if (categoriesIndex < 0
+            || categoriesIndex >= export.Data.Count
+            || export.Data[categoriesIndex] is not ArrayPropertyData categories)
+        {
+            error = "не найден массив категорий крафта";
+            return false;
+        }
+
+        var categoryValues = categories.Value ?? [];
+        if (categoryIndex < 0
+            || categoryIndex >= categoryValues.Length
+            || categoryValues[categoryIndex] is not StructPropertyData categoryStruct)
+        {
+            error = $"не найдена категория крафта #{categoryIndex + 1}";
+            return false;
+        }
+
+        var tagStruct = FindStructChildProperty<StructPropertyData>(categoryStruct, "Tag", out _);
+        var tagValue = ResolveGameplayTagStructValue(tagStruct);
+        var categoriesName = categories.Name?.ToString() ?? string.Empty;
+        var isPlaceable = categoriesName.Equals("PlaceableCategories", StringComparison.OrdinalIgnoreCase);
+        categoryLabel = ResolveCraftingUiCategoryLabel(tagValue, isPlaceable);
+
+        recipes = EnsureStructObjectArrayChild(asset, categoryStruct, "Recipes");
+        values = recipes.Value ?? [];
+        return true;
+    }
+
     private static bool TryParseSyntheticRecipeAllowedTypesTarget(
         string targetPath,
         out int exportIndex,
@@ -16893,6 +19856,30 @@ internal sealed class StudioRuntime
             && int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out exportIndex)
             && int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out ingredientsIndex)
             && int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out ingredientIndex);
+    }
+
+    private static bool TryParseSyntheticCraftingUiCategoryRecipesTarget(
+        string targetPath,
+        out int exportIndex,
+        out int categoriesIndex,
+        out int categoryIndex)
+    {
+        exportIndex = -1;
+        categoriesIndex = -1;
+        categoryIndex = -1;
+
+        var normalized = (targetPath ?? string.Empty).Trim();
+        if (!normalized.StartsWith(SyntheticCraftingUiCategoryRecipesTargetPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var payload = normalized[SyntheticCraftingUiCategoryRecipesTargetPrefix.Length..];
+        var parts = payload.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length == 3
+            && int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out exportIndex)
+            && int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out categoriesIndex)
+            && int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out categoryIndex);
     }
 
     private bool TryCreateSideEffectListItem(
@@ -17271,6 +20258,9 @@ internal sealed class StudioRuntime
             case StructPropertyData structProperty when TryFindStructReferenceChild(structProperty, "FishSpeciesData", out var nestedReference)
                                                   && TryBuildComparableReferenceSignature(asset, nestedReference, out signature):
                 return true;
+            case StructPropertyData structProperty when TryFindStructReferenceChild(structProperty, "Preset", out var presetReference)
+                                                  && TryBuildComparableReferenceSignature(asset, presetReference, out signature):
+                return true;
             default:
                 signature = string.Empty;
                 return false;
@@ -17309,6 +20299,25 @@ internal sealed class StudioRuntime
         for (var i = 1; i < tokens.Length; i++)
         {
             var token = tokens[i];
+            if (token.StartsWith("r:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (export is not DataTableExport dataTableExport
+                    || !TryParseTokenIndex(token, "r:", out var rowIndex))
+                {
+                    return false;
+                }
+
+                var rows = dataTableExport.Table.Data;
+                if (rowIndex < 0 || rowIndex >= rows.Count)
+                {
+                    return false;
+                }
+
+                current = rows[rowIndex];
+                container = GetChildContainer(current);
+                continue;
+            }
+
             if (token.StartsWith("p:", StringComparison.OrdinalIgnoreCase))
             {
                 if (!TryParseTokenIndex(token, "p:", out var propertyIndex))
@@ -18519,6 +21528,11 @@ internal sealed class StudioRuntime
     private static ModCategory ClassifyModCategory(string relativePath)
     {
         var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (IsCraftingUiDataRegistryAsset(path))
+        {
+            return new ModCategory("crafting-recipes", "Крафт: рецепты", ResolveCategoryDescription("crafting-recipes"));
+        }
+
         if (path.Contains("/items/crafting/recipes/", StringComparison.OrdinalIgnoreCase))
         {
             return new ModCategory("crafting-recipes", "Крафт: рецепты", ResolveCategoryDescription("crafting-recipes"));
@@ -18553,6 +21567,21 @@ internal sealed class StudioRuntime
         if (path.Contains("/foliage/farming/", StringComparison.OrdinalIgnoreCase))
         {
             return new ModCategory("plants-farming", "Растения и фермерство", ResolveCategoryDescription("plants-farming"));
+        }
+
+        if (path.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModCategory("item-spawning", "Лут и спавн предметов", ResolveCategoryDescription("item-spawning"));
+        }
+
+        if (path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModCategory("weapons-items", "Оружие и предметы", ResolveCategoryDescription("weapons-items"));
+        }
+
+        if (path.Contains("/items/spawnerpresets2/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModCategory("weapons-items", "Оружие и предметы", ResolveCategoryDescription("weapons-items"));
         }
 
         if (path.Contains("/items/spawnerpresets/examine_data_presets/", StringComparison.OrdinalIgnoreCase))
@@ -18632,6 +21661,7 @@ internal sealed class StudioRuntime
             "economy-trader" => "Торговые таблицы, цены и параметры экономики.",
             "quests" => "Квестовые таблицы, условия и журнал.",
             "plants-farming" => "Культуры, вредители и болезни для системы фермерства.",
+            "item-spawning" => "Правила появления предметов по зонам, вариации предметов и общие группы отката.",
             "npc-encounters" => "Параметры врагов, орд, охраняемых зон и игровых событий.",
             "skills-progression" => "Прокачка навыков и их бонусы по уровням.",
             "locks-base" => "Параметры замков, взлома, базы и связанных мини-игр.",
@@ -18648,7 +21678,9 @@ internal sealed class StudioRuntime
     private sealed record AssetSelection(
         string AssetId,
         string TargetRelativePath,
-        string? PresetSourcePath);
+        string? PresetSourcePath,
+        string? SyntheticLaneId = null,
+        string? SyntheticRowName = null);
 
     private sealed record ModCategory(
         string Id,

@@ -1,11 +1,15 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace ScumPakWizard;
 
 internal sealed class ModBuilder
 {
     private static readonly string[] CompanionExtensions = [".uexp", ".ubulk", ".uptnl"];
+    private static readonly Regex ChunkPakNameRegex = new(
+        @"^pakchunk\d+-WindowsNoEditor_(\d+)_P(?:\.pak)?$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly RuntimePaths _runtimePaths;
     private readonly ScumInstallation _scum;
@@ -141,11 +145,10 @@ internal sealed class ModBuilder
                 warnings);
         }
 
-        Directory.CreateDirectory(_runtimePaths.BuildsRoot);
-        var finalPakName = outputName.EndsWith(".pak", StringComparison.OrdinalIgnoreCase)
-            ? outputName
-            : $"{outputName}.pak";
-        var outputPakPath = Path.Combine(_runtimePaths.BuildsRoot, finalPakName);
+        var buildsModsRoot = Path.Combine(_runtimePaths.BuildsRoot, "mods");
+        Directory.CreateDirectory(buildsModsRoot);
+        var finalPakName = ResolveChunkPakFileName(outputName, buildsModsRoot);
+        var outputPakPath = Path.Combine(buildsModsRoot, finalPakName);
         var responseFilePath = BuildPakResponseFile(runRoot, stageRoot);
 
         writeLog("Собираю .pak...");
@@ -174,7 +177,7 @@ internal sealed class ModBuilder
         string? outputZipPath = null;
         if (createZip)
         {
-            outputZipPath = Path.Combine(_runtimePaths.BuildsRoot, $"{Path.GetFileNameWithoutExtension(outputPakPath)}.zip");
+            outputZipPath = Path.Combine(buildsModsRoot, $"{Path.GetFileNameWithoutExtension(outputPakPath)}.zip");
             if (File.Exists(outputZipPath))
             {
                 File.Delete(outputZipPath);
@@ -193,6 +196,62 @@ internal sealed class ModBuilder
             seededCompanions,
             overrideCount,
             warnings);
+    }
+
+    private string ResolveChunkPakFileName(string requestedName, string buildsModsRoot)
+    {
+        var trimmed = (requestedName ?? string.Empty).Trim();
+        if (trimmed.EndsWith(".pak", StringComparison.OrdinalIgnoreCase))
+        {
+            trimmed = trimmed[..^4];
+        }
+
+        if (ChunkPakNameRegex.IsMatch(trimmed))
+        {
+            return $"{trimmed}.pak";
+        }
+
+        var nextIndex = ResolveNextChunkIndex(buildsModsRoot);
+        return $"pakchunk99-WindowsNoEditor_{nextIndex}_P.pak";
+    }
+
+    private int ResolveNextChunkIndex(string buildsModsRoot)
+    {
+        var nextIndex = 1;
+        foreach (var root in EnumerateChunkSearchRoots(buildsModsRoot))
+        {
+            if (!Directory.Exists(root))
+            {
+                continue;
+            }
+
+            foreach (var filePath in Directory.EnumerateFiles(root, "*.pak", SearchOption.TopDirectoryOnly))
+            {
+                var match = ChunkPakNameRegex.Match(Path.GetFileName(filePath));
+                if (!match.Success)
+                {
+                    continue;
+                }
+
+                if (int.TryParse(match.Groups[1].Value, out var parsed))
+                {
+                    nextIndex = Math.Max(nextIndex, parsed + 1);
+                }
+            }
+        }
+
+        return nextIndex;
+    }
+
+    private IEnumerable<string> EnumerateChunkSearchRoots(string buildsModsRoot)
+    {
+        yield return buildsModsRoot;
+
+        var gameModsRoot = Path.Combine(_scum.PaksPath, "mods");
+        if (!string.Equals(gameModsRoot, buildsModsRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return gameModsRoot;
+        }
     }
 
     public IReadOnlyList<StudioFileEntry> GetStudioFileEntries(IReadOnlyList<PresetDefinition> presets)

@@ -546,6 +546,13 @@ button.primary {
   font-size: 13px;
 }
 
+.schema-loading {
+  border: 1px dashed #33557a;
+  border-radius: 10px;
+  padding: 11px;
+  background: #0c1622;
+}
+
 .guided-empty-state {
   border: 1px solid #325072;
   border-radius: 12px;
@@ -667,6 +674,17 @@ button.primary {
   color: #d7e8ff;
 }
 
+.picker-help {
+  line-height: 1.4;
+}
+
+.picker-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .picker-results {
   display: grid;
   gap: 6px;
@@ -732,6 +750,35 @@ button.primary {
 
 .list-target-description {
   line-height: 1.4;
+}
+
+.list-target-guide {
+  border: 1px solid #345578;
+  border-radius: 11px;
+  background: linear-gradient(180deg, #102030, #0c1622);
+  padding: 10px 11px;
+  display: grid;
+  gap: 8px;
+}
+
+.list-target-guide-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #d9ecff;
+}
+
+.list-target-guide-steps {
+  display: grid;
+  gap: 6px;
+}
+
+.list-target-guide-step {
+  border: 1px solid #21384f;
+  border-radius: 9px;
+  background: #0c1622;
+  padding: 8px 10px;
+  color: #cfe0f2;
+  font-size: 13px;
 }
 
 .list-actions {
@@ -808,6 +855,26 @@ button.primary {
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.build-hint {
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+.search-hint {
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+.schema-filter-toolbar {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.schema-filter-toolbar input {
+  min-width: 260px;
 }
 
 .output {

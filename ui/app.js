@@ -19,7 +19,8 @@ const state = {
     currentOriginalValues: new Map(),
     currentListEdits: [],
     stagedByAssetId: new Map(),
-    showOnlyEditable: false
+    showOnlyEditable: false,
+    schemaFieldFilter: ""
   }
 };
 
@@ -86,8 +87,13 @@ function timestampNow() {
 
 function setDefaultModName() {
   const input = el("modNameInput");
-  if (!input.value.trim()) {
-    input.value = `pakchunk99-scum-studio-${timestampNow()}-WindowsNoEditor`;
+  if (!input) {
+    return;
+  }
+
+  input.placeholder = "Оставь пустым для автоматического имени";
+  if (/^pakchunk99-scum-studio-\d{8}-\d{6}-windowsnoeditor$/i.test(input.value.trim())) {
+    input.value = "";
   }
 }
 
@@ -226,6 +232,77 @@ function schemaActionableTargets(schema) {
   return listTargets.filter((target) => target.supportsAddReference && target.referencePickerKind);
 }
 
+function getReferencePickerBaseName(pickerKind) {
+  const normalized = String(pickerKind || "").trim().toLowerCase();
+  return normalized === "bodyeffect-side-effect"
+    ? "последствие"
+    : normalized === "quest-giver"
+      ? "источник квестов"
+    : normalized === "skill-blueprint-asset" || normalized === "skill-blueprint-reference"
+        || normalized === "skill-asset" || normalized === "skill-reference"
+      ? "навык"
+    : normalized === "quest-asset" || normalized === "quest-reference"
+      ? "квест"
+    : normalized === "item-asset" || normalized === "item-reference"
+      ? "предмет"
+    : normalized === "item-spawner-preset" || normalized === "regular-item-spawner-preset"
+      ? "пресет дропа"
+    : normalized === "advanced-item-spawner-preset"
+      || normalized === "container-loot-preset"
+      || normalized === "examine-data-preset"
+      ? "контейнерный набор"
+    : normalized === "advanced-item-spawner-subpreset"
+      || normalized === "container-subpreset-preset"
+      ? "подпакет лута"
+    : normalized === "gameevent-primary-loadout"
+      || normalized === "gameevent-secondary-loadout"
+      || normalized === "gameevent-tertiary-loadout"
+      || normalized === "gameevent-outfit-loadout"
+      || normalized === "gameevent-mandatory-loadout"
+      || normalized === "gameevent-support-loadout"
+      ? "набор"
+    : normalized === "cargo-drop-encounter-class"
+      ? "защиту"
+    : normalized === "plant-species-asset" || normalized === "plant-species"
+      ? "растение"
+    : normalized === "plant-pest-asset" || normalized === "plant-pest"
+      ? "вредителя"
+    : normalized === "plant-disease-asset" || normalized === "plant-disease"
+      ? "болезнь"
+    : normalized === "fish-species-asset" || normalized === "fish-species"
+      ? "вид рыбы"
+      : "элемент";
+}
+
+function buildReferenceActionLabel(pickerKind, mode = "add") {
+  const base = getReferencePickerBaseName(pickerKind);
+
+  return mode === "choose"
+    ? `Выбрать ${base}`
+    : `Добавить ${base}`;
+}
+
+function buildReferenceSearchPlaceholder(pickerKind, fallbackText) {
+  const base = getReferencePickerBaseName(pickerKind);
+  if (!base || base === "элемент") {
+    return fallbackText || "Введи хотя бы 2 буквы для поиска";
+  }
+
+  return `Введи хотя бы 2 буквы, чтобы найти ${base}`;
+}
+
+function buildPickerIntroText(pickerKind, hasQuickHints, isEmptyTerm) {
+  if (isEmptyTerm) {
+    return hasQuickHints
+      ? "Можно нажать готовую подсказку выше или сразу выбрать вариант из списка ниже."
+      : "Нажми в поле, чтобы увидеть доступные варианты, или начни поиск по названию.";
+  }
+
+  return hasQuickHints
+    ? "Ничего не найдено. Попробуй более короткое слово или нажми одну из подсказок выше."
+    : "Ничего не найдено. Попробуй более короткое или более общее слово.";
+}
+
 function describeSchemaMeta(schema) {
   const fields = Array.isArray(schema?.fields) ? schema.fields : [];
   const editableCount = fields.filter((field) => field.editable !== false).length;
@@ -344,8 +421,10 @@ function getQuickPickerHints(pickerKind) {
 
   if (
     normalized === "advanced-item-spawner-preset" ||
+    normalized === "advanced-item-spawner-subpreset" ||
     normalized === "examine-data-preset" ||
-    normalized === "container-loot-preset"
+    normalized === "container-loot-preset" ||
+    normalized === "container-subpreset-preset"
   ) {
     return [
       { label: "Контейнер: машина", term: "car" },
@@ -416,9 +495,17 @@ function getQuickPickerHints(pickerKind) {
     ];
   }
 
-  if (normalized === "advanced-item-spawner-preset" || normalized === "container-loot-preset" || normalized === "examine-data-preset") {
+  if (
+    normalized === "advanced-item-spawner-preset" ||
+    normalized === "advanced-item-spawner-subpreset" ||
+    normalized === "container-loot-preset" ||
+    normalized === "container-subpreset-preset" ||
+    normalized === "examine-data-preset"
+  ) {
     return [
       { label: "Buildings", term: "buildings" },
+      { label: "Bunker", term: "bunker" },
+      { label: "Locker", term: "locker" },
       { label: "Bathroom", term: "bathroom" },
       { label: "Military", term: "military" },
       { label: "Medical", term: "medical" }
@@ -500,6 +587,21 @@ function getQuickPickerHints(pickerKind) {
   return [];
 }
 
+function getFieldQuickPickerHints(field) {
+  const label = String(field?.label || "").toLowerCase();
+  const prompt = String(field?.referencePickerPrompt || "").toLowerCase();
+  if (label.includes("семян") || prompt.includes("семян")) {
+    return [
+      { label: "Семена яблока", term: "apple seeds" },
+      { label: "Семена брокколи", term: "broccoli seeds" },
+      { label: "Семена кукурузы", term: "corn seeds" },
+      { label: "Семена тыквы", term: "pumpkin seeds" }
+    ];
+  }
+
+  return getQuickPickerHints(field?.referencePickerKind);
+}
+
 function queueReferenceOption(target, option) {
   if (!target || !option) {
     return;
@@ -552,7 +654,7 @@ function buildGuidedEmptyState(schema) {
   [
     "1. Выбери готовое действие ниже.",
     "2. Оно попадёт в очередь изменений состава.",
-    "3. Затем нажми кнопку «Применить добавление и настроить его»."
+    "3. Затем нажми кнопку «Показать результат и открыть новые настройки»."
   ].forEach((line) => {
     const item = document.createElement("div");
     item.className = "guided-empty-step";
@@ -871,7 +973,7 @@ function updateModAssetMeta() {
   const stagedAssets = state.modding.stagedByAssetId.size;
   const filteredNote =
     state.modding.showOnlyEditable && visibleAssets.length !== pageAssets
-      ? ` После фильтра: ${visibleAssets.length}.`
+      ? ` После фильтра: ${visibleAssets.length}. Часть технических или пока пустых систем скрыта.`
       : "";
   el("modAssetMeta").textContent =
     `Всего систем: ${state.modding.total}. Сейчас видно: ${pageAssets}.${filteredNote} Уже в моде: ${stagedAssets}.`;
@@ -933,7 +1035,7 @@ function renderSelectedAssetPreview() {
 
   const openSchemaBtn = document.createElement("button");
   openSchemaBtn.type = "button";
-  openSchemaBtn.textContent = "Открыть настройки ниже";
+  openSchemaBtn.textContent = "Перейти к настройкам";
   openSchemaBtn.addEventListener("click", () => {
     document.getElementById("schemaPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
@@ -1050,12 +1152,19 @@ function clearSchemaView() {
   state.modding.currentFieldDisplayValues = new Map();
   state.modding.currentOriginalValues = new Map();
   state.modding.currentListEdits = [];
+  state.modding.schemaFieldFilter = "";
   el("schemaAssetTitle").textContent = "Раздел не выбран";
   el("schemaAssetSummary").textContent = "";
   el("schemaMeta").textContent = "";
   el("schemaWarnings").innerHTML = "";
   el("schemaSections").innerHTML = "";
   el("listTargetRows").innerHTML = "";
+  if (el("schemaFieldFilter")) {
+    el("schemaFieldFilter").value = "";
+  }
+  if (el("schemaFilterMeta")) {
+    el("schemaFilterMeta").textContent = "";
+  }
   renderCurrentListOps();
   renderSelectedAssetPreview();
 }
@@ -1073,6 +1182,83 @@ function renderSchemaWarnings(warnings) {
     item.textContent = warningText;
     host.appendChild(item);
   }
+}
+
+function getSchemaFilterTerm() {
+  return String(state.modding.schemaFieldFilter || "").trim().toLowerCase();
+}
+
+function schemaFieldMatchesFilter(field, filterTerm) {
+  if (!filterTerm) {
+    return true;
+  }
+
+  const haystack = [
+    field?.label,
+    field?.description,
+    field?.section,
+    field?.currentDisplayValue,
+    field?.currentValue
+  ]
+    .filter(Boolean)
+    .join(" \n")
+    .toLowerCase();
+  return haystack.includes(filterTerm);
+}
+
+function schemaListTargetMatchesFilter(target, filterTerm) {
+  if (!filterTerm) {
+    return true;
+  }
+
+  const entryLabels = Array.isArray(target?.entryLabels) ? target.entryLabels.join(" \n") : "";
+  const haystack = [
+    target?.label,
+    target?.description,
+    entryLabels
+  ]
+    .filter(Boolean)
+    .join(" \n")
+    .toLowerCase();
+  return haystack.includes(filterTerm);
+}
+
+function getFilteredSchemaFields(schema) {
+  const fields = Array.isArray(schema?.fields) ? schema.fields : [];
+  const filterTerm = getSchemaFilterTerm();
+  return fields.filter((field) => schemaFieldMatchesFilter(field, filterTerm));
+}
+
+function getFilteredListTargets(schema) {
+  const listTargets = Array.isArray(schema?.listTargets) ? schema.listTargets : [];
+  const filterTerm = getSchemaFilterTerm();
+  return listTargets.filter((target) => schemaListTargetMatchesFilter(target, filterTerm));
+}
+
+function renderSchemaFilterMeta() {
+  const host = el("schemaFilterMeta");
+  if (!host) {
+    return;
+  }
+
+  const schema = state.modding.currentSchema;
+  const allFields = Array.isArray(schema?.fields) ? schema.fields : [];
+  const allTargets = Array.isArray(schema?.listTargets) ? schema.listTargets : [];
+  const filterTerm = getSchemaFilterTerm();
+
+  if (!schema) {
+    host.textContent = "";
+    return;
+  }
+
+  if (!filterTerm) {
+    host.textContent = `Настроек: ${allFields.length}. Блоков состава и связей: ${allTargets.length}.`;
+    return;
+  }
+
+  const visibleFields = getFilteredSchemaFields(schema).length;
+  const visibleTargets = getFilteredListTargets(schema).length;
+  host.textContent = `По запросу «${filterTerm}»: настроек ${visibleFields}, блоков состава ${visibleTargets}.`;
 }
 
 function setSchemaMeta(text) {
@@ -1165,7 +1351,7 @@ function createFieldInput(field) {
 
     const search = document.createElement("input");
     search.type = "text";
-    search.placeholder = field.editable === false ? "Редактирование отключено" : "Найти предмет по названию";
+    search.placeholder = field.editable === false ? "Редактирование отключено" : "Введи хотя бы 2 буквы, чтобы найти предмет";
     search.className = "field-input";
 
     const results = document.createElement("div");
@@ -1244,36 +1430,73 @@ function createFieldInput(field) {
     search.type = "text";
     search.placeholder = field.editable === false
       ? "Редактирование отключено"
-      : (field.referencePickerPrompt || "Найди нужную игровую сущность");
+      : buildReferenceSearchPlaceholder(field.referencePickerKind, field.referencePickerPrompt || "Введи хотя бы 2 буквы для поиска");
     search.className = "field-input";
+
+    const pickerToolbar = document.createElement("div");
+    pickerToolbar.className = "picker-toolbar";
+
+    const showOptionsBtn = document.createElement("button");
+    showOptionsBtn.type = "button";
+    showOptionsBtn.textContent = "Показать варианты";
+    showOptionsBtn.addEventListener("click", () => {
+      refreshReferenceResults();
+      search.focus();
+    });
 
     const results = document.createElement("div");
     results.className = "picker-results";
 
+    const quickHints = getFieldQuickPickerHints(field);
+    if (quickHints.length) {
+      const quickRow = document.createElement("div");
+      quickRow.className = "quick-action-row";
+      quickHints.forEach((hint) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "quick-action-chip";
+        chip.textContent = hint.label;
+        chip.addEventListener("click", () => {
+          search.value = hint.term;
+          refreshReferenceResults();
+        });
+        quickRow.appendChild(chip);
+      });
+      wrap.appendChild(quickRow);
+    }
+
+    const help = document.createElement("div");
+    help.className = "picker-help small muted";
+    help.textContent = buildPickerIntroText(field.referencePickerKind, quickHints.length > 0, true);
+
     let requestToken = 0;
-    search.addEventListener("input", async () => {
+    async function refreshReferenceResults() {
       const term = search.value.trim();
       const myToken = ++requestToken;
       results.innerHTML = "";
 
-      if (term.length < 2) {
-        return;
-      }
-
       try {
-        const payload = await fetchReferenceOptions(field.referencePickerKind, term, 10);
+        const payload = await fetchReferenceOptions(field.referencePickerKind, term, term ? 10 : 8);
         if (myToken !== requestToken) {
           return;
         }
 
         const options = Array.isArray(payload) ? payload : [];
+        if (!options.length) {
+          const empty = document.createElement("div");
+          empty.className = "small muted";
+          empty.textContent = buildPickerIntroText(field.referencePickerKind, quickHints.length > 0, false);
+          results.appendChild(empty);
+          return;
+        }
+
         for (const option of options) {
           const row = document.createElement("button");
           row.type = "button";
           row.className = "picker-result";
 
           const text = document.createElement("span");
-          text.textContent = option.label || referenceValueToReadableName(option.value);
+          text.textContent = `${buildReferenceActionLabel(field.referencePickerKind, "choose")}: ${option.label || referenceValueToReadableName(option.value)}`;
           row.appendChild(text);
 
           row.addEventListener("click", () => {
@@ -1286,13 +1509,6 @@ function createFieldInput(field) {
 
           results.appendChild(row);
         }
-
-        if (!options.length) {
-          const empty = document.createElement("div");
-          empty.className = "small muted";
-          empty.textContent = "Ничего не найдено. Попробуй более короткое или более общее слово.";
-          results.appendChild(empty);
-        }
       } catch (error) {
         if (myToken !== requestToken) {
           return;
@@ -1303,9 +1519,19 @@ function createFieldInput(field) {
         fail.textContent = error.message || "Не удалось загрузить игровой список.";
         results.appendChild(fail);
       }
+    }
+
+    search.addEventListener("focus", () => {
+      if (!results.childElementCount) {
+        refreshReferenceResults();
+      }
+    });
+    search.addEventListener("input", () => {
+      refreshReferenceResults();
     });
 
-    wrap.append(current, search, results);
+    pickerToolbar.append(search, showOptionsBtn);
+    wrap.append(current, help, pickerToolbar, results);
     return applyFieldEditableState(field, wrap);
   }
 
@@ -1576,21 +1802,25 @@ function renderSchemaFields() {
   host.innerHTML = "";
 
   const schema = state.modding.currentSchema;
-  const fields = Array.isArray(schema?.fields) ? schema.fields : [];
+  const fields = getFilteredSchemaFields(schema);
+  const filterTerm = getSchemaFilterTerm();
   if (!fields.length) {
-    const guided = buildGuidedEmptyState(schema);
+    const guided = !filterTerm ? buildGuidedEmptyState(schema) : null;
     if (guided) {
       host.appendChild(guided);
     }
 
     const empty = document.createElement("div");
     empty.className = "muted";
-    empty.textContent = schemaActionableTargets(schema).length > 0
-      ? "Сначала наполни систему нужными последствиями или связями, затем открой их новые настройки."
-      : (schema?.listTargets?.length || 0) > 0
-        ? "У этого раздела нет отдельных числовых настроек, но ниже можно менять состав связанных элементов."
-        : "Для этого раздела пока нет понятных настроек, которые можно безопасно менять в студии.";
+    empty.textContent = filterTerm
+      ? "По этому слову среди настроек ничего не найдено. Попробуй другое игровое слово: ресурс, отдача, количество, квест."
+      : schemaActionableTargets(schema).length > 0
+        ? "Сначала наполни систему нужными последствиями или связями, затем открой их новые настройки."
+        : (schema?.listTargets?.length || 0) > 0
+          ? "У этого раздела нет отдельных числовых настроек, но ниже можно менять состав связанных элементов."
+          : "Для этого раздела пока нет понятных настроек, которые можно безопасно менять в студии.";
     host.appendChild(empty);
+    renderSchemaFilterMeta();
     return;
   }
 
@@ -1630,6 +1860,8 @@ function renderSchemaFields() {
 
     host.appendChild(details);
   }
+
+  renderSchemaFilterMeta();
 }
 
 function queueListEdit(edit) {
@@ -1649,7 +1881,7 @@ function renderCurrentListOps() {
   }
 
   const previewHint = schemaActionableTargets(state.modding.currentSchema).length > 0
-    ? " После добавления нажми «Применить добавление и настроить его»."
+    ? " После добавления нажми «Показать результат и открыть новые настройки»."
     : "";
   meta.textContent = `Подготовлено действий: ${listEdits.length}.${previewHint}`;
   listEdits.forEach((op, index) => {
@@ -1676,13 +1908,17 @@ function renderListTargets() {
   host.innerHTML = "";
 
   const schema = state.modding.currentSchema;
-  const listTargets = Array.isArray(schema?.listTargets) ? schema.listTargets : [];
+  const listTargets = getFilteredListTargets(schema);
+  const filterTerm = getSchemaFilterTerm();
   if (!listTargets.length) {
     const empty = document.createElement("div");
     empty.className = "muted";
-    empty.textContent = "В этом разделе нет списков, которые можно безопасно расширять или сокращать.";
+    empty.textContent = filterTerm
+      ? "По этому слову среди состава и связей ничего не найдено."
+      : "В этом разделе нет списков, которые можно безопасно расширять или сокращать.";
     host.appendChild(empty);
     renderCurrentListOps();
+    renderSchemaFilterMeta();
     return;
   }
 
@@ -1693,10 +1929,38 @@ function renderListTargets() {
     host.appendChild(note);
   }
 
+  if (schemaActionableTargets(schema).length > 0) {
+    const guide = document.createElement("div");
+    guide.className = "list-target-guide";
+
+    const title = document.createElement("div");
+    title.className = "list-target-guide-title";
+    title.textContent = "Как добавить новое";
+
+    const steps = document.createElement("div");
+    steps.className = "list-target-guide-steps";
+    [
+      "1. Открой нужный список ниже.",
+      "2. Нажми «Показать варианты» или введи игровое слово для поиска.",
+      "3. Кликни по найденному варианту, затем нажми кнопку «Показать результат и открыть новые настройки»."
+    ].forEach((line) => {
+      const item = document.createElement("div");
+      item.className = "list-target-guide-step";
+      item.textContent = line;
+      steps.appendChild(item);
+    });
+
+    guide.append(title, steps);
+    host.appendChild(guide);
+  }
+
   listTargets.forEach((target, index) => {
     const card = document.createElement("details");
     card.className = "list-target-card";
-    card.open = listTargets.length === 1 && index === 0;
+    const isAddableTarget = target.supportsAddReference || target.supportsAddClone || target.supportsAddEmpty;
+    card.open = (listTargets.length === 1 && index === 0)
+      || (index === 0 && isAddableTarget)
+      || (((schema?.fields?.length || 0) === 0) && index === 0 && isAddableTarget);
 
     const title = document.createElement("summary");
     title.className = "list-target-summary";
@@ -1774,7 +2038,7 @@ function renderListTargets() {
 
         const sourceCaption = document.createElement("div");
         sourceCaption.className = "small muted";
-        sourceCaption.textContent = "Скопировать правила из существующего источника:";
+        sourceCaption.textContent = "Новая запись возьмёт правила из:";
 
         sourceSelect = document.createElement("select");
         sourceSelect.className = "field-input";
@@ -1815,7 +2079,18 @@ function renderListTargets() {
       const search = document.createElement("input");
       search.type = "text";
       search.className = "field-input";
-      search.placeholder = target.referencePickerPrompt || "Найди запись для добавления";
+      search.placeholder = buildReferenceSearchPlaceholder(target.referencePickerKind, target.referencePickerPrompt || "Введи хотя бы 2 буквы для поиска");
+
+      const pickerToolbar = document.createElement("div");
+      pickerToolbar.className = "picker-toolbar";
+
+      const showOptionsBtn = document.createElement("button");
+      showOptionsBtn.type = "button";
+      showOptionsBtn.textContent = "Показать варианты";
+      showOptionsBtn.addEventListener("click", () => {
+        refreshReferenceResults();
+        search.focus();
+      });
 
       const results = document.createElement("div");
       results.className = "picker-results";
@@ -1826,58 +2101,48 @@ function renderListTargets() {
         results.innerHTML = "";
         const term = search.value.trim();
         if (!term) {
-          if (target.referencePickerKind === "bodyeffect-side-effect") {
-            try {
-              const options = await fetchReferenceOptions(target.referencePickerKind, "", 8);
-              if (myToken !== requestToken) {
-                return;
-              }
-
-              const info = document.createElement("div");
-              info.className = "small muted";
-              info.textContent = "Можно сразу выбрать безопасное последствие ниже или начать поиск по названию.";
-              results.appendChild(info);
-
-              for (const option of Array.isArray(options) ? options : []) {
-                const btn = document.createElement("button");
-                btn.type = "button";
-                btn.className = "picker-result";
-                btn.textContent = `Добавить последствие: ${option.label}`;
-                btn.addEventListener("click", () => {
-                  queueListEdit({
-                    targetPath: target.targetPath,
-                    targetLabel: target.label,
-                    action: "add-reference",
-                    index: null,
-                    sourceIndex: getReferenceSourceIndex(),
-                    templateJson: null,
-                    rawValue: option.value,
-                    rawLabel: option.label
-                  });
-                  search.value = "";
-                  results.innerHTML = "";
-                });
-                results.appendChild(btn);
-              }
-            } catch (error) {
-              if (myToken !== requestToken) {
-                return;
-              }
-
-              const fail = document.createElement("div");
-              fail.className = "small muted";
-              fail.textContent = error.message || "Не удалось загрузить безопасные последствия.";
-              results.appendChild(fail);
+          try {
+            const options = await fetchReferenceOptions(target.referencePickerKind, "", 8);
+            if (myToken !== requestToken) {
+              return;
             }
-            return;
-          }
 
-          const info = document.createElement("div");
-          info.className = "small muted";
-          info.textContent = quickHints.length
-            ? "Можно нажать готовое действие выше или начать поиск по названию."
-            : "Начни вводить название, затем выбери нужную запись ниже.";
-          results.appendChild(info);
+            const info = document.createElement("div");
+            info.className = "small muted";
+            info.textContent = buildPickerIntroText(target.referencePickerKind, quickHints.length > 0, true);
+            results.appendChild(info);
+
+            for (const option of Array.isArray(options) ? options : []) {
+              const btn = document.createElement("button");
+              btn.type = "button";
+              btn.className = "picker-result";
+              btn.textContent = `${buildReferenceActionLabel(target.referencePickerKind)}: ${option.label}`;
+              btn.addEventListener("click", () => {
+                queueListEdit({
+                  targetPath: target.targetPath,
+                  targetLabel: target.label,
+                  action: "add-reference",
+                  index: null,
+                  sourceIndex: getReferenceSourceIndex(),
+                  templateJson: null,
+                  rawValue: option.value,
+                  rawLabel: option.label
+                });
+                search.value = "";
+                results.innerHTML = "";
+              });
+              results.appendChild(btn);
+            }
+          } catch (error) {
+            if (myToken !== requestToken) {
+              return;
+            }
+
+            const fail = document.createElement("div");
+            fail.className = "small muted";
+            fail.textContent = error.message || "Не удалось загрузить список ссылок.";
+            results.appendChild(fail);
+          }
           return;
         }
 
@@ -1891,9 +2156,7 @@ function renderListTargets() {
           if (!rows.length) {
             const empty = document.createElement("div");
             empty.className = "small muted";
-            empty.textContent = quickHints.length
-              ? "Ничего не найдено. Попробуй слово проще: например, «сила», «урон» или «скорость»."
-              : "Ничего не найдено. Попробуй более короткое или более общее слово.";
+            empty.textContent = buildPickerIntroText(target.referencePickerKind, quickHints.length > 0, false);
             results.appendChild(empty);
             return;
           }
@@ -1902,45 +2165,7 @@ function renderListTargets() {
             const btn = document.createElement("button");
             btn.type = "button";
             btn.className = "picker-result";
-            const addLabel = target.referencePickerKind === "bodyeffect-side-effect"
-              ? "Добавить последствие"
-              : target.referencePickerKind === "quest-giver"
-                ? "Добавить источник квестов"
-              : target.referencePickerKind === "skill-blueprint-asset" || target.referencePickerKind === "skill-blueprint-reference"
-                  || target.referencePickerKind === "skill-asset" || target.referencePickerKind === "skill-reference"
-                ? "Добавить навык"
-              : target.referencePickerKind === "quest-asset" || target.referencePickerKind === "quest-reference"
-                  ? "Добавить квест"
-              : target.referencePickerKind === "item-asset" || target.referencePickerKind === "item-reference"
-                    ? "Добавить предмет"
-              : target.referencePickerKind === "item-spawner-preset" || target.referencePickerKind === "regular-item-spawner-preset"
-                    ? "Добавить пресет дропа"
-              : target.referencePickerKind === "advanced-item-spawner-preset"
-                || target.referencePickerKind === "container-loot-preset"
-                || target.referencePickerKind === "examine-data-preset"
-                    ? "Добавить контейнерный набор"
-              : target.referencePickerKind === "gameevent-primary-loadout"
-                || target.referencePickerKind === "gameevent-secondary-loadout"
-                || target.referencePickerKind === "gameevent-tertiary-loadout"
-                || target.referencePickerKind === "gameevent-outfit-loadout"
-                || target.referencePickerKind === "gameevent-mandatory-loadout"
-                || target.referencePickerKind === "gameevent-support-loadout"
-                    ? "Добавить набор"
-              : target.referencePickerKind === "cargo-drop-encounter-class"
-                    ? "Добавить защиту"
-              : target.referencePickerKind === "plant-species-asset" || target.referencePickerKind === "plant-species"
-                    ? "Добавить растение"
-              : target.referencePickerKind === "plant-pest-asset" || target.referencePickerKind === "plant-pest"
-                    ? "Добавить вредителя"
-              : target.referencePickerKind === "plant-disease-asset" || target.referencePickerKind === "plant-disease"
-                    ? "Добавить болезнь"
-              : target.referencePickerKind === "skill-asset" || target.referencePickerKind === "skill-reference"
-                || target.referencePickerKind === "skill-blueprint-asset" || target.referencePickerKind === "skill-blueprint-reference"
-                    ? "Добавить навык"
-              : target.referencePickerKind === "fish-species-asset" || target.referencePickerKind === "fish-species"
-                    ? "Добавить вид рыбы"
-                  : "Добавить";
-            btn.textContent = `${addLabel}: ${option.label}`;
+            btn.textContent = `${buildReferenceActionLabel(target.referencePickerKind)}: ${option.label}`;
             btn.addEventListener("click", () => {
               queueListEdit({
                 targetPath: target.targetPath,
@@ -1972,15 +2197,23 @@ function renderListTargets() {
       search.addEventListener("input", () => {
         refreshReferenceResults();
       });
+      search.addEventListener("focus", () => {
+        if (!results.childElementCount) {
+          refreshReferenceResults();
+        }
+      });
 
-      pickerWrap.append(search, results);
+      pickerToolbar.append(search, showOptionsBtn);
+      pickerWrap.append(pickerToolbar, results);
       actions.appendChild(pickerWrap);
     }
 
     if (target.supportsAddEmpty) {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.textContent = "Добавить новый пустой";
+      btn.textContent = (target.label || "").toLowerCase().includes("точки кривой")
+        ? "Добавить точку"
+        : "Добавить новый пустой";
       btn.addEventListener("click", () => {
         queueListEdit({
           targetPath: target.targetPath,
@@ -2003,7 +2236,9 @@ function renderListTargets() {
 
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.textContent = "Убрать элемент №";
+      btn.textContent = (target.label || "").toLowerCase().includes("точки кривой")
+        ? "Убрать точку №"
+        : "Убрать элемент №";
       btn.addEventListener("click", () => {
         queueListEdit({
           targetPath: target.targetPath,
@@ -2048,6 +2283,7 @@ function renderListTargets() {
   });
 
   renderCurrentListOps();
+  renderSchemaFilterMeta();
 }
 
 async function loadSelectedAssetSchema() {
@@ -2066,12 +2302,19 @@ async function loadSelectedAssetSchema() {
   renderSelectedAssetPreview();
 
   setSchemaMeta("Загрузка параметров...");
+  el("schemaWarnings").innerHTML = "";
+  el("schemaSections").innerHTML = '<div class="schema-loading muted">Читаю безопасные настройки из игры. На больших ассетах это может занять несколько секунд.</div>';
+  el("listTargetRows").innerHTML = '<div class="schema-loading muted">Собираю состав системы и связанные элементы...</div>';
   const schema = await api(`/api/modding/schema?assetId=${encodeURIComponent(assetId)}`);
   state.modding.currentSchema = schema;
   state.modding.currentFieldValues = new Map();
   state.modding.currentFieldDisplayValues = new Map();
   state.modding.currentOriginalValues = new Map();
   state.modding.currentListEdits = [];
+  state.modding.schemaFieldFilter = "";
+  if (el("schemaFieldFilter")) {
+    el("schemaFieldFilter").value = "";
+  }
 
   for (const field of schema.fields || []) {
     state.modding.currentFieldValues.set(field.fieldPath, field.currentValue);
@@ -2081,6 +2324,7 @@ async function loadSelectedAssetSchema() {
 
   renderSchemaWarnings(schema.warnings || []);
   setSchemaMeta(describeSchemaMeta(schema));
+  renderSchemaFilterMeta();
 
   renderSchemaFields();
   renderListTargets();
@@ -2233,6 +2477,7 @@ async function previewStagedAssetEdits(stagedItem) {
 
   renderSchemaWarnings(schema.warnings || []);
   setSchemaMeta(describeSchemaMeta(schema));
+  renderSchemaFilterMeta();
   renderSchemaFields();
   renderListTargets();
   renderSelectedAssetPreview();
@@ -2416,6 +2661,12 @@ function setupActions() {
   });
 
   el("loadSchemaBtn").addEventListener("click", () => loadSelectedAssetSchema().catch(showError));
+  el("schemaFieldFilter").addEventListener("input", () => {
+    state.modding.schemaFieldFilter = el("schemaFieldFilter").value;
+    renderSchemaFields();
+    renderListTargets();
+    renderSchemaFilterMeta();
+  });
   el("stageAssetBtn").addEventListener("click", () => {
     try {
       stageCurrentAssetEdits();

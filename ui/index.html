@@ -43,11 +43,11 @@
           </div>
           <div class="quick-help-step">
             <strong>2. Найди систему</strong>
-            <span>Выбери в списке болезнь, рецепт, предмет, событие или другую игровую систему.</span>
+            <span>Выбери в списке болезнь, рецепт, предмет, событие или другую игровую систему. Нужные настройки ниже откроются автоматически.</span>
           </div>
           <div class="quick-help-step">
             <strong>3. Поменяй параметры</strong>
-            <span>Если система пустая, сначала добавь в неё нужный эффект, предмет или связь. Технические поля скрыты.</span>
+            <span>Если система пустая, сначала открой блок состава ниже, выбери готовый вариант и затем нажми кнопку открытия результата. Технические поля скрыты.</span>
           </div>
           <div class="quick-help-step">
             <strong>4. Сохрани и собери</strong>
@@ -67,8 +67,11 @@
         </select>
         <label class="inline-check">
           <input id="modOnlyEditableCheck" type="checkbox">
-          Только понятные настройки
+          Только системы с безопасными настройками
         </label>
+      </div>
+      <div id="modAssetSearchHint" class="search-hint small muted">
+        Ищи по игровому смыслу: верёвка, охрана, квест, семена, катана, рыба.
       </div>
 
       <div id="modCategoryChips" class="category-chip-row"></div>
@@ -102,6 +105,10 @@
         <button id="loadSchemaBtn" type="button">Заново прочитать настройки из игры</button>
         <span id="schemaMeta" class="muted small"></span>
       </div>
+      <div class="schema-filter-toolbar">
+        <input id="schemaFieldFilter" type="text" placeholder="Найти настройку или блок состава: ресурс, отдача, количество, квест">
+        <div id="schemaFilterMeta" class="muted small"></div>
+      </div>
       <div id="schemaWarnings" class="warning-list"></div>
 
       <details class="advanced-box">
@@ -130,16 +137,16 @@
       </div>
 
       <div class="panel-sub">
-        <div class="panel-sub-title">Состав системы и связи</div>
+        <div class="panel-sub-title">Что можно добавить, убрать и связать</div>
         <div id="listTargetRows" class="list-targets"></div>
         <div id="listOpsMeta" class="muted small"></div>
         <div id="listOpsQueue" class="list-op-queue"></div>
       </div>
 
       <div class="toolbar">
-        <button id="stageAssetBtn" type="button">Сохранить эти настройки в мод</button>
-        <button id="previewAssetBtn" type="button">Применить добавление и настроить его</button>
-        <button id="clearStagedBtn" type="button">Очистить все изменения</button>
+        <button id="stageAssetBtn" type="button">Добавить этот раздел в мод</button>
+        <button id="previewAssetBtn" type="button">Показать результат и открыть новые настройки</button>
+        <button id="clearStagedBtn" type="button">Очистить весь мод</button>
       </div>
       <div id="stagedMeta" class="muted small"></div>
       <div id="stagedList" class="staged-list"></div>
@@ -148,12 +155,15 @@
     <section class="panel">
       <h2>3) Выпустить готовый .pak</h2>
       <div class="build-grid">
-        <label>Имя файла .pak
-          <input id="modNameInput" type="text" placeholder="pakchunk99-my-mod-WindowsNoEditor">
+        <label>Имя .pak вручную, если нужно
+          <input id="modNameInput" type="text" placeholder="Оставь пустым для автоматического имени">
         </label>
         <label><input id="installCheck" type="checkbox" checked> Сразу установить мод в игру</label>
         <label><input id="zipCheck" type="checkbox" checked> Сделать архив для отправки</label>
         <label><input id="seedCheck" type="checkbox" checked> Автоматически добавить нужные игровые файлы</label>
+      </div>
+      <div class="build-hint small muted">
+        Если поле оставить пустым, программа сама создаст имя вида <code>pakchunk99-WindowsNoEditor_7_P.pak</code>, положит сборку в папку <code>mods</code> и при установке скопирует её в <code>SCUM/Content/Paks/mods</code>.
       </div>
       <div class="toolbar">
         <button id="buildBtn" type="button" class="primary">Собрать готовый мод</button>
