@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Reflection;
+using System.Security.Cryptography;
 using UAssetAPI;
 using UAssetAPI.ExportTypes;
 using UAssetAPI.PropertyTypes.Objects;
@@ -16,6 +17,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
+    private const int ModAssetsCatalogCacheFormatVersion = 1;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -3241,6 +3243,11 @@ internal sealed class StudioRuntime
 
     private List<StudioModAssetDto> BuildModAssets()
     {
+        if (TryLoadModAssetsCatalogCache(out var cachedAssets))
+        {
+            return cachedAssets;
+        }
+
         var pakIndex = GetOrLoadPakIndex();
         var result = new List<StudioModAssetDto>(30000);
         foreach (var path in pakIndex.GetAllRelativePaths())
@@ -3305,7 +3312,135 @@ internal sealed class StudioRuntime
 
             return string.Compare(a.RelativePath, b.RelativePath, StringComparison.OrdinalIgnoreCase);
         });
+
+        TrySaveModAssetsCatalogCache(result);
         return result;
+    }
+
+    private bool TryLoadModAssetsCatalogCache(out List<StudioModAssetDto> assets)
+    {
+        assets = [];
+
+        try
+        {
+            var cachePath = GetModAssetsCatalogCachePath();
+            if (!File.Exists(cachePath))
+            {
+                return false;
+            }
+
+            var json = File.ReadAllText(cachePath);
+            var envelope = JsonSerializer.Deserialize<ModAssetsCatalogCacheEnvelope>(json);
+            if (envelope is null
+                || envelope.FormatVersion != ModAssetsCatalogCacheFormatVersion
+                || envelope.Assets.Count == 0)
+            {
+                return false;
+            }
+
+            if (!string.Equals(envelope.ScumRoot, _scum.RootPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (!string.Equals(envelope.BuildId ?? string.Empty, _scum.BuildId ?? string.Empty, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var pakSignature = ComputePakSignature();
+            if (!string.Equals(envelope.PakSignature, pakSignature, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            assets = envelope.Assets;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void TrySaveModAssetsCatalogCache(List<StudioModAssetDto> assets)
+    {
+        if (assets.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var envelope = new ModAssetsCatalogCacheEnvelope
+            {
+                FormatVersion = ModAssetsCatalogCacheFormatVersion,
+                ScumRoot = _scum.RootPath,
+                BuildId = _scum.BuildId,
+                PakSignature = ComputePakSignature(),
+                GeneratedUtc = DateTimeOffset.UtcNow,
+                Assets = assets
+            };
+
+            var json = JsonSerializer.Serialize(envelope, new JsonSerializerOptions { WriteIndented = false });
+            var cachePath = GetModAssetsCatalogCachePath();
+            File.WriteAllText(cachePath, json, new UTF8Encoding(false));
+        }
+        catch
+        {
+            // Ignore cache write errors; the runtime can always rebuild catalog in-memory.
+        }
+    }
+
+    private string GetModAssetsCatalogCachePath()
+    {
+        var cacheRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ScumPakWizard",
+            "cache");
+        Directory.CreateDirectory(cacheRoot);
+
+        var buildToken = NormalizeCacheFileToken(_scum.BuildId);
+        var rootHash = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(_scum.RootPath.ToLowerInvariant())));
+        var rootToken = rootHash.Length <= 12 ? rootHash.ToLowerInvariant() : rootHash[..12].ToLowerInvariant();
+        return Path.Combine(
+            cacheRoot,
+            $"mod-assets-catalog-v{ModAssetsCatalogCacheFormatVersion}-{rootToken}-{buildToken}.json");
+    }
+
+    private string ComputePakSignature()
+    {
+        var builder = new StringBuilder(8192);
+        foreach (var pakPath in Directory.EnumerateFiles(_scum.PaksPath, "*.pak", SearchOption.TopDirectoryOnly)
+                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            var info = new FileInfo(pakPath);
+            builder.Append(Path.GetFileName(pakPath).ToLowerInvariant());
+            builder.Append('|');
+            builder.Append(info.Length);
+            builder.Append('|');
+            builder.Append(info.LastWriteTimeUtc.Ticks);
+            builder.Append(';');
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
+    private static string NormalizeCacheFileToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "unknown";
+        }
+
+        var safe = Regex.Replace(value.Trim(), @"[^A-Za-z0-9._-]+", "_", RegexOptions.CultureInvariant);
+        if (string.IsNullOrWhiteSpace(safe))
+        {
+            return "unknown";
+        }
+
+        return safe.Length <= 64 ? safe : safe[..64];
     }
 
     private List<StudioModAssetDto> BuildVisibleModAssets(List<StudioModAssetDto> rawAssets)
@@ -21829,6 +21964,16 @@ internal sealed class StudioRuntime
     private sealed record ModAssetDescriptor(
         string DisplayName,
         string Summary);
+
+    private sealed class ModAssetsCatalogCacheEnvelope
+    {
+        public int FormatVersion { get; set; }
+        public string ScumRoot { get; set; } = string.Empty;
+        public string? BuildId { get; set; }
+        public string PakSignature { get; set; } = string.Empty;
+        public DateTimeOffset GeneratedUtc { get; set; }
+        public List<StudioModAssetDto> Assets { get; set; } = [];
+    }
 
     private sealed record JsonPathToken(bool IsIndex, int Index, string? PropertyName)
     {
