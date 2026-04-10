@@ -1668,7 +1668,7 @@ internal sealed class StudioRuntime
         }
 
         var context = contextSegments.Count > 0
-            ? string.Join(" / ", contextSegments.Select(segment => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(segment)))))
+            ? string.Join(" / ", contextSegments.Select(LocalizeCompositeAssetName))
             : string.Empty;
 
         var stem = Path.GetFileNameWithoutExtension(normalized);
@@ -1677,14 +1677,61 @@ internal sealed class StudioRuntime
             stem = stem["Examine_".Length..];
         }
 
-        var name = CapitalizeFirst(
-            NormalizeLocalizedLabel(
-                LocalizeCommonGameplayTerms(
-                    HumanizeCamel(stem.Replace('_', ' ')))));
+        var name = LocalizeCompositeAssetName(stem);
 
         return string.IsNullOrWhiteSpace(context)
             ? name
             : $"{context} / {name}";
+    }
+
+    private static string LocalizeCompositeAssetName(string rawStem)
+    {
+        if (string.IsNullOrWhiteSpace(rawStem))
+        {
+            return "Без названия";
+        }
+
+        var directLocalized = CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(rawStem)));
+        var fallbackLocalized = CapitalizeFirst(NormalizeLocalizedLabel(LocalizeCompactGameplayName(rawStem)));
+        if (!string.Equals(directLocalized, fallbackLocalized, StringComparison.OrdinalIgnoreCase))
+        {
+            return directLocalized;
+        }
+
+        var parts = rawStem
+            .Split(['_', '-', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+        if (parts.Count == 0)
+        {
+            return "Без названия";
+        }
+
+        if (parts.Count == 1)
+        {
+            return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(parts[0])));
+        }
+
+        var localizedParts = new List<string>(parts.Count);
+        foreach (var part in parts)
+        {
+            if (int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+            {
+                localizedParts.Add(part);
+                continue;
+            }
+
+            var localized = LocalizeAssetStem(part);
+            if (string.IsNullOrWhiteSpace(localized))
+            {
+                localized = HumanizeCamel(part);
+            }
+
+            localizedParts.Add(localized);
+        }
+
+        return CapitalizeFirst(
+            NormalizeLocalizedLabel(
+                LocalizeCommonGameplayTerms(string.Join(" ", localizedParts))));
     }
 
     private static string ResolveCargoDropLootPresetDisplayName(string relativePath)
@@ -5433,7 +5480,18 @@ internal sealed class StudioRuntime
 
     private static bool IsRangedWeaponAssetPath(string relativePath)
     {
-        return relativePath.Contains("/items/weapons/ranged_weapons/", StringComparison.OrdinalIgnoreCase);
+        if (!relativePath.Contains("/items/weapons/", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (relativePath.Contains("/items/weapons/ranged_weapons/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        return stem.StartsWith("weapon_", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryFindWeaponOwnerExport(UAsset asset, out NormalExport export, out int exportIndex)
@@ -15101,6 +15159,60 @@ internal sealed class StudioRuntime
             ["influenza"] = "грипп",
             ["infection"] = "инфекция",
             ["infectioncontroller"] = "контроллер инфекции",
+            ["character"] = "персонажи",
+            ["characters"] = "персонажи",
+            ["armednpcs"] = "вооружённые NPC",
+            ["scavenger"] = "мародёр",
+            ["scavengers"] = "мародёры",
+            ["puppets"] = "куклы",
+            ["loot"] = "лут",
+            ["civilian"] = "гражданский",
+            ["military"] = "военный",
+            ["police"] = "полиция",
+            ["medical"] = "медицина",
+            ["radiation"] = "радиация",
+            ["spawnpreset"] = "пресет спавна",
+            ["examine"] = "осмотр",
+            ["buildings"] = "здания",
+            ["bunker"] = "бункер",
+            ["tv"] = "ТВ",
+            ["canteen"] = "столовая",
+            ["vending"] = "торговый",
+            ["wending"] = "торговый",
+            ["machine"] = "автомат",
+            ["soda"] = "газировка",
+            ["trash"] = "мусор",
+            ["locker"] = "шкаф",
+            ["bathroom"] = "ванная",
+            ["kitchen"] = "кухня",
+            ["bedroom"] = "спальня",
+            ["garage"] = "гараж",
+            ["office"] = "офис",
+            ["desk"] = "стол",
+            ["wardrobe"] = "гардероб",
+            ["filecabinet"] = "картотечный шкаф",
+            ["dressingroom"] = "раздевалка",
+            ["specialpackages"] = "спецпакеты",
+            ["warehouse"] = "склад",
+            ["workshop"] = "мастерская",
+            ["worldshelffuses"] = "полка с предохранителями",
+            ["worldshelf"] = "мировая полка",
+            ["cardbox"] = "картонная коробка",
+            ["depository"] = "хранилище",
+            ["crate"] = "ящик",
+            ["tooldrawer"] = "ящик с инструментами",
+            ["toolbox"] = "ящик с инструментами",
+            ["cart"] = "тележка",
+            ["tooldesk"] = "верстак",
+            ["green"] = "зелёный",
+            ["big"] = "большой",
+            ["pile"] = "куча",
+            ["small"] = "малый",
+            ["dead"] = "мёртвые",
+            ["keycard"] = "ключ-карта",
+            ["keycardbunker"] = "ключ-карта бункера",
+            ["keycardbunkerlevel01"] = "ключ-карта бункера: уровень 01",
+            ["keycardbunkerlevel02"] = "ключ-карта бункера: уровень 02",
             ["irritatedthroat"] = "раздражение горла",
             ["drunkenness"] = "алкогольное опьянение",
             ["boostofenergy"] = "прилив энергии",
@@ -15200,6 +15312,33 @@ internal sealed class StudioRuntime
             ["blackhawkcrossbow"] = "арбалет Black Hawk",
             ["compoundbow"] = "составной лук",
             ["improvisedbow"] = "самодельный лук",
+            ["improvisedgrenadelauncher"] = "самодельный гранатомёт",
+            ["improvisedflamethrower"] = "самодельный огнемёт",
+            ["improvisedrifle"] = "самодельная винтовка",
+            ["improvisedhandgun"] = "самодельный пистолет",
+            ["mosinnagant"] = "Mosin-Nagant",
+            ["tommygun"] = "Tommy Gun",
+            ["flaregun"] = "Flare Gun",
+            ["carbonhunter"] = "Carbon Hunter",
+            ["aks74u"] = "AKS-74U",
+            ["ak15"] = "AK-15",
+            ["ak47"] = "AK-47",
+            ["akm"] = "AKM",
+            ["asval"] = "AS VAL",
+            ["m1garand"] = "M1 Garand",
+            ["m16a4"] = "M16A4",
+            ["m1911"] = "M1911",
+            ["m1887"] = "M1887",
+            ["m82a1"] = "M82A1",
+            ["mp5"] = "MP5",
+            ["mp5k"] = "MP5K",
+            ["mp5sd"] = "MP5 SD",
+            ["rpk74"] = "RPK-74",
+            ["scarl"] = "SCAR-L",
+            ["scardmr"] = "SCAR DMR",
+            ["svddragunov"] = "SVD Dragunov",
+            ["vssvz"] = "VSS Vz",
+            ["vhs2"] = "VHS-2",
             ["bpencounterstaticzone"] = "статическая зона события",
             ["bpencounterhordebase"] = "базовая орда",
             ["bpencounterspawncharactersbase"] = "база появления персонажей",
