@@ -17,7 +17,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 1;
+    private const int ModAssetsCatalogCacheFormatVersion = 5;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -28,6 +28,8 @@ internal sealed class StudioRuntime
     private const string CraftingUiDataRegistryRelativePath = "scum/content/conz_files/ui/crafting/craftinguidata.uasset";
     private const string ForeignSubstanceAttributeFieldPrefix = "foreign-substance-attribute:";
     private const string WeaponSyntheticFieldPrefix = "weapon-field:";
+    private const string AmmunitionSyntheticFieldPrefix = "ammo-field:";
+    private const string GameEventMarkerSyntheticFieldPrefix = "gameevent-marker:";
     private const string SyntheticSideEffectsTargetPath = "synthetic:side-effects";
     private const string SyntheticCraftingUiCategoryRecipesTargetPrefix = "synthetic:crafting-ui-category-recipes:";
     private const string SyntheticCargoMajorSpawnerOptionsTargetPath = "synthetic:cargo-major-spawner-options";
@@ -212,6 +214,8 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _encounterCharacterPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _encounterClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _cargoDropEncounterClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _cargoDropContainerClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _guardedZoneDropshipClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _encounterNpcClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _craftingIngredientGroupReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _craftingItemRecipeReferenceOptionsCache;
@@ -226,6 +230,9 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _gameEventOutfitLoadoutReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _gameEventMandatoryLoadoutReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _gameEventSupportLoadoutReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _gameEventTeamEquipmentSetReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _gameEventDropzoneCrateClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _gameEventDropzoneCargoClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _fishSpeciesReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _plantSpeciesReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _plantPestReferenceOptionsCache;
@@ -235,6 +242,7 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerSubpresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _vehicleSpawnPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _ammoItemReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _ammoProjectileReferenceOptionsCache;
     private List<StudioModFieldOptionDto>? _itemSpawningCooldownGroupFieldOptionsCache;
     private List<SideEffectTemplateInfo>? _sideEffectTemplateCache;
 
@@ -637,6 +645,11 @@ internal sealed class StudioRuntime
             return GetAmmoItemReferenceOptions(term, limit);
         }
 
+        if (normalizedPicker is "weapon-bullet-class-asset" or "weapon-bullet-class-reference" or "ammo-projectile-class")
+        {
+            return GetWeaponBulletClassReferenceOptions(term, limit);
+        }
+
         List<StudioReferenceOptionDto> allOptions;
         lock (_sync)
         {
@@ -656,6 +669,10 @@ internal sealed class StudioRuntime
                     _encounterClassReferenceOptionsCache ??= BuildEncounterClassReferenceOptions(),
                 "cargo-drop-encounter-class" =>
                     _cargoDropEncounterClassReferenceOptionsCache ??= BuildCargoDropEncounterClassReferenceOptions(),
+                "cargo-drop-container-class" =>
+                    _cargoDropContainerClassReferenceOptionsCache ??= BuildCargoDropContainerClassReferenceOptions(),
+                "guarded-zone-dropship-class" or "dropship-class" =>
+                    _guardedZoneDropshipClassReferenceOptionsCache ??= BuildGuardedZoneDropshipClassReferenceOptions(),
                 "encounter-npc-class" =>
                     _encounterNpcClassReferenceOptionsCache ??= BuildEncounterNpcClassReferenceOptions(),
                 "crafting-item-recipe-asset" or "crafting-item-recipe" =>
@@ -706,6 +723,16 @@ internal sealed class StudioRuntime
                     _gameEventSupportLoadoutReferenceOptionsCache ??= BuildGameEventLoadoutReferenceOptions(
                         "/ui/gameevents/itemselection/support/",
                         "дополнительное снаряжение"),
+                "gameevent-team-equipment-set" =>
+                    _gameEventTeamEquipmentSetReferenceOptionsCache ??= BuildGameEventTeamEquipmentSetReferenceOptions(),
+                "gameevent-dropzone-crate-class" =>
+                    _gameEventDropzoneCrateClassReferenceOptionsCache ??= BuildGameEventDropzoneClassReferenceOptions(
+                        "bp_dropzonecrate",
+                        "Ящик Drop Zone"),
+                "gameevent-dropzone-cargo-class" =>
+                    _gameEventDropzoneCargoClassReferenceOptionsCache ??= BuildGameEventDropzoneClassReferenceOptions(
+                        "bp_dropzonecargo",
+                        "Груз Drop Zone"),
                 "fish-species-asset" or "fish-species" =>
                     _fishSpeciesReferenceOptionsCache ??= BuildFishSpeciesReferenceOptions(),
                 "plant-species-asset" or "plant-species" =>
@@ -860,6 +887,90 @@ internal sealed class StudioRuntime
         return !string.IsNullOrWhiteSpace(fileName)
             && !fileName.EndsWith("_es", StringComparison.OrdinalIgnoreCase)
             && IsLikelyPlayableItemAsset(normalized);
+    }
+
+    private List<StudioReferenceOptionDto> GetWeaponBulletClassReferenceOptions(string? term, int limit)
+    {
+        List<StudioReferenceOptionDto> allOptions;
+        lock (_sync)
+        {
+            allOptions = _ammoProjectileReferenceOptionsCache ??= BuildWeaponBulletClassReferenceOptions();
+        }
+
+        IEnumerable<StudioReferenceOptionDto> query = allOptions;
+        if (!string.IsNullOrWhiteSpace(term))
+        {
+            var trimmed = term.Trim();
+            var searchTerms = ExpandReferenceSearchTerms("weapon-bullet-class-asset", trimmed).ToList();
+            var normalizedTerms = searchTerms
+                .Select(NormalizeLooseSearch)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            query = query.Where(option => MatchesReferenceSearch(option, searchTerms, normalizedTerms));
+        }
+
+        return query
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToList();
+    }
+
+    private List<StudioReferenceOptionDto> BuildWeaponBulletClassReferenceOptions()
+    {
+        var result = new List<StudioReferenceOptionDto>(384);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var catalog = GetItemCatalog();
+
+        foreach (var item in catalog.Items)
+        {
+            if (!IsWeaponBulletClassReferenceCandidate(item.RelativePath))
+            {
+                continue;
+            }
+
+            var value = BuildBlueprintClassReferenceFromRelativePath(item.RelativePath);
+            if (!seen.Add(value))
+            {
+                continue;
+            }
+
+            var displayName = string.IsNullOrWhiteSpace(item.ItemName)
+                ? LocalizeAssetStem(item.ItemId)
+                : item.ItemName;
+            result.Add(new StudioReferenceOptionDto(value, PrefixReferenceOptionLabel("Класс пули", displayName)));
+        }
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool IsWeaponBulletClassReferenceCandidate(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.StartsWith("scum/content/conz_files/items/ammunition/ammunition_class/", StringComparison.Ordinal)
+            || !normalized.EndsWith(".uasset", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var fileName = Path.GetFileNameWithoutExtension(normalized);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
+        }
+
+        if (fileName.EndsWith("_es", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith("_client", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return fileName.StartsWith("bp_weaponbullet_", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("bpc_weaponbullet_", StringComparison.OrdinalIgnoreCase);
     }
 
     private List<StudioReferenceOptionDto> GetCraftingIngredientReferenceOptions(string? term, int limit)
@@ -1551,6 +1662,114 @@ internal sealed class StudioRuntime
             .ToList();
     }
 
+    private List<StudioReferenceOptionDto> BuildGameEventTeamEquipmentSetReferenceOptions()
+    {
+        var result = new List<StudioReferenceOptionDto>(12);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _modAssetsCache ??= BuildModAssets();
+
+        foreach (var assetInfo in _modAssetsCache)
+        {
+            var relativePath = PathUtil.NormalizeRelative(assetInfo.RelativePath);
+            if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                || !relativePath.Contains("/gameevents/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var stem = Path.GetFileNameWithoutExtension(relativePath);
+            if (string.IsNullOrWhiteSpace(stem)
+                || !stem.Contains("equipment_set", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var value = BuildBlueprintClassReferenceFromRelativePath(relativePath);
+            if (!seen.Add(value))
+            {
+                continue;
+            }
+
+            var displayName = ResolveGameEventTeamEquipmentSetDisplayName(relativePath);
+            result.Add(new StudioReferenceOptionDto(
+                value,
+                PrefixReferenceOptionLabel("Набор события", displayName)));
+        }
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private List<StudioReferenceOptionDto> BuildGameEventDropzoneClassReferenceOptions(string stemToken, string labelPrefix)
+    {
+        var result = new List<StudioReferenceOptionDto>(8);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _modAssetsCache ??= BuildModAssets();
+
+        foreach (var assetInfo in _modAssetsCache)
+        {
+            var relativePath = PathUtil.NormalizeRelative(assetInfo.RelativePath);
+            if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                || !relativePath.Contains("/gameevents/dropzone/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var stem = Path.GetFileNameWithoutExtension(relativePath);
+            if (string.IsNullOrWhiteSpace(stem)
+                || !stem.Contains(stemToken, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var value = BuildBlueprintClassReferenceFromRelativePath(relativePath);
+            if (!seen.Add(value))
+            {
+                continue;
+            }
+
+            var displayName = stem.Contains("dropzonecrate", StringComparison.OrdinalIgnoreCase)
+                ? "Drop Zone ящик"
+                : stem.Contains("dropzonecargo", StringComparison.OrdinalIgnoreCase)
+                    ? "Drop Zone груз"
+                    : LocalizeAssetStem(stem);
+            result.Add(new StudioReferenceOptionDto(
+                value,
+                PrefixReferenceOptionLabel(labelPrefix, displayName)));
+        }
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string ResolveGameEventTeamEquipmentSetDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        if (string.IsNullOrWhiteSpace(stem))
+        {
+            return "набор команды";
+        }
+
+        var teamMatch = Regex.Match(stem, @"team[_\-]?(\d+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var playersMatch = Regex.Match(stem, @"(\d+)[_\-]?players", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        if (teamMatch.Success && playersMatch.Success)
+        {
+            return $"команда {teamMatch.Groups[1].Value} ({playersMatch.Groups[1].Value} игроков)";
+        }
+
+        if (teamMatch.Success)
+        {
+            return $"команда {teamMatch.Groups[1].Value}";
+        }
+
+        return LocalizeAssetStem(stem);
+    }
+
     private List<StudioReferenceOptionDto> BuildFishSpeciesReferenceOptions()
     {
         var result = new List<StudioReferenceOptionDto>(24);
@@ -2016,9 +2235,8 @@ internal sealed class StudioRuntime
                 return normalized.Contains("/encounters/encounterclasses/", StringComparison.Ordinal)
                     || normalized.Contains("/worldevents/cargodrop/", StringComparison.Ordinal)
                     || normalized.Contains("/cargo_drop/", StringComparison.Ordinal)
-                    || stem.Contains("dropship", StringComparison.Ordinal)
-                    || stem.Contains("cargodrop", StringComparison.Ordinal)
-                    || stem.EndsWith("encounter", StringComparison.Ordinal);
+                    || (normalized.Contains("/encounters/", StringComparison.Ordinal)
+                        && stem.EndsWith("encounter", StringComparison.Ordinal));
             },
             assetInfo => PrefixReferenceOptionLabel("Класс события", assetInfo.DisplayName));
     }
@@ -2046,6 +2264,107 @@ internal sealed class StudioRuntime
             assetInfo => PrefixReferenceOptionLabel("Защита грузового дропа", ResolveCargoDropEncounterReferenceLabel(assetInfo.RelativePath)));
     }
 
+    private List<StudioReferenceOptionDto> BuildCargoDropContainerClassReferenceOptions()
+    {
+        return BuildBlueprintReferenceOptions(
+            relativePath =>
+            {
+                if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+                if (!normalized.Contains("/worldevents/cargodrop/", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var stem = Path.GetFileNameWithoutExtension(normalized);
+                if (string.IsNullOrWhiteSpace(stem))
+                {
+                    return false;
+                }
+
+                // Avoid offering event controller classes where container actor classes are expected.
+                if (stem.Contains("event", StringComparison.Ordinal)
+                    || stem.Contains("manager", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                return stem.StartsWith("bp_cargo", StringComparison.Ordinal);
+            },
+            assetInfo => PrefixReferenceOptionLabel("Контейнер события", ResolveCargoDropContainerReferenceLabel(assetInfo.RelativePath)));
+    }
+
+    private List<StudioReferenceOptionDto> BuildGuardedZoneDropshipClassReferenceOptions()
+    {
+        _gameAssetsCache ??= BuildGameAssetRows();
+        _presetAssetsCache ??= BuildPresetAssetRows();
+
+        var result = new List<StudioReferenceOptionDto>(16);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddOption(string value, string label)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !seen.Add(value))
+            {
+                return;
+            }
+
+            result.Add(new StudioReferenceOptionDto(value, label));
+        }
+
+        foreach (var assetInfo in _gameAssetsCache)
+        {
+            var relativePath = PathUtil.NormalizeRelative(assetInfo.RelativePath);
+            if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!relativePath.Contains("/characters/mechanoids/dropship/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var value = BuildBlueprintClassReferenceFromRelativePath(relativePath);
+            var label = PrefixReferenceOptionLabel("Класс дропшипа", ResolveGuardedZoneDropshipReferenceLabel(relativePath));
+            AddOption(value, label);
+        }
+
+        foreach (var assetInfo in _presetAssetsCache)
+        {
+            var relativePath = PathUtil.NormalizeRelative(assetInfo.RelativePath);
+            if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!relativePath.Contains("/characters/mechanoids/dropship/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var value = BuildBlueprintClassReferenceFromRelativePath(relativePath);
+            var label = PrefixReferenceOptionLabel("Класс дропшипа", ResolveGuardedZoneDropshipReferenceLabel(relativePath));
+            AddOption(value, label);
+        }
+
+        AddOption(
+            "/Game/ConZ_Files/Characters/Mechanoids/Dropship/BP_Dropship.BP_Dropship_C",
+            "Класс дропшипа: обычный дропшип");
+        AddOption(
+            "/Game/ConZ_Files/Characters/Mechanoids/Dropship/BP_GuardedZoneDropship.BP_GuardedZoneDropship_C",
+            "Класс дропшипа: дропшип охраняемой зоны");
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static string ResolveCargoDropEncounterReferenceLabel(string relativePath)
     {
         var stem = Path.GetFileNameWithoutExtension(relativePath);
@@ -2054,6 +2373,58 @@ internal sealed class StudioRuntime
         {
             "bpencountercargodropevent" => "событие грузового дропа",
             "bpencountercargodropeventflyingguardian" => "событие грузового дропа с летающим стражем",
+            _ => LocalizeAssetStem(stem)
+        };
+    }
+
+    private static string ResolveCargoDropContainerReferenceLabel(string relativePath)
+    {
+        var candidate = (relativePath ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return string.Empty;
+        }
+
+        var colonIndex = candidate.LastIndexOf(':');
+        if (colonIndex >= 0 && colonIndex < candidate.Length - 1)
+        {
+            candidate = candidate[(colonIndex + 1)..];
+        }
+
+        var slashIndex = candidate.LastIndexOf('/');
+        if (slashIndex >= 0 && slashIndex < candidate.Length - 1)
+        {
+            candidate = candidate[(slashIndex + 1)..];
+        }
+
+        var dotIndex = candidate.IndexOf('.');
+        if (dotIndex > 0)
+        {
+            candidate = candidate[..dotIndex];
+        }
+
+        if (candidate.EndsWith("_C", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = candidate[..^2];
+        }
+
+        var key = NormalizeAssetKey(candidate);
+        return key switch
+        {
+            "bpcargo" => "контейнер грузового дропа",
+            "bpcargodropcontainerempty" => "пустой контейнер грузового дропа",
+            _ => LocalizeAssetStem(candidate)
+        };
+    }
+
+    private static string ResolveGuardedZoneDropshipReferenceLabel(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath ?? string.Empty);
+        var key = NormalizeAssetKey(stem);
+        return key switch
+        {
+            "bpdropship" => "обычный дропшип",
+            "bpguardedzonedropship" => "дропшип охраняемой зоны",
             _ => LocalizeAssetStem(stem)
         };
     }
@@ -2749,6 +3120,49 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (normalizedPicker == "weaponbulletclassasset"
+            || normalizedPicker == "weaponbulletclassreference"
+            || normalizedPicker == "ammoprojectileclass")
+        {
+            if (normalizedTerm.Contains("пул", StringComparison.Ordinal)
+                || normalizedTerm.Contains("projectile", StringComparison.Ordinal))
+            {
+                Add("bullet", "weapon bullet", "projectile", "пуля");
+            }
+
+            if (normalizedTerm.Contains("брон", StringComparison.Ordinal)
+                || normalizedTerm.Contains("ap", StringComparison.Ordinal))
+            {
+                Add("ap", "armor piercing", "бронебой");
+            }
+
+            if (normalizedTerm.Contains("трас", StringComparison.Ordinal)
+                || normalizedTerm.Contains("tr", StringComparison.Ordinal))
+            {
+                Add("tr", "tracer", "трассер");
+            }
+
+            if (normalizedTerm.Contains("дроб", StringComparison.Ordinal))
+            {
+                Add("12 gauge", "birdshot", "buckshot", "slug", "pellet", "дробь");
+            }
+        }
+
+        if (normalizedPicker == "cargodropcontainerclass")
+        {
+            if (normalizedTerm.Contains("контейнер", StringComparison.Ordinal)
+                || normalizedTerm.Contains("cargo", StringComparison.Ordinal))
+            {
+                Add("cargo", "container", "crate", "ящик", "контейнер");
+            }
+
+            if (normalizedTerm.Contains("пуст", StringComparison.Ordinal)
+                || normalizedTerm.Contains("empty", StringComparison.Ordinal))
+            {
+                Add("empty", "пустой");
+            }
+        }
+
         if (normalizedPicker == "itemspawnerpreset" || normalizedPicker == "regularitemspawnerpreset")
         {
             if (normalizedTerm.Contains("дом", StringComparison.Ordinal)
@@ -2868,6 +3282,51 @@ internal sealed class StudioRuntime
             if (normalizedTerm.Contains("тракт", StringComparison.Ordinal))
             {
                 Add("tractor");
+            }
+        }
+
+        if (normalizedPicker == "guardedzonedropshipclass" || normalizedPicker == "dropshipclass")
+        {
+            if (normalizedTerm.Contains("дроп", StringComparison.Ordinal)
+                || normalizedTerm.Contains("dropship", StringComparison.Ordinal)
+                || normalizedTerm.Contains("кораб", StringComparison.Ordinal))
+            {
+                Add("dropship", "guarded zone", "sentry", "дропшип", "десантный корабль");
+            }
+
+            if (normalizedTerm.Contains("охран", StringComparison.Ordinal)
+                || normalizedTerm.Contains("guard", StringComparison.Ordinal))
+            {
+                Add("guarded", "guarded zone", "sentry", "охрана");
+            }
+        }
+
+        if (normalizedPicker == "gameeventteamequipmentset")
+        {
+            if (normalizedTerm.Contains("команд", StringComparison.Ordinal)
+                || normalizedTerm.Contains("team", StringComparison.Ordinal))
+            {
+                Add("team", "equipment set", "набор команды", "команда");
+            }
+
+            if (normalizedTerm.Contains("игрок", StringComparison.Ordinal)
+                || normalizedTerm.Contains("players", StringComparison.Ordinal))
+            {
+                Add("players", "5 players", "игроков");
+            }
+
+            if (normalizedTerm.Contains("1", StringComparison.Ordinal)
+                || normalizedTerm.Contains("a", StringComparison.Ordinal)
+                || normalizedTerm.Contains("а", StringComparison.Ordinal))
+            {
+                Add("team_01", "team 01", "команда 1");
+            }
+
+            if (normalizedTerm.Contains("2", StringComparison.Ordinal)
+                || normalizedTerm.Contains("b", StringComparison.Ordinal)
+                || normalizedTerm.Contains("б", StringComparison.Ordinal))
+            {
+                Add("team_02", "team 02", "команда 2");
             }
         }
 
@@ -3600,8 +4059,7 @@ internal sealed class StudioRuntime
     {
         var path = relativePath.ToLowerInvariant();
         var fileName = Path.GetFileNameWithoutExtension(path);
-        return path.Contains("/items/weapons/weapon_clips/", StringComparison.Ordinal)
-               || path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
+        return path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
                || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
                || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
                || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal)
@@ -3611,6 +4069,9 @@ internal sealed class StudioRuntime
                || path.Contains("/items/weapons/turrets/turret_01_wip/", StringComparison.Ordinal)
                || path.Contains("/quests/interactables/", StringComparison.Ordinal)
                || path.Contains("/quests/tasksdata/actionmatchers/", StringComparison.Ordinal)
+               || IsHiddenGameEventAuxiliaryAsset(path, fileName)
+               || (path.Contains("/gameevents/", StringComparison.Ordinal)
+                   && fileName.Contains("equipment_set", StringComparison.Ordinal))
                || path.EndsWith("/quests/bp_noticeboard.uasset", StringComparison.Ordinal)
                || path.EndsWith("/quests/bp_questbin.uasset", StringComparison.Ordinal)
                || path.EndsWith("/quests/bp_questmanager.uasset", StringComparison.Ordinal)
@@ -3620,12 +4081,13 @@ internal sealed class StudioRuntime
                || path.EndsWith("/foliage/farming/bp_garden.uasset", StringComparison.Ordinal)
                || path.EndsWith("/foliage/farming/bp_gardenmanager.uasset", StringComparison.Ordinal)
                || path.EndsWith("/economy/table_tradeabledesc.uasset", StringComparison.Ordinal)
-               || (path.Contains("/economy/traderservices/", StringComparison.Ordinal)
-                   && fileName.StartsWith("servicebp_", StringComparison.Ordinal))
-               || path.EndsWith("/worldevents/bp_worldeventmanager.uasset", StringComparison.Ordinal)
-               || path.EndsWith("/encounters/bp_globalencountermanager.uasset", StringComparison.Ordinal)
-               || path.EndsWith("/encounters/encountermanagercommondata.uasset", StringComparison.Ordinal)
-               || path.EndsWith("/encounters/bp_encounterstaticzone.uasset", StringComparison.Ordinal)
+                || (path.Contains("/economy/traderservices/", StringComparison.Ordinal)
+                    && fileName.StartsWith("servicebp_", StringComparison.Ordinal))
+                || path.EndsWith("/worldevents/bp_worldeventmanager.uasset", StringComparison.Ordinal)
+                || path.EndsWith("/worldevents/cargodrop/bp_cargodropcontainer_empty.uasset", StringComparison.Ordinal)
+                || path.EndsWith("/encounters/bp_globalencountermanager.uasset", StringComparison.Ordinal)
+                || path.EndsWith("/encounters/encountermanagercommondata.uasset", StringComparison.Ordinal)
+                || path.EndsWith("/encounters/bp_encounterstaticzone.uasset", StringComparison.Ordinal)
                || path.EndsWith("/encounters/encounterzones/bp_mediumthreatzone.uasset", StringComparison.Ordinal)
                || path.EndsWith("/characters/npcs/bp_guardedzonemanager.uasset", StringComparison.Ordinal)
                || path.EndsWith("/encounters/encounterclasses/bb_encounters/bp_basebbflyingattackerencounter.uasset", StringComparison.Ordinal)
@@ -3638,6 +4100,26 @@ internal sealed class StudioRuntime
                    && path.Contains("/particles/", StringComparison.Ordinal))
                || (path.Contains("radiation", StringComparison.Ordinal)
                    && path.Contains("/items/postspawnactions/", StringComparison.Ordinal));
+    }
+
+    private static bool IsHiddenGameEventAuxiliaryAsset(string lowerRelativePath, string lowerFileName)
+    {
+        if (!lowerRelativePath.Contains("/gameevents/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return lowerFileName is "bp_gameeventborder"
+            or "bpc_gameeventborder_mma"
+            or "bp_gameeventmanager"
+            or "bp_ctfbase"
+            or "bp_ctfflag"
+            or "bp_ctfflagstand"
+            or "bp_dropzonecargo"
+            or "bp_dropzonecrate"
+            or "bp_dropzoneslot"
+            or "dropzonekey"
+            or "dropzonekey_es";
     }
 
     private void AppendSyntheticItemSpawningRowAssets(List<StudioModAssetDto> output)
@@ -5505,6 +5987,18 @@ internal sealed class StudioRuntime
         {
             AppendSyntheticWeaponFields(weaponExport, output);
         }
+
+        if (IsAmmunitionAssetPath(relativePath)
+            && TryFindAmmunitionOwnerExport(asset, out var ammunitionExport, out _))
+        {
+            AppendSyntheticAmmunitionFields(ammunitionExport, output);
+        }
+
+        if (IsGameEventMarkerAsset(relativePath)
+            && TryFindGameEventMarkerOwnerExport(asset, out var markerExport, out _))
+        {
+            AppendSyntheticGameEventMarkerFields(asset, relativePath, markerExport, output);
+        }
     }
 
     private void AppendSyntheticSchemaListTargets(UAsset asset, string relativePath, List<StudioModListTargetDto> output)
@@ -5752,6 +6246,16 @@ internal sealed class StudioRuntime
         return stem.StartsWith("weapon_", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsAmmunitionAssetPath(string relativePath)
+    {
+        if (!relativePath.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !relativePath.Contains("/items/ammunition/ammunition_class/", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool TryFindWeaponOwnerExport(UAsset asset, out NormalExport export, out int exportIndex)
     {
         var anchorProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -5791,10 +6295,91 @@ internal sealed class StudioRuntime
         return TryGetFirstNormalExport(asset, out export, out exportIndex);
     }
 
+    private static bool TryFindAmmunitionOwnerExport(UAsset asset, out NormalExport export, out int exportIndex)
+    {
+        var anchorProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ProjectileClass",
+            "MaxAmmoCount",
+            "_damageOverTime",
+            "AmmunitionTag",
+            "_itemLocation"
+        };
+
+        for (var i = 0; i < asset.Exports.Count; i++)
+        {
+            if (asset.Exports[i] is not NormalExport candidate)
+            {
+                continue;
+            }
+
+            var hasAnchorProperty = candidate.Data.Any(property =>
+                anchorProperties.Any(anchor => PropertyNamesMatch(property.Name?.ToString(), anchor)));
+            if (!hasAnchorProperty)
+            {
+                continue;
+            }
+
+            export = candidate;
+            exportIndex = i;
+            return true;
+        }
+
+        return TryGetFirstNormalExport(asset, out export, out exportIndex);
+    }
+
+    private static bool TryFindGameEventMarkerOwnerExport(UAsset asset, out NormalExport export, out int exportIndex)
+    {
+        var anchorProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "GameEventParameters",
+            "DeathmatchParameters",
+            "TeamDeathmatchParameters",
+            "CTFParameters",
+            "DropZoneParameters"
+        };
+
+        for (var i = 0; i < asset.Exports.Count; i++)
+        {
+            if (asset.Exports[i] is not NormalExport candidate)
+            {
+                continue;
+            }
+
+            var hasAnchorProperty = candidate.Data.Any(property =>
+                property is StructPropertyData
+                && anchorProperties.Any(anchor => PropertyNamesMatch(property.Name?.ToString(), anchor)));
+            if (!hasAnchorProperty)
+            {
+                continue;
+            }
+
+            export = candidate;
+            exportIndex = i;
+            return true;
+        }
+
+        return TryGetFirstNormalExport(asset, out export, out exportIndex);
+    }
+
     private static FloatPropertyData? FindTopLevelFloatPropertyLoose(NormalExport export, string propertyName)
     {
         return export.Data
             .OfType<FloatPropertyData>()
+            .FirstOrDefault(property => PropertyNamesMatch(property.Name?.ToString(), propertyName));
+    }
+
+    private static IntPropertyData? FindTopLevelIntPropertyLoose(NormalExport export, string propertyName)
+    {
+        return export.Data
+            .OfType<IntPropertyData>()
+            .FirstOrDefault(property => PropertyNamesMatch(property.Name?.ToString(), propertyName));
+    }
+
+    private static ObjectPropertyData? FindTopLevelObjectPropertyLoose(NormalExport export, string propertyName)
+    {
+        return export.Data
+            .OfType<ObjectPropertyData>()
             .FirstOrDefault(property => PropertyNamesMatch(property.Name?.ToString(), propertyName));
     }
 
@@ -5937,6 +6522,392 @@ internal sealed class StudioRuntime
                 "100",
                 null));
         }
+    }
+
+    private static void AppendSyntheticAmmunitionFields(
+        NormalExport export,
+        List<StudioModFieldDto> output)
+    {
+        if (FindTopLevelObjectPropertyLoose(export, "ProjectileClass") is null)
+        {
+            output.Add(new StudioModFieldDto(
+                $"{AmmunitionSyntheticFieldPrefix}ProjectileClass",
+                "Класс пули",
+                "Какой класс пули использует этот боеприпас. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "object",
+                "reference-picker",
+                string.Empty,
+                true,
+                null,
+                null,
+                null,
+                "ammo-projectile-class",
+                "Найди класс пули, который должен использовать этот боеприпас, и выбери его из списка."));
+        }
+
+        if (FindTopLevelIntPropertyLoose(export, "MaxAmmoCount") is null)
+        {
+            output.Add(new StudioModFieldDto(
+                $"{AmmunitionSyntheticFieldPrefix}MaxAmmoCount",
+                "Максимум патронов в пачке",
+                "Сколько патронов находится в одной пачке или стопке этого боеприпаса. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "int",
+                "number",
+                "0",
+                true,
+                "0",
+                "500",
+                null));
+        }
+
+        if (FindTopLevelFloatPropertyLoose(export, "_damageOverTime") is null)
+        {
+            output.Add(new StudioModFieldDto(
+                $"{AmmunitionSyntheticFieldPrefix}_damageOverTime",
+                "Урон со временем",
+                "Дополнительный урон со временем от боеприпаса. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Урон",
+                "float",
+                "number",
+                "0",
+                true,
+                "0",
+                "100",
+                null));
+        }
+    }
+
+    private static void AppendSyntheticGameEventMarkerFields(
+        UAsset asset,
+        string relativePath,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output)
+    {
+        AppendSyntheticCommonGameEventMarkerFields(asset, markerExport, output);
+
+        var path = relativePath.ToLowerInvariant();
+        if (path.Contains("teamdeathmatchlocationmarker", StringComparison.Ordinal))
+        {
+            AppendSyntheticTeamDeathmatchMarkerFields(asset, markerExport, output);
+            return;
+        }
+
+        if (path.Contains("deathmatchlocationmarker", StringComparison.Ordinal))
+        {
+            AppendSyntheticDeathmatchMarkerFields(asset, markerExport, output);
+            return;
+        }
+
+        if (path.Contains("ctflocationmarker", StringComparison.Ordinal))
+        {
+            AppendSyntheticCtfMarkerFields(asset, markerExport, output);
+            return;
+        }
+
+        if (path.Contains("dropzonelocationmarker", StringComparison.Ordinal))
+        {
+            AppendSyntheticDropZoneMarkerFields(asset, markerExport, output);
+        }
+    }
+
+    private static void AppendSyntheticCommonGameEventMarkerFields(
+        UAsset asset,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output)
+    {
+        const string mode = "common";
+        const string structName = "GameEventParameters";
+        const string structType = "GameEventParameters";
+
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "RoundDuration", "float",
+            "Настройки события / длительность раунда",
+            "Сколько секунд длится один раунд события.",
+            "Правила события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "RoundLimit", "int",
+            "Настройки события / лимит раундов",
+            "Сколько раундов максимум можно сыграть в этом событии.",
+            "Правила события", "1", "1", "50");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "WinLimit", "int",
+            "Настройки события / лимит побед",
+            "Сколько побед нужно для досрочного завершения матча.",
+            "Правила события", "1", "1", "50");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "RespawnDelay", "float",
+            "Настройки события / задержка возрождения",
+            "Через сколько секунд игрок появляется снова после смерти.",
+            "Правила события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "TimeoutDuration", "float",
+            "Настройки события / время ожидания события",
+            "Сколько времени ждать до автоотмены события, если условия старта не выполнены.",
+            "Правила события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "MinParticipants", "int",
+            "Настройки события / минимум участников",
+            "Минимальное число игроков для старта события.",
+            "Правила события", "1", "1", "128");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "MaxParticipants", "int",
+            "Настройки события / максимум участников",
+            "Максимальное число игроков, которое может войти в событие.",
+            "Правила события", "16", "1", "128");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AllowRespawn", "bool",
+            "Настройки события / разрешить возрождение",
+            "Если выключено, участники не будут возрождаться до конца раунда.",
+            "Правила события", "false", null, null);
+    }
+
+    private static void AppendSyntheticDeathmatchMarkerFields(
+        UAsset asset,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output)
+    {
+        const string mode = "deathmatch";
+        const string structName = "DeathmatchParameters";
+        const string structType = "DeathmatchParameters";
+
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "RoundScoreLimit", "int",
+            "Параметры боя насмерть / лимит очков раунда",
+            "До какого количества очков длится один раунд в режиме боя насмерть.",
+            "Зона и барьер", "0", "1", "1000");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AreaRestrictionInterval", "float",
+            "Параметры боя насмерть / интервал сужения зоны",
+            "Через какой интервал зона боя снова сужается.",
+            "Зона и барьер", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AreaRestrictionDuration", "float",
+            "Параметры боя насмерть / длительность сужения зоны",
+            "Сколько длится один шаг сужения боевой зоны.",
+            "Зона и барьер", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AreaRestrictionStep", "float",
+            "Параметры боя насмерть / шаг сужения зоны",
+            "На сколько уменьшается зона за один шаг сужения.",
+            "Зона и барьер", "0", "0", "500");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "BarrierHeatUpDuration", "float",
+            "Параметры боя насмерть / время прогрева барьера",
+            "Сколько времени барьер разгоняется до полного урона после начала сужения.",
+            "Зона и барьер", "0", "0", "3600");
+    }
+
+    private static void AppendSyntheticTeamDeathmatchMarkerFields(
+        UAsset asset,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output)
+    {
+        const string mode = "teamdeathmatch";
+        const string structName = "TeamDeathmatchParameters";
+        const string structType = "TeamDeathmatchParameters";
+
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "RoundScoreLimit", "int",
+            "Параметры командного боя / лимит очков раунда",
+            "До какого количества очков длится один раунд в командном бою.",
+            "Зона и барьер", "0", "1", "1000");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AreaRestrictionInterval", "float",
+            "Параметры командного боя / интервал сужения зоны",
+            "Через какой интервал зона боя снова сужается.",
+            "Зона и барьер", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AreaRestrictionDuration", "float",
+            "Параметры командного боя / длительность сужения зоны",
+            "Сколько длится один шаг сужения боевой зоны.",
+            "Зона и барьер", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AreaRestrictionStep", "float",
+            "Параметры командного боя / шаг сужения зоны",
+            "На сколько уменьшается зона за один шаг сужения.",
+            "Зона и барьер", "0", "0", "500");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "BarrierHeatUpDuration", "float",
+            "Параметры командного боя / время прогрева барьера",
+            "Сколько времени барьер разгоняется до полного урона после начала сужения.",
+            "Зона и барьер", "0", "0", "3600");
+    }
+
+    private static void AppendSyntheticCtfMarkerFields(
+        UAsset asset,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output)
+    {
+        const string mode = "ctf";
+        const string structName = "CTFParameters";
+        const string structType = "CTFParameters";
+
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "FlagResetDuration", "float",
+            "Параметры захвата флага / сброс флага",
+            "Через сколько секунд брошенный флаг автоматически вернётся на базу.",
+            "Параметры флага", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "AllowReturns", "bool",
+            "Параметры захвата флага / разрешить возврат флага",
+            "Если включено, команда может вручную вернуть свой флаг.",
+            "Параметры флага", "false", null, null);
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "CaptureLimit", "int",
+            "Параметры захвата флага / лимит захватов",
+            "Сколько захватов флага нужно для победы.",
+            "Параметры флага", "0", "1", "50");
+
+        AddMissingGameEventMarkerRewardScoreField(asset, markerExport, output, mode, structName, structType, "PointsPerPickup",
+            "Параметры захвата флага / очки за поднятие флага / очки",
+            "Сколько очков получает игрок за успешный подбор флага.",
+            "Параметры флага");
+        AddMissingGameEventMarkerRewardScoreField(asset, markerExport, output, mode, structName, structType, "PointsPerReturn",
+            "Параметры захвата флага / очки за возврат флага / очки",
+            "Сколько очков получает игрок за возврат своего флага.",
+            "Параметры флага");
+    }
+
+    private static void AppendSyntheticDropZoneMarkerFields(
+        UAsset asset,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output)
+    {
+        const string mode = "dropzone";
+        const string structName = "DropZoneParameters";
+        const string structType = "DropZoneParameters";
+
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "IntroAnnouncementDelay", "float",
+            "Параметры зоны сброса / задержка стартового объявления",
+            "Сколько секунд проходит от старта события до первого объявления.",
+            "Фазы события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "WarmupPhaseDuration", "float",
+            "Параметры зоны сброса / длительность разминки",
+            "Сколько длится фаза разминки перед активной частью события.",
+            "Фазы события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "CrateDropDuration", "float",
+            "Параметры зоны сброса / длительность сброса ящика",
+            "Сколько длится фаза сброса командных ящиков.",
+            "Фазы события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "SearchPhaseTimeLimit", "float",
+            "Параметры зоны сброса / время поиска ключа",
+            "Максимальная длительность фазы поиска ключа.",
+            "Фазы события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "CargoDropDuration", "float",
+            "Параметры зоны сброса / длительность сброса груза",
+            "Сколько длится фаза подхода и сброса основного груза.",
+            "Фазы события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "CapturePhaseTimeLimit", "float",
+            "Параметры зоны сброса / время фазы захвата",
+            "Сколько даётся времени на удержание точки и захват груза.",
+            "Фазы события", "0", "0", "3600");
+        AddMissingGameEventMarkerScalarField(asset, markerExport, output, mode, structName, structType, "CargoOpeningDuration", "float",
+            "Параметры зоны сброса / длительность открытия груза",
+            "Сколько времени занимает открытие основного груза после захвата.",
+            "Фазы события", "0", "0", "3600");
+
+        AddMissingGameEventMarkerRewardScoreField(asset, markerExport, output, mode, structName, structType, "PointsPerActivation",
+            "Параметры зоны сброса / очки за активацию / очки",
+            "Сколько очков получает игрок за успешную активацию ключевой точки.",
+            "Фазы события");
+    }
+
+    private static void AddMissingGameEventMarkerScalarField(
+        UAsset asset,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output,
+        string modeKey,
+        string structName,
+        string structType,
+        string propertyName,
+        string valueType,
+        string label,
+        string description,
+        string section,
+        string currentValue,
+        string? min,
+        string? max)
+    {
+        var fieldPath = $"{GameEventMarkerSyntheticFieldPrefix}{modeKey}:{propertyName}";
+        var labelKey = NormalizeAssetKey(label);
+        if (output.Any(field =>
+                string.Equals(field.FieldPath, fieldPath, StringComparison.OrdinalIgnoreCase)
+                || NormalizeAssetKey(field.Label) == labelKey))
+        {
+            return;
+        }
+
+        var structProperty = FindTopLevelProperty<StructPropertyData>(markerExport, structName, out _);
+        var resolvedCurrentValue = currentValue;
+        if (structProperty is not null && valueType == "bool")
+        {
+            var boolChild = FindStructChildProperty<BoolPropertyData>(structProperty, propertyName, out _);
+            if (boolChild is not null)
+            {
+                resolvedCurrentValue = boolChild.Value ? "true" : "false";
+            }
+        }
+        else if (structProperty is not null && valueType == "int")
+        {
+            var intChild = FindStructChildProperty<IntPropertyData>(structProperty, propertyName, out _);
+            if (intChild is not null)
+            {
+                resolvedCurrentValue = intChild.Value.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+        else if (structProperty is not null)
+        {
+            var floatChild = FindStructChildProperty<FloatPropertyData>(structProperty, propertyName, out _);
+            if (floatChild is not null)
+            {
+                resolvedCurrentValue = floatChild.Value.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        var editorKind = valueType == "bool" ? "toggle" : "number";
+        EnsureAssetNameReference(asset, structType);
+        output.Add(new StudioModFieldDto(
+            fieldPath,
+            label,
+            description,
+            section,
+            valueType,
+            editorKind,
+            resolvedCurrentValue,
+            true,
+            min,
+            max,
+            null));
+    }
+
+    private static void AddMissingGameEventMarkerRewardScoreField(
+        UAsset asset,
+        NormalExport markerExport,
+        List<StudioModFieldDto> output,
+        string modeKey,
+        string structName,
+        string structType,
+        string rewardPropertyName,
+        string label,
+        string description,
+        string section)
+    {
+        var fieldPath = $"{GameEventMarkerSyntheticFieldPrefix}{modeKey}:{rewardPropertyName}.Score";
+        var labelKey = NormalizeAssetKey(label);
+        if (output.Any(field =>
+                string.Equals(field.FieldPath, fieldPath, StringComparison.OrdinalIgnoreCase)
+                || NormalizeAssetKey(field.Label) == labelKey))
+        {
+            return;
+        }
+
+        var structProperty = FindTopLevelProperty<StructPropertyData>(markerExport, structName, out _);
+        var resolvedCurrentValue = "0";
+        if (structProperty is not null)
+        {
+            var rewardStruct = FindStructChildProperty<StructPropertyData>(structProperty, rewardPropertyName, out _);
+            if (rewardStruct is not null
+                && FindStructChildProperty<IntPropertyData>(rewardStruct, "Score", out _) is { } existingScore)
+            {
+                resolvedCurrentValue = existingScore.Value.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        EnsureAssetNameReference(asset, structType);
+        EnsureAssetNameReference(asset, "GameEventRewardPoints");
+        output.Add(new StudioModFieldDto(
+            fieldPath,
+            label,
+            description,
+            section,
+            "int",
+            "number",
+            resolvedCurrentValue,
+            true,
+            "-1000",
+            "1000",
+            null));
     }
 
     private static void AddRecipePerSkillFloatFields(
@@ -6837,6 +7808,10 @@ internal sealed class StudioRuntime
         {
             prefix = "пресет";
         }
+        else if (IsCargoDropContainerClassListSurface(relativePath, parentLabel))
+        {
+            prefix = "контейнер";
+        }
         else if (IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, parentLabel))
         {
             prefix = "подпакет";
@@ -6900,6 +7875,12 @@ internal sealed class StudioRuntime
             SoftObjectPathPropertyData softObjectPathValue when IsCargoDropMajorSpawnerOptionsSurface(relativePath, parentLabel)
                 || IsCargoDropMajorSpawnerPresetOptionsSurface(relativePath, parentLabel)
                 => $"{prefix} {ResolveCargoLootReferenceLabel(ExtractSoftObjectReference(softObjectPathValue.Value))}",
+            ObjectPropertyData objectValue when IsCargoDropContainerClassListSurface(relativePath, parentLabel)
+                => ResolveCargoDropContainerReferenceLabel(ResolveObjectReferenceLabel(asset, objectValue.Value)),
+            SoftObjectPropertyData softObjectValue when IsCargoDropContainerClassListSurface(relativePath, parentLabel)
+                => ResolveCargoDropContainerReferenceLabel(ExtractSoftObjectReference(softObjectValue.Value)),
+            SoftObjectPathPropertyData softObjectPathValue when IsCargoDropContainerClassListSurface(relativePath, parentLabel)
+                => ResolveCargoDropContainerReferenceLabel(ExtractSoftObjectReference(softObjectPathValue.Value)),
             ObjectPropertyData objectValue when IsGameEventMarkerAsset(relativePath) && IsGameEventLoadoutListLabel(parentLabel)
                 => $"{prefix} {ResolveGameEventLoadoutEntryLabel(ResolveObjectReferenceLabel(asset, objectValue.Value))}",
             SoftObjectPropertyData softObjectValue when IsGameEventMarkerAsset(relativePath) && IsGameEventLoadoutListLabel(parentLabel)
@@ -7023,6 +8004,11 @@ internal sealed class StudioRuntime
         if (IsCargoDropEncounterVariantsSurface(relativePath, userLabel))
         {
             return "Варианты защиты грузового дропа";
+        }
+
+        if (IsCargoDropContainerClassListSurface(relativePath, userLabel))
+        {
+            return "Варианты контейнера грузового дропа";
         }
 
         if (IsRegularItemSpawnerPresetItemListSurface(relativePath, userLabel))
@@ -7385,6 +8371,20 @@ internal sealed class StudioRuntime
             && path.EndsWith("locationmarker.uasset", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsGameEventCoreAsset(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return false;
+        }
+
+        var path = relativePath.ToLowerInvariant();
+        return path.Contains("/gameevents/", StringComparison.Ordinal)
+            && !path.Contains("/gameevents/markers/", StringComparison.Ordinal)
+            && !path.Contains("/ui/gameevents/", StringComparison.Ordinal)
+            && path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsGameEventLoadoutListLabel(string userLabel)
     {
         if (string.IsNullOrWhiteSpace(userLabel))
@@ -7506,6 +8506,22 @@ internal sealed class StudioRuntime
             || normalizedKey.Contains("encounterdata", StringComparison.Ordinal)
             || normalizedKey.Contains("encounterclasses", StringComparison.Ordinal)
             || normalizedKey.Contains("событиеclasses", StringComparison.Ordinal);
+    }
+
+    private static bool IsCargoDropContainerClassListSurface(string relativePath, string label)
+    {
+        if (!IsCargoDropWorldEventAsset(relativePath) || string.IsNullOrWhiteSpace(label))
+        {
+            return false;
+        }
+
+        var normalized = label.ToLowerInvariant();
+        var normalizedKey = NormalizeAssetKey(label);
+        return normalized.Contains("варианты контейнера грузового дропа", StringComparison.Ordinal)
+            || normalized.Contains("контейнеры грузового дропа", StringComparison.Ordinal)
+            || normalized.Contains("cargo drop classes", StringComparison.Ordinal)
+            || normalizedKey.Contains("cargodropclasses", StringComparison.Ordinal)
+            || normalizedKey.Contains("cargoclasses", StringComparison.Ordinal);
     }
 
     private static string ResolvePlantReferenceEntryLabel(string raw)
@@ -8247,6 +9263,14 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (path.Contains("/worldevents/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("whistle detection range", "дальность реакции на свисток", StringComparison.OrdinalIgnoreCase)
+                .Replace("spawn cooldown", "время до следующей выдачи", StringComparison.OrdinalIgnoreCase)
+                .Replace("появление cooldown", "время до следующей выдачи", StringComparison.OrdinalIgnoreCase);
+        }
+
         if (path.Contains("/economy/", StringComparison.OrdinalIgnoreCase))
         {
             label = Regex.Replace(label, @"\s#(\d+)", " / уровень $1", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -8598,6 +9622,8 @@ internal sealed class StudioRuntime
             label = label
                 .Replace("drop zone parameters", "параметры зоны сброса", StringComparison.OrdinalIgnoreCase)
                 .Replace("ctf parameters", "параметры захвата флага", StringComparison.OrdinalIgnoreCase)
+                .Replace("deathmatch parameters", "параметры боя насмерть", StringComparison.OrdinalIgnoreCase)
+                .Replace("team deathmatch parameters", "параметры командного боя", StringComparison.OrdinalIgnoreCase)
                 .Replace("game event parameters", "настройки события", StringComparison.OrdinalIgnoreCase)
                 .Replace("possible primary weapons", "основное оружие на выбор", StringComparison.OrdinalIgnoreCase)
                 .Replace("possible secondary weapons", "пистолет на выбор", StringComparison.OrdinalIgnoreCase)
@@ -8605,6 +9631,11 @@ internal sealed class StudioRuntime
                 .Replace("possible outfits", "одежда на выбор", StringComparison.OrdinalIgnoreCase)
                 .Replace("possible support items", "дополнительное снаряжение", StringComparison.OrdinalIgnoreCase)
                 .Replace("mandatory gear", "обязательный набор", StringComparison.OrdinalIgnoreCase)
+                .Replace("round score limit", "лимит очков раунда", StringComparison.OrdinalIgnoreCase)
+                .Replace("area restriction interval", "интервал сужения зоны", StringComparison.OrdinalIgnoreCase)
+                .Replace("area restriction duration", "длительность сужения зоны", StringComparison.OrdinalIgnoreCase)
+                .Replace("area restriction step", "шаг сужения зоны", StringComparison.OrdinalIgnoreCase)
+                .Replace("barrier heat up duration", "время прогрева барьера", StringComparison.OrdinalIgnoreCase)
                 .Replace("round duration", "длительность раунда", StringComparison.OrdinalIgnoreCase)
                 .Replace("round время", "длительность раунда", StringComparison.OrdinalIgnoreCase)
                 .Replace("round limit", "лимит раундов", StringComparison.OrdinalIgnoreCase)
@@ -8617,6 +9648,10 @@ internal sealed class StudioRuntime
                 .Replace("(минимум) participants", "минимум участников", StringComparison.OrdinalIgnoreCase)
                 .Replace("friendly fire", "огонь по своим", StringComparison.OrdinalIgnoreCase)
                 .Replace("entry fee", "плата за вход", StringComparison.OrdinalIgnoreCase)
+                .Replace("flag reset duration", "сброс флага", StringComparison.OrdinalIgnoreCase)
+                .Replace("allow returns", "разрешить возврат флага", StringComparison.OrdinalIgnoreCase)
+                .Replace("capture limit", "лимит захватов", StringComparison.OrdinalIgnoreCase)
+                .Replace("points per pickup", "очки за поднятие флага", StringComparison.OrdinalIgnoreCase)
                 .Replace("points per enemy kill", "очки за убийство врага", StringComparison.OrdinalIgnoreCase)
                 .Replace("points per enemy убить", "очки за убийство врага", StringComparison.OrdinalIgnoreCase)
                 .Replace("points per team kill", "штраф за убийство союзника", StringComparison.OrdinalIgnoreCase)
@@ -8626,6 +9661,8 @@ internal sealed class StudioRuntime
                 .Replace("points per assist", "очки за помощь", StringComparison.OrdinalIgnoreCase)
                 .Replace("points per headshot", "очки за выстрел в голову", StringComparison.OrdinalIgnoreCase)
                 .Replace("points per round win", "очки за победу в раунде", StringComparison.OrdinalIgnoreCase)
+                .Replace("points per return", "очки за возврат флага", StringComparison.OrdinalIgnoreCase)
+                .Replace("points per activation", "очки за активацию", StringComparison.OrdinalIgnoreCase)
                 .Replace("points for participation", "очки славы за участие", StringComparison.OrdinalIgnoreCase)
                 .Replace("score to fame conversion factor", "перевод очков в славу", StringComparison.OrdinalIgnoreCase)
                 .Replace("event name", "название события", StringComparison.OrdinalIgnoreCase)
@@ -8633,9 +9670,17 @@ internal sealed class StudioRuntime
                 .Replace("prerequisites text", "подсказка режима", StringComparison.OrdinalIgnoreCase)
                 .Replace("weapon text", "подсказка по оружию", StringComparison.OrdinalIgnoreCase)
                 .Replace("rewards text", "подсказка по наградам", StringComparison.OrdinalIgnoreCase)
+                .Replace("intro announcement delay", "задержка стартового объявления", StringComparison.OrdinalIgnoreCase)
+                .Replace("warmup phase duration", "длительность разминки", StringComparison.OrdinalIgnoreCase)
+                .Replace("crate drop duration", "длительность сброса ящика", StringComparison.OrdinalIgnoreCase)
+                .Replace("search phase time limit", "время поиска ключа", StringComparison.OrdinalIgnoreCase)
+                .Replace("cargo drop duration", "длительность сброса груза", StringComparison.OrdinalIgnoreCase)
+                .Replace("capture phase time limit", "время фазы захвата", StringComparison.OrdinalIgnoreCase)
+                .Replace("cargo opening duration", "длительность открытия груза", StringComparison.OrdinalIgnoreCase)
                 .Replace("skip key phase", "пропустить фазу ключа", StringComparison.OrdinalIgnoreCase)
                 .Replace("points per capture", "очки за захват флага", StringComparison.OrdinalIgnoreCase)
                 .Replace("fame points", "очки славы", StringComparison.OrdinalIgnoreCase)
+                .Replace("cash", "деньги", StringComparison.OrdinalIgnoreCase)
                 .Replace("score", "очки", StringComparison.OrdinalIgnoreCase);
             label = Regex.Replace(
                 label,
@@ -8676,10 +9721,23 @@ internal sealed class StudioRuntime
                 .Replace("size y", "высота в инвентаре", StringComparison.OrdinalIgnoreCase);
         }
 
+        if (path.Contains("/items/weapons/weapon_clips/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = ReplaceSemanticLabelPart(label, "default fill ammo", "патрон по умолчанию");
+            label = ReplaceSemanticLabelPart(label, "capacity", "патронов в магазине");
+        }
+
         if (path.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
         {
+            label = ReplaceSemanticLabelPart(label, "trace scale multiplier", "длина трассера");
+            label = ReplaceSemanticLabelPart(label, "target type multiplier", "множитель по типу цели");
+            label = ReplaceSemanticLabelPart(label, "target тип multiplier", "множитель по типу цели");
+            label = ReplaceSemanticLabelPart(label, "armor piercing factor", "бронепробиваемость");
+            label = ReplaceSemanticLabelPart(label, "projectile class", "класс пули");
+            label = ReplaceSemanticLabelPart(label, "projectile data class", "класс пули");
             label = label.Replace("max ammo count", "максимум патронов в пачке", StringComparison.OrdinalIgnoreCase);
             label = ReplaceSemanticLabelPart(label, "ammo count", "патронов в пачке");
+            label = ReplaceSemanticLabelPart(label, "ammunition tag", "тип патрона");
             label = ReplaceSemanticLabelPart(label, "item location", "зоны появления");
             label = ReplaceSemanticLabelPart(label, "add impulse on hit", "физический толчок при попадании");
             label = ReplaceSemanticLabelPart(label, "projectile data", "данные пули");
@@ -8688,12 +9746,9 @@ internal sealed class StudioRuntime
             label = ReplaceSemanticLabelPart(label, "initial damage", "базовый урон");
             label = ReplaceSemanticLabelPart(label, "начальный damage", "базовый урон");
             label = ReplaceSemanticLabelPart(label, "damage in game event", "урон в игровом событии");
-            label = ReplaceSemanticLabelPart(label, "target type multiplier", "множитель по типу цели");
-            label = ReplaceSemanticLabelPart(label, "target тип multiplier", "множитель по типу цели");
             label = ReplaceSemanticLabelPart(label, "multipliers", "множители");
             label = ReplaceSemanticLabelPart(label, "multiplier", "множитель");
             label = ReplaceSemanticLabelPart(label, "penetration factor", "пробитие");
-            label = ReplaceSemanticLabelPart(label, "trace scale multiplier", "длина трассера");
             label = ReplaceSemanticLabelPart(label, "noise loudness on hit", "шум от попадания");
             label = ReplaceSemanticLabelPart(label, "use fixed timestep", "фиксированный шаг расчёта");
             label = ReplaceSemanticLabelPart(label, "fixed timestep", "шаг расчёта");
@@ -8797,6 +9852,9 @@ internal sealed class StudioRuntime
             label = label
                 .Replace("максимум ammo count", "максимум патронов в пачке", StringComparison.OrdinalIgnoreCase)
                 .Replace("ammo count", "патронов в пачке", StringComparison.OrdinalIgnoreCase)
+                .Replace("данные пули class", "класс пули", StringComparison.OrdinalIgnoreCase)
+                .Replace("projectile class", "класс пули", StringComparison.OrdinalIgnoreCase)
+                .Replace("armor piercing factor", "бронепробиваемость", StringComparison.OrdinalIgnoreCase)
                 .Replace("базовый уровень урон в игровом событии", "базовый урон в игровом событии", StringComparison.OrdinalIgnoreCase)
                 .Replace("базовый уровень урон", "базовый урон", StringComparison.OrdinalIgnoreCase);
         }
@@ -8996,6 +10054,11 @@ internal sealed class StudioRuntime
             ("initial encounter spawn delay", "задержка перед первым запуском события"),
             ("encounter spawn check interval", "интервал проверки запуска события"),
             ("encounter cooldown interval", "пауза между запусками события"),
+            ("event name", "название события"),
+            ("table a class", "набор снаряжения команды A"),
+            ("table b class", "набор снаряжения команды B"),
+            ("crate class", "класс ящика события"),
+            ("cargo class", "класс груза события"),
             ("character spawn distance range", "дистанция появления персонажей"),
             ("character fallback spawn distance range", "запасная дистанция появления персонажей"),
             ("exterior spawn points view check distance", "дистанция проверки видимости внешних точек появления"),
@@ -9287,6 +10350,7 @@ internal sealed class StudioRuntime
             ("max loaded ammo", "патронов в магазине"),
             ("event max ammo", "патронов для события"),
             ("default ammunition item class", "патрон по умолчанию"),
+            ("projectile data class", "класс пули"),
             ("field of view", "поле зрения"),
             ("depth of field focal distance", "дистанция фокуса"),
             ("view kick multiplier", "сила отдачи камеры"),
@@ -9674,6 +10738,17 @@ internal sealed class StudioRuntime
             return allowedFishTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
+        if (path.Contains("/worldevents/halloweenwhistlecandydispenser", StringComparison.Ordinal))
+        {
+            var allowedHalloweenTokens = new[]
+            {
+                "дальность реакции на свисток",
+                "время до следующей выдачи"
+            };
+
+            return allowedHalloweenTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
         if (path.Contains("/foliage/farming/", StringComparison.Ordinal))
         {
             var allowedPlantTokens = new[]
@@ -9786,10 +10861,57 @@ internal sealed class StudioRuntime
                 "очки славы за участие", "перевод очков в славу",
                 "длительность раунда", "лимит раундов", "лимит побед", "задержка возрождения",
                 "разрешить возрождение", "время ожидания события", "лимит игроков по командам",
-                "пропустить фазу ключа", "очки за захват флага"
+                "пропустить фазу ключа", "очки за захват флага",
+                "лимит очков раунда", "интервал сужения зоны", "длительность сужения зоны",
+                "шаг сужения зоны", "время прогрева барьера",
+                "сброс флага", "разрешить возврат флага", "лимит захватов",
+                "очки за поднятие флага", "очки за возврат флага",
+                "задержка стартового объявления", "длительность разминки",
+                "длительность сброса ящика", "время поиска ключа",
+                "длительность сброса груза", "время фазы захвата",
+                "длительность открытия груза", "очки за активацию"
             };
 
             return allowedGameEventTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
+        if (IsGameEventCoreAsset(relativePath))
+        {
+            var allowedGameEventCoreTokens = new[]
+            {
+                "название события",
+                "набор снаряжения команды a",
+                "набор снаряжения команды b",
+                "класс ящика события",
+                "класс груза события"
+            };
+
+            return allowedGameEventCoreTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
+        if (path.Contains("/items/ammunition/ammunition_class/", StringComparison.Ordinal))
+        {
+            var allowedBulletClassTokens = new[]
+            {
+                "скорость пули", "базовый урон", "урон в игровом событии",
+                "множитель по типу цели", "пробитие", "бронепробиваемость",
+                "длина трассера", "шум от попадания",
+                "фиксированный шаг расчёта", "шаг расчёта",
+                "физический толчок при попадании"
+            };
+
+            return allowedBulletClassTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
+        if (path.Contains("/items/ammunition/", StringComparison.Ordinal))
+        {
+            var allowedAmmunitionTokens = new[]
+            {
+                "класс пули", "тип патрона", "патронов в пачке",
+                "зоны появления", "урон со временем", "разрешена перекраска"
+            };
+
+            return allowedAmmunitionTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
         if (path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
@@ -9926,7 +11048,7 @@ internal sealed class StudioRuntime
             {
                 "item class", "default ammunition", "reward item", "spawn item",
                 "выдаваемый предмет", "предмет", "патрон", "награда", "добыча", "что создаётся", "результат",
-                "навык", "вещество", "симптом", "побочный эффект", "источник эффекта",
+                "навык", "вещество", "симптом", "побочный эффект", "источник эффекта", "данные пули", "класс пули",
                 "событие", "класс события", "класс орды", "десантного корабля"
             };
 
@@ -10010,7 +11132,8 @@ internal sealed class StudioRuntime
 
         if (IsCargoDropWorldEventAsset(relativePath))
         {
-            return IsCargoDropEncounterVariantsSurface(relativePath, userLabel);
+            return IsCargoDropEncounterVariantsSurface(relativePath, userLabel)
+                || IsCargoDropContainerClassListSurface(relativePath, userLabel);
         }
 
         if (path.Contains("/items/spawnerpresets/examine_data_presets/", StringComparison.Ordinal))
@@ -10211,13 +11334,96 @@ internal sealed class StudioRuntime
                 return "Тексты события";
             }
 
+            if (label.Contains("лимит очков раунда", StringComparison.Ordinal)
+                || label.Contains("интервал сужения зоны", StringComparison.Ordinal)
+                || label.Contains("длительность сужения зоны", StringComparison.Ordinal)
+                || label.Contains("шаг сужения зоны", StringComparison.Ordinal)
+                || label.Contains("время прогрева барьера", StringComparison.Ordinal))
+            {
+                return "Зона и барьер";
+            }
+
+            if (label.Contains("сброс флага", StringComparison.Ordinal)
+                || label.Contains("разрешить возврат флага", StringComparison.Ordinal)
+                || label.Contains("лимит захватов", StringComparison.Ordinal)
+                || label.Contains("очки за поднятие флага", StringComparison.Ordinal)
+                || label.Contains("очки за возврат флага", StringComparison.Ordinal)
+                || label.Contains("очки за захват флага", StringComparison.Ordinal))
+            {
+                return "Параметры флага";
+            }
+
+            if (label.Contains("задержка стартового объявления", StringComparison.Ordinal)
+                || label.Contains("длительность разминки", StringComparison.Ordinal)
+                || label.Contains("длительность сброса ящика", StringComparison.Ordinal)
+                || label.Contains("время поиска ключа", StringComparison.Ordinal)
+                || label.Contains("длительность сброса груза", StringComparison.Ordinal)
+                || label.Contains("время фазы захвата", StringComparison.Ordinal)
+                || label.Contains("длительность открытия груза", StringComparison.Ordinal)
+                || label.Contains("пропустить фазу ключа", StringComparison.Ordinal))
+            {
+                return "Фазы события";
+            }
+
             return "Правила события";
+        }
+
+        if (IsGameEventCoreAsset(relativePath))
+        {
+            if (label.Contains("название события", StringComparison.Ordinal))
+            {
+                return "Описание события";
+            }
+
+            if (label.Contains("набор снаряжения команды", StringComparison.Ordinal))
+            {
+                return "Снаряжение команд";
+            }
+
+            if (label.Contains("класс ящика события", StringComparison.Ordinal)
+                || label.Contains("класс груза события", StringComparison.Ordinal))
+            {
+                return "Классы объектов события";
+            }
+
+            return "Параметры события";
         }
 
         if (IsVehicleSpawnGroupAsset(relativePath)
             && IsVehicleSpawnPresetListSurface(relativePath, userLabel))
         {
             return "Группа спавна транспорта";
+        }
+
+        if (path.Contains("/items/ammunition/ammunition_class/", StringComparison.Ordinal))
+        {
+            if (label.Contains("скорость пули", StringComparison.Ordinal)
+                || label.Contains("физический толчок при попадании", StringComparison.Ordinal)
+                || label.Contains("фиксированный шаг расчёта", StringComparison.Ordinal)
+                || label.Contains("шаг расчёта", StringComparison.Ordinal)
+                || label.Contains("длина трассера", StringComparison.Ordinal)
+                || label.Contains("шум от попадания", StringComparison.Ordinal))
+            {
+                return "Данные пули";
+            }
+
+            if (label.Contains("базовый урон", StringComparison.Ordinal)
+                || label.Contains("пробитие", StringComparison.Ordinal)
+                || label.Contains("бронепробиваемость", StringComparison.Ordinal)
+                || label.Contains("множитель по типу цели", StringComparison.Ordinal))
+            {
+                return "Урон";
+            }
+        }
+
+        if (path.Contains("/items/ammunition/", StringComparison.Ordinal))
+        {
+            if (label.Contains("класс пули", StringComparison.Ordinal)
+                || label.Contains("тип патрона", StringComparison.Ordinal)
+                || label.Contains("патронов в пачке", StringComparison.Ordinal))
+            {
+                return "Боеприпасы";
+            }
         }
 
         if (label.Contains("когда начинается эта ступень", StringComparison.Ordinal)
@@ -10905,9 +12111,10 @@ internal sealed class StudioRuntime
         var label = userLabel.ToLowerInvariant();
         if (IsGameEventMarkerAsset(relativePath))
         {
-            if (label.Contains("минимум участников", StringComparison.Ordinal))
+            if (label.Contains("минимум участников", StringComparison.Ordinal)
+                || label.Contains("максимум участников", StringComparison.Ordinal))
             {
-                return "Сколько игроков минимум нужно, чтобы событие могло начаться.";
+                return "Сколько игроков нужно для запуска события: нижний и верхний порог участников.";
             }
 
             if (label.Contains("огонь по своим", StringComparison.Ordinal))
@@ -10927,7 +12134,10 @@ internal sealed class StudioRuntime
                 || label.Contains("очки за помощь", StringComparison.Ordinal)
                 || label.Contains("очки за выстрел в голову", StringComparison.Ordinal)
                 || label.Contains("очки за победу в раунде", StringComparison.Ordinal)
-                || label.Contains("очки за захват флага", StringComparison.Ordinal))
+                || label.Contains("очки за захват флага", StringComparison.Ordinal)
+                || label.Contains("очки за поднятие флага", StringComparison.Ordinal)
+                || label.Contains("очки за возврат флага", StringComparison.Ordinal)
+                || label.Contains("очки за активацию", StringComparison.Ordinal))
             {
                 return "Сколько очков игрок получает или теряет за это действие внутри события.";
             }
@@ -10954,6 +12164,37 @@ internal sealed class StudioRuntime
             if (label.Contains("пропустить фазу ключа", StringComparison.Ordinal))
             {
                 return "Если включено, зона сброса сразу переходит к боевой части без отдельной фазы ключа.";
+            }
+
+            if (label.Contains("лимит очков раунда", StringComparison.Ordinal))
+            {
+                return "До какого количества очков длится один раунд в Deathmatch или Team Deathmatch.";
+            }
+
+            if (label.Contains("интервал сужения зоны", StringComparison.Ordinal)
+                || label.Contains("длительность сужения зоны", StringComparison.Ordinal)
+                || label.Contains("шаг сужения зоны", StringComparison.Ordinal)
+                || label.Contains("время прогрева барьера", StringComparison.Ordinal))
+            {
+                return "Как быстро и насколько агрессивно сужается зона события, включая прогрев барьера перед уроном.";
+            }
+
+            if (label.Contains("задержка стартового объявления", StringComparison.Ordinal)
+                || label.Contains("длительность разминки", StringComparison.Ordinal)
+                || label.Contains("длительность сброса ящика", StringComparison.Ordinal)
+                || label.Contains("время поиска ключа", StringComparison.Ordinal)
+                || label.Contains("длительность сброса груза", StringComparison.Ordinal)
+                || label.Contains("время фазы захвата", StringComparison.Ordinal)
+                || label.Contains("длительность открытия груза", StringComparison.Ordinal))
+            {
+                return "Таймеры фаз Drop Zone: от анонса и разминки до открытия груза.";
+            }
+
+            if (label.Contains("сброс флага", StringComparison.Ordinal)
+                || label.Contains("разрешить возврат флага", StringComparison.Ordinal)
+                || label.Contains("лимит захватов", StringComparison.Ordinal))
+            {
+                return "Базовые правила CTF: через сколько возвращается флаг, можно ли его вернуть вручную и сколько захватов нужно для победы.";
             }
 
             if (label.Contains("название события", StringComparison.Ordinal))
@@ -11649,6 +12890,46 @@ internal sealed class StudioRuntime
             return "Выбери готовый игровой класс события, который эта зона или менеджер сможет запускать.";
         }
 
+        if (label.Contains("название события", StringComparison.Ordinal))
+        {
+            return "Название, которое видят игроки в интерфейсе события.";
+        }
+
+        if (label.Contains("набор снаряжения команды a", StringComparison.Ordinal))
+        {
+            return "Какой готовый набор снаряжения получает команда A в этом событии.";
+        }
+
+        if (label.Contains("набор снаряжения команды b", StringComparison.Ordinal))
+        {
+            return "Какой готовый набор снаряжения получает команда B в этом событии.";
+        }
+
+        if (label.Contains("класс ящика события", StringComparison.Ordinal))
+        {
+            return "Какой класс ящика будет использован в режиме Drop Zone для командных контейнеров.";
+        }
+
+        if (label.Contains("класс груза события", StringComparison.Ordinal))
+        {
+            return "Какой класс основного груза будет сбрасываться в режиме Drop Zone.";
+        }
+
+        if (label.Contains("класс орды защитников", StringComparison.Ordinal))
+        {
+            return "Какой сценарий орды использовать для защиты охраняемой зоны.";
+        }
+
+        if (label.Contains("класс десантного корабля", StringComparison.Ordinal))
+        {
+            return "Какой тип дропшипа система вызывает для этого события охраняемой зоны.";
+        }
+
+        if (label.Contains("класс охраны десантного корабля", StringComparison.Ordinal))
+        {
+            return "Какой вариант дропшипа охраны используется при повторном появлении защитников.";
+        }
+
         if (label.Contains("задержка перед первым запуском события", StringComparison.Ordinal))
         {
             return "Сколько ждать после активации зоны перед первой попыткой запустить событие.";
@@ -11995,7 +13276,8 @@ internal sealed class StudioRuntime
             return "Насколько сильно эффект влияет на персонажа.";
         }
 
-        if (label.Contains("длитель", StringComparison.Ordinal) || label.Contains("время", StringComparison.Ordinal))
+        if ((label.Contains("длитель", StringComparison.Ordinal) || label.Contains("время", StringComparison.Ordinal))
+            && !label.Contains("время до следующей выдачи", StringComparison.Ordinal))
         {
             return "Время действия эффекта или процесса.";
         }
@@ -12057,6 +13339,16 @@ internal sealed class StudioRuntime
             return "Насколько часто этот водный пресет участвует в выборе появления рыбы.";
         }
 
+        if (label.Contains("дальность реакции на свисток", StringComparison.Ordinal))
+        {
+            return "Максимальная дистанция, на которой автомат ивента реагирует на свисток игрока.";
+        }
+
+        if (label.Contains("время до следующей выдачи", StringComparison.Ordinal))
+        {
+            return "Сколько секунд нужно подождать после срабатывания, прежде чем автомат снова сможет выдать конфету.";
+        }
+
         if (label.Contains("шанс", StringComparison.Ordinal) || label.Contains("probability", StringComparison.Ordinal))
         {
             return "Вероятность срабатывания (обычно 0..1).";
@@ -12075,6 +13367,11 @@ internal sealed class StudioRuntime
         if (label.Contains("патрон по умолчанию", StringComparison.Ordinal))
         {
             return "Какой тип патрона это оружие использует как базовый. Выбирай совместимый калибр, иначе оружие может работать некорректно.";
+        }
+
+        if (label.Contains("класс пули", StringComparison.Ordinal))
+        {
+            return "Какой класс пули использует этот боеприпас. Меняй только на совместимый тип (например AP, трассер или дробь нужного калибра), чтобы избежать ошибок в поведении оружия.";
         }
 
         if (label.Contains("патронов в магазине", StringComparison.Ordinal))
@@ -12112,6 +13409,11 @@ internal sealed class StudioRuntime
             && relativePath.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
         {
             return "Насколько уверенно пуля проходит через цели и преграды.";
+        }
+
+        if (label.Contains("бронепробиваемость", StringComparison.Ordinal))
+        {
+            return "Насколько хорошо пуля проходит через броню. 1.0 обычно означает стандартное пробитие, выше — лучше против защиты.";
         }
 
         if (label.Contains("длина трассера", StringComparison.Ordinal))
@@ -12404,6 +13706,16 @@ internal sealed class StudioRuntime
                 "Найди тип патрона, который оружие должно считать базовым, и выбери его из списка.");
         }
 
+        if (path.Contains("/items/ammunition/", StringComparison.Ordinal)
+            && (label.Contains("класс пули", StringComparison.Ordinal)
+                || label.Contains("данные пули", StringComparison.Ordinal)
+                || label.Contains("projectile", StringComparison.Ordinal)))
+        {
+            return (
+                "ammo-projectile-class",
+                "Найди класс пули, который должен использовать этот боеприпас, и выбери его из списка.");
+        }
+
         if (path.Contains("/items/crafting/recipes/", StringComparison.Ordinal)
             && (label.Contains("какой навык влияет на рецепт", StringComparison.Ordinal)
                 || label.Contains("основной навык рецепта", StringComparison.Ordinal)
@@ -12428,6 +13740,33 @@ internal sealed class StudioRuntime
             return (
                 "quest-asset",
                 "Найди квест, который должен входить в этот набор, и выбери его из списка.");
+        }
+
+        if (IsGameEventCoreAsset(relativePath)
+            && (label.Contains("набор снаряжения команды a", StringComparison.Ordinal)
+                || label.Contains("набор снаряжения команды b", StringComparison.Ordinal)))
+        {
+            return (
+                "gameevent-team-equipment-set",
+                label.Contains("команды a", StringComparison.Ordinal)
+                    ? "Найди готовый набор снаряжения для команды A."
+                    : "Найди готовый набор снаряжения для команды B.");
+        }
+
+        if (IsGameEventCoreAsset(relativePath)
+            && label.Contains("класс ящика события", StringComparison.Ordinal))
+        {
+            return (
+                "gameevent-dropzone-crate-class",
+                "Найди класс ящика для Drop Zone: именно этот класс будет создан для командных контейнеров.");
+        }
+
+        if (IsGameEventCoreAsset(relativePath)
+            && label.Contains("класс груза события", StringComparison.Ordinal))
+        {
+            return (
+                "gameevent-dropzone-cargo-class",
+                "Найди класс груза для Drop Zone: именно этот объект будет сбрасываться в центре события.");
         }
 
         if (path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal)
@@ -12473,10 +13812,19 @@ internal sealed class StudioRuntime
         if ((path.Contains("/encounterzones/", StringComparison.Ordinal)
                 || path.Contains("/encounters/", StringComparison.Ordinal)
                 || path.Contains("/characters/npcs/", StringComparison.Ordinal))
-            && (label.Contains("какое событие может запуститься", StringComparison.Ordinal)
-                || label.Contains("класс орды защитников", StringComparison.Ordinal)
-                || label.Contains("класс десантного корабля", StringComparison.Ordinal)
+            && (label.Contains("класс десантного корабля", StringComparison.Ordinal)
                 || label.Contains("класс охраны десантного корабля", StringComparison.Ordinal)))
+        {
+            return (
+                "guarded-zone-dropship-class",
+                "Найди класс дропшипа для охраняемой зоны: обычный или охранный вариант.");
+        }
+
+        if ((path.Contains("/encounterzones/", StringComparison.Ordinal)
+                || path.Contains("/encounters/", StringComparison.Ordinal)
+                || path.Contains("/characters/npcs/", StringComparison.Ordinal))
+            && (label.Contains("какое событие может запуститься", StringComparison.Ordinal)
+                || label.Contains("класс орды защитников", StringComparison.Ordinal)))
         {
             return (
                 "encounter-class",
@@ -12567,6 +13915,90 @@ internal sealed class StudioRuntime
         if (IsCargoDropContainerAsset(relativePath) && label.Contains("множитель шанса выбора", StringComparison.Ordinal))
         {
             return ("0", "10");
+        }
+
+        if (IsGameEventMarkerAsset(relativePath))
+        {
+            if (label.Contains("плата за вход", StringComparison.Ordinal))
+            {
+                return ("0", "100000");
+            }
+
+            if (label.Contains("минимум участников", StringComparison.Ordinal)
+                || label.Contains("максимум участников", StringComparison.Ordinal))
+            {
+                return ("1", "128");
+            }
+
+            if (label.Contains("лимит очков раунда", StringComparison.Ordinal))
+            {
+                return ("1", "1000");
+            }
+
+            if (label.Contains("лимит раундов", StringComparison.Ordinal)
+                || label.Contains("лимит побед", StringComparison.Ordinal)
+                || label.Contains("лимит захватов", StringComparison.Ordinal))
+            {
+                return ("1", "50");
+            }
+
+            if (label.Contains("очки за", StringComparison.Ordinal)
+                || label.Contains("штраф за", StringComparison.Ordinal))
+            {
+                return ("-1000", "1000");
+            }
+
+            if (label.Contains("очки славы за участие", StringComparison.Ordinal))
+            {
+                return ("-100", "100");
+            }
+
+            if (label.Contains("перевод очков в славу", StringComparison.Ordinal))
+            {
+                return ("0", "1");
+            }
+
+            if (label.Contains("задержка стартового объявления", StringComparison.Ordinal)
+                || label.Contains("длительность разминки", StringComparison.Ordinal)
+                || label.Contains("длительность сброса ящика", StringComparison.Ordinal)
+                || label.Contains("время поиска ключа", StringComparison.Ordinal)
+                || label.Contains("длительность сброса груза", StringComparison.Ordinal)
+                || label.Contains("время фазы захвата", StringComparison.Ordinal)
+                || label.Contains("длительность открытия груза", StringComparison.Ordinal)
+                || label.Contains("длительность раунда", StringComparison.Ordinal)
+                || label.Contains("задержка возрождения", StringComparison.Ordinal)
+                || label.Contains("время ожидания события", StringComparison.Ordinal)
+                || label.Contains("интервал сужения зоны", StringComparison.Ordinal)
+                || label.Contains("длительность сужения зоны", StringComparison.Ordinal)
+                || label.Contains("время прогрева барьера", StringComparison.Ordinal)
+                || label.Contains("сброс флага", StringComparison.Ordinal))
+            {
+                return ("0", "3600");
+            }
+
+            if (label.Contains("шаг сужения зоны", StringComparison.Ordinal))
+            {
+                return ("0", "500");
+            }
+        }
+
+        if (relativePath.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("скорость пули", StringComparison.Ordinal))
+            {
+                return ("0", "200000");
+            }
+
+            if (label.Contains("патронов в пачке", StringComparison.Ordinal))
+            {
+                return ("0", "500");
+            }
+
+            if (label.Contains("пробитие", StringComparison.Ordinal)
+                || label.Contains("бронепробиваемость", StringComparison.Ordinal))
+            {
+                return ("0", "20");
+            }
         }
 
         if (relativePath.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase))
@@ -12900,6 +14332,11 @@ internal sealed class StudioRuntime
             return "Какие сценарии защиты может выбрать грузовой дроп. Добавь совместимый класс охраны и затем настрой его вес выбора и задержку запуска.";
         }
 
+        if (IsCargoDropContainerClassListSurface(relativePath, userLabel))
+        {
+            return "Какие типы контейнера может запускать этот ивент грузового дропа. Добавь совместимый контейнер, чтобы расширить сценарии события.";
+        }
+
         if (label.Contains("персонажи для события", StringComparison.Ordinal))
         {
             return "Общий пул вариантов для события. Сюда можно добавить новый пресет NPC, зомби, животного или орды, а затем настроить его вес выбора.";
@@ -13176,6 +14613,16 @@ internal sealed class StudioRuntime
                 true,
                 "advanced-item-spawner-preset",
                 "Найди совместимый контейнерный набор грузового дропа, который контейнер должен уметь выбирать.");
+        }
+
+        if (IsCargoDropContainerClassListSurface(relativePath, userLabel)
+            && (values.Length == 0
+                || values.All(value => value is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)))
+        {
+            return (
+                true,
+                "cargo-drop-container-class",
+                "Найди совместимый класс контейнера грузового дропа, который событие сможет запускать.");
         }
 
         if (IsVehicleSpawnPresetListSurface(relativePath, userLabel)
@@ -13677,6 +15124,26 @@ internal sealed class StudioRuntime
                 return new ModAssetDescriptor(
                     $"Магазин: {cleanStem}",
                     "Вместимость магазина и связанная конфигурация боеприпасов.");
+            }
+
+            if (relativePath.Contains("/items/ammunition/ammunition_class/", StringComparison.OrdinalIgnoreCase))
+            {
+                var projectileName = lowerStem.StartsWith("bp_weaponbullet_", StringComparison.Ordinal)
+                    ? LocalizeAssetStem(stem["bp_weaponbullet_".Length..])
+                    : cleanStem;
+                return new ModAssetDescriptor(
+                    $"Класс пули: {projectileName}",
+                    "Скорость, базовый урон, урон в событиях, пробитие и множители попаданий для конкретного типа пули.");
+            }
+
+            if (relativePath.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
+            {
+                var ammoName = lowerStem.StartsWith("cal_", StringComparison.Ordinal)
+                    ? LocalizeAssetStem(stem["cal_".Length..])
+                    : cleanStem;
+                return new ModAssetDescriptor(
+                    $"Патрон: {ammoName}",
+                    "Тип боеприпаса, размер пачки, зоны появления и связь с классом пули.");
             }
 
             return new ModAssetDescriptor(
@@ -15141,6 +16608,57 @@ internal sealed class StudioRuntime
             return true;
         }
 
+        if (path.Contains("/gameevents/", StringComparison.Ordinal))
+        {
+            if (lowerStem.Equals("bp_deathmatchgameevent", StringComparison.Ordinal))
+            {
+                descriptor = new ModAssetDescriptor(
+                    "Событие: бой насмерть",
+                    "Базовые параметры режима deathmatch: название события и ключевые привязки набора.");
+                return true;
+            }
+
+            if (lowerStem.Equals("bp_teamdeathmatchgameevent", StringComparison.Ordinal))
+            {
+                descriptor = new ModAssetDescriptor(
+                    "Событие: командный бой",
+                    "Базовые параметры режима team deathmatch: название события и ключевые привязки набора.");
+                return true;
+            }
+
+            if (lowerStem.Equals("bp_dropzonegameevent", StringComparison.Ordinal))
+            {
+                descriptor = new ModAssetDescriptor(
+                    "Событие: зона сброса",
+                    "Параметры режима drop zone: название события, наборы снаряжения команд и классы ящиков/груза.");
+                return true;
+            }
+
+            if (lowerStem.Equals("bp_ctfgameevent", StringComparison.Ordinal))
+            {
+                descriptor = new ModAssetDescriptor(
+                    "Событие: захват флага",
+                    "Базовые параметры режима CTF: название события и привязки классов для флага/базы.");
+                return true;
+            }
+        }
+
+        if (lowerStem.Equals("halloweenwhistlecandydispenser", StringComparison.Ordinal))
+        {
+            descriptor = new ModAssetDescriptor(
+                "Событие: автомат конфет за свисток",
+                "Параметры ивента Хэллоуина: на какой дистанции автомат реагирует на свисток и через сколько секунд может выдать конфету снова.");
+            return true;
+        }
+
+        if (lowerStem.Equals("bp_globalguardedzonemanager", StringComparison.Ordinal))
+        {
+            descriptor = new ModAssetDescriptor(
+                "Охраняемые зоны: глобальный менеджер",
+                "Глобальные параметры охраняемых зон: интервал обновления, класс дропшипа и класс орды защитников.");
+            return true;
+        }
+
         if (stem.Equals("ArmedNPCDifficultyLevelSettings", StringComparison.OrdinalIgnoreCase))
         {
             descriptor = new ModAssetDescriptor(
@@ -15952,7 +17470,8 @@ internal sealed class StudioRuntime
             }
 
             return path.Contains("/encounters/", StringComparison.Ordinal)
-                || path.Contains("/gameevents/markers/", StringComparison.Ordinal)
+                || (path.Contains("/gameevents/", StringComparison.Ordinal)
+                    && !path.Contains("/ui/gameevents/", StringComparison.Ordinal))
                 || path.Contains("/worldevents/", StringComparison.Ordinal)
                 || (path.Contains("/npcs/", StringComparison.Ordinal)
                     && (path.Contains("spawn", StringComparison.Ordinal)
@@ -16024,6 +17543,7 @@ internal sealed class StudioRuntime
         if (categoryId is "weapons-items")
         {
             return (path.Contains("/items/weapons/", StringComparison.Ordinal)
+                    || path.Contains("/items/ammunition/", StringComparison.Ordinal)
                     || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
                     || path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal)
                     || path.Contains("/items/equipment/active_items/", StringComparison.Ordinal)
@@ -17893,12 +19413,327 @@ internal sealed class StudioRuntime
             return TryApplyForeignSubstanceAttributeFieldEdit(asset, edit, warnings, out applied);
         }
 
+        if (edit.FieldPath.StartsWith(GameEventMarkerSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return TryApplyGameEventMarkerSyntheticFieldEdit(asset, edit, warnings, out applied);
+        }
+
         if (edit.FieldPath.StartsWith(WeaponSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
         {
             return TryApplyWeaponSyntheticFieldEdit(asset, edit, warnings, out applied);
         }
 
+        if (edit.FieldPath.StartsWith(AmmunitionSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return TryApplyAmmunitionSyntheticFieldEdit(asset, edit, warnings, out applied);
+        }
+
         return false;
+    }
+
+    private static bool TryApplyGameEventMarkerSyntheticFieldEdit(
+        UAsset asset,
+        StudioFieldEditDto edit,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+
+        var payload = edit.FieldPath[GameEventMarkerSyntheticFieldPrefix.Length..].Trim();
+        var separatorIndex = payload.IndexOf(':');
+        if (separatorIndex <= 0 || separatorIndex >= payload.Length - 1)
+        {
+            warnings.Add($"UAsset edit skipped: неверный synthetic-путь маркера события {edit.FieldPath}");
+            return true;
+        }
+
+        var mode = payload[..separatorIndex].Trim().ToLowerInvariant();
+        var token = payload[(separatorIndex + 1)..].Trim();
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            warnings.Add($"UAsset edit skipped: не указан параметр маркера события ({edit.FieldPath})");
+            return true;
+        }
+
+        if (!TryFindGameEventMarkerOwnerExport(asset, out var markerExport, out _))
+        {
+            warnings.Add($"UAsset edit skipped: экспорт маркера события не найден ({edit.FieldPath})");
+            return true;
+        }
+
+        switch (mode)
+        {
+            case "common":
+                return TryApplyCommonGameEventMarkerSyntheticEdit(asset, markerExport, token, edit.Value, warnings, out applied);
+            case "deathmatch":
+                return TryApplyDeathmatchMarkerSyntheticEdit(asset, markerExport, "DeathmatchParameters", "DeathmatchParameters", token, edit.Value, warnings, out applied);
+            case "teamdeathmatch":
+                return TryApplyDeathmatchMarkerSyntheticEdit(asset, markerExport, "TeamDeathmatchParameters", "TeamDeathmatchParameters", token, edit.Value, warnings, out applied);
+            case "ctf":
+                return TryApplyCtfMarkerSyntheticEdit(asset, markerExport, token, edit.Value, warnings, out applied);
+            case "dropzone":
+                return TryApplyDropZoneMarkerSyntheticEdit(asset, markerExport, token, edit.Value, warnings, out applied);
+            default:
+                warnings.Add($"UAsset edit skipped: неизвестный режим маркера события {mode}");
+                return true;
+        }
+    }
+
+    private static bool TryApplyCommonGameEventMarkerSyntheticEdit(
+        UAsset asset,
+        NormalExport markerExport,
+        string token,
+        string rawValue,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var markerStruct = EnsureTopLevelStructProperty(asset, markerExport, "GameEventParameters", "GameEventParameters");
+
+        if (token.Equals("AllowRespawn", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!TryParseBool(rawValue, out var boolValue))
+            {
+                warnings.Add("UAsset edit skipped: AllowRespawn (ожидается true/false)");
+                return true;
+            }
+
+            EnsureStructBoolChild(asset, markerStruct, "AllowRespawn").Value = boolValue;
+            applied = true;
+            return true;
+        }
+
+        var intPropertyName = token.ToLowerInvariant() switch
+        {
+            "roundlimit" => "RoundLimit",
+            "winlimit" => "WinLimit",
+            "minparticipants" => "MinParticipants",
+            "maxparticipants" => "MaxParticipants",
+            _ => string.Empty
+        };
+        if (!string.IsNullOrWhiteSpace(intPropertyName))
+        {
+            if (!int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var intValue))
+            {
+                warnings.Add($"UAsset edit skipped: {intPropertyName} (ожидается целое число)");
+                return true;
+            }
+
+            EnsureStructIntChild(asset, markerStruct, intPropertyName).Value = intValue;
+            applied = true;
+            return true;
+        }
+
+        var floatPropertyName = token.ToLowerInvariant() switch
+        {
+            "roundduration" => "RoundDuration",
+            "respawndelay" => "RespawnDelay",
+            "timeoutduration" => "TimeoutDuration",
+            _ => string.Empty
+        };
+        if (string.IsNullOrWhiteSpace(floatPropertyName))
+        {
+            warnings.Add($"UAsset edit skipped: неподдерживаемый общий параметр события ({token})");
+            return true;
+        }
+
+        if (!float.TryParse(rawValue, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var floatValue))
+        {
+            warnings.Add($"UAsset edit skipped: {floatPropertyName} (ожидается число)");
+            return true;
+        }
+
+        EnsureStructFloatChild(asset, markerStruct, floatPropertyName).Value = floatValue;
+        applied = true;
+        return true;
+    }
+
+    private static bool TryApplyDeathmatchMarkerSyntheticEdit(
+        UAsset asset,
+        NormalExport markerExport,
+        string structName,
+        string structType,
+        string token,
+        string rawValue,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var propertyName = token.ToLowerInvariant() switch
+        {
+            "roundscorelimit" => "RoundScoreLimit",
+            "arearestrictioninterval" => "AreaRestrictionInterval",
+            "arearestrictionduration" => "AreaRestrictionDuration",
+            "arearestrictionstep" => "AreaRestrictionStep",
+            "barrierheatupduration" => "BarrierHeatUpDuration",
+            _ => string.Empty
+        };
+
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            warnings.Add($"UAsset edit skipped: неподдерживаемый параметр deathmatch/teamdeathmatch ({token})");
+            return true;
+        }
+
+        var markerStruct = EnsureTopLevelStructProperty(asset, markerExport, structName, structType);
+        if (propertyName.Equals("RoundScoreLimit", StringComparison.Ordinal))
+        {
+            if (!int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var intValue))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} (ожидается целое число)");
+                return true;
+            }
+
+            EnsureStructIntChild(asset, markerStruct, propertyName).Value = intValue;
+            applied = true;
+            return true;
+        }
+
+        if (!float.TryParse(rawValue, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var floatValue))
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} (ожидается число)");
+            return true;
+        }
+
+        EnsureStructFloatChild(asset, markerStruct, propertyName).Value = floatValue;
+        applied = true;
+        return true;
+    }
+
+    private static bool TryApplyCtfMarkerSyntheticEdit(
+        UAsset asset,
+        NormalExport markerExport,
+        string token,
+        string rawValue,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var markerStruct = EnsureTopLevelStructProperty(asset, markerExport, "CTFParameters", "CTFParameters");
+
+        if (token.Equals("FlagResetDuration", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!float.TryParse(rawValue, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
+            {
+                warnings.Add("UAsset edit skipped: FlagResetDuration (ожидается число)");
+                return true;
+            }
+
+            EnsureStructFloatChild(asset, markerStruct, "FlagResetDuration").Value = value;
+            applied = true;
+            return true;
+        }
+
+        if (token.Equals("AllowReturns", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!TryParseBool(rawValue, out var value))
+            {
+                warnings.Add("UAsset edit skipped: AllowReturns (ожидается true/false)");
+                return true;
+            }
+
+            EnsureStructBoolChild(asset, markerStruct, "AllowReturns").Value = value;
+            applied = true;
+            return true;
+        }
+
+        if (token.Equals("CaptureLimit", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+            {
+                warnings.Add("UAsset edit skipped: CaptureLimit (ожидается целое число)");
+                return true;
+            }
+
+            EnsureStructIntChild(asset, markerStruct, "CaptureLimit").Value = value;
+            applied = true;
+            return true;
+        }
+
+        if (token.Equals("PointsPerPickup.Score", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var score))
+            {
+                warnings.Add("UAsset edit skipped: PointsPerPickup.Score (ожидается целое число)");
+                return true;
+            }
+
+            var reward = EnsureStructChildStructProperty(asset, markerStruct, "PointsPerPickup", "GameEventRewardPoints");
+            EnsureStructIntChild(asset, reward, "Score").Value = score;
+            applied = true;
+            return true;
+        }
+
+        if (token.Equals("PointsPerReturn.Score", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var score))
+            {
+                warnings.Add("UAsset edit skipped: PointsPerReturn.Score (ожидается целое число)");
+                return true;
+            }
+
+            var reward = EnsureStructChildStructProperty(asset, markerStruct, "PointsPerReturn", "GameEventRewardPoints");
+            EnsureStructIntChild(asset, reward, "Score").Value = score;
+            applied = true;
+            return true;
+        }
+
+        warnings.Add($"UAsset edit skipped: неподдерживаемый параметр CTF ({token})");
+        return true;
+    }
+
+    private static bool TryApplyDropZoneMarkerSyntheticEdit(
+        UAsset asset,
+        NormalExport markerExport,
+        string token,
+        string rawValue,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var markerStruct = EnsureTopLevelStructProperty(asset, markerExport, "DropZoneParameters", "DropZoneParameters");
+
+        if (token.Equals("PointsPerActivation.Score", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var score))
+            {
+                warnings.Add("UAsset edit skipped: PointsPerActivation.Score (ожидается целое число)");
+                return true;
+            }
+
+            var reward = EnsureStructChildStructProperty(asset, markerStruct, "PointsPerActivation", "GameEventRewardPoints");
+            EnsureStructIntChild(asset, reward, "Score").Value = score;
+            applied = true;
+            return true;
+        }
+
+        var propertyName = token.ToLowerInvariant() switch
+        {
+            "introannouncementdelay" => "IntroAnnouncementDelay",
+            "warmupphaseduration" => "WarmupPhaseDuration",
+            "cratedropduration" => "CrateDropDuration",
+            "searchphasetimelimit" => "SearchPhaseTimeLimit",
+            "cargodropduration" => "CargoDropDuration",
+            "capturephasetimelimit" => "CapturePhaseTimeLimit",
+            "cargoopeningduration" => "CargoOpeningDuration",
+            _ => string.Empty
+        };
+
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            warnings.Add($"UAsset edit skipped: неподдерживаемый параметр Drop Zone ({token})");
+            return true;
+        }
+
+        if (!float.TryParse(rawValue, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} (ожидается число)");
+            return true;
+        }
+
+        EnsureStructFloatChild(asset, markerStruct, propertyName).Value = value;
+        applied = true;
+        return true;
     }
 
     private static bool TryApplyForeignSubstanceAttributeFieldEdit(
@@ -18026,6 +19861,108 @@ internal sealed class StudioRuntime
         }
 
         EnsureTopLevelFloatProperty(asset, export, propertyName).Value = value;
+        applied = true;
+        return true;
+    }
+
+    private static bool TryApplyAmmunitionSyntheticFieldEdit(
+        UAsset asset,
+        StudioFieldEditDto edit,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var propertyName = edit.FieldPath[AmmunitionSyntheticFieldPrefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            warnings.Add("UAsset edit skipped: не указан параметр боеприпаса.");
+            return true;
+        }
+
+        var allowedProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ProjectileClass",
+            "MaxAmmoCount",
+            "_damageOverTime"
+        };
+        if (!allowedProperties.Contains(propertyName))
+        {
+            warnings.Add($"UAsset edit skipped: неподдерживаемый параметр боеприпаса {propertyName}");
+            return true;
+        }
+
+        if (!TryFindAmmunitionOwnerExport(asset, out var export, out _))
+        {
+            warnings.Add($"UAsset edit skipped: экспорт для {propertyName} не найден.");
+            return true;
+        }
+
+        if (propertyName.Equals("ProjectileClass", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!TryBuildObjectReferenceFromPicker(asset, edit.Value, out var objectReference, out var objectError))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} ({objectError})");
+                return true;
+            }
+
+            var conflictingObjectProperty = export.Data
+                .OfType<PropertyData>()
+                .FirstOrDefault(property =>
+                    PropertyNamesMatch(property.Name?.ToString(), propertyName)
+                    && property is not ObjectPropertyData);
+            if (conflictingObjectProperty is not null)
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как object-ссылка.");
+                return true;
+            }
+
+            EnsureTopLevelObjectProperty(asset, export, propertyName).Value = objectReference;
+            applied = true;
+            return true;
+        }
+
+        if (propertyName.Equals("MaxAmmoCount", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(edit.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} (ожидается целое число)");
+                return true;
+            }
+
+            var conflictingIntProperty = export.Data
+                .OfType<PropertyData>()
+                .FirstOrDefault(property =>
+                    PropertyNamesMatch(property.Name?.ToString(), propertyName)
+                    && property is not IntPropertyData);
+            if (conflictingIntProperty is not null)
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как целое число.");
+                return true;
+            }
+
+            EnsureTopLevelIntProperty(asset, export, propertyName).Value = value;
+            applied = true;
+            return true;
+        }
+
+        if (!float.TryParse(edit.Value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var floatValue))
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} (ожидается float)");
+            return true;
+        }
+
+        var conflictingFloatProperty = export.Data
+            .OfType<PropertyData>()
+            .FirstOrDefault(property =>
+                PropertyNamesMatch(property.Name?.ToString(), propertyName)
+                && property is not FloatPropertyData);
+        if (conflictingFloatProperty is not null)
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как число.");
+            return true;
+        }
+
+        EnsureTopLevelFloatProperty(asset, export, propertyName).Value = floatValue;
         applied = true;
         return true;
     }
@@ -22091,7 +24028,8 @@ internal sealed class StudioRuntime
 
         if (path.Contains("/encounters/", StringComparison.OrdinalIgnoreCase)
             || path.Contains("/npcs/", StringComparison.OrdinalIgnoreCase)
-            || path.Contains("/gameevents/markers/", StringComparison.OrdinalIgnoreCase)
+            || (path.Contains("/gameevents/", StringComparison.OrdinalIgnoreCase)
+                && !path.Contains("/ui/gameevents/", StringComparison.OrdinalIgnoreCase))
             || path.Contains("/worldevents/", StringComparison.OrdinalIgnoreCase)
             || path.Contains("cargodrop", StringComparison.OrdinalIgnoreCase))
         {
