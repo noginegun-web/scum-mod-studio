@@ -17,7 +17,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 5;
+    private const int ModAssetsCatalogCacheFormatVersion = 6;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -28,14 +28,17 @@ internal sealed class StudioRuntime
     private const string CraftingUiDataRegistryRelativePath = "scum/content/conz_files/ui/crafting/craftinguidata.uasset";
     private const string ForeignSubstanceAttributeFieldPrefix = "foreign-substance-attribute:";
     private const string WeaponSyntheticFieldPrefix = "weapon-field:";
+    private const string WeaponClipSyntheticFieldPrefix = "weapon-clip-field:";
     private const string AmmunitionSyntheticFieldPrefix = "ammo-field:";
     private const string GameEventMarkerSyntheticFieldPrefix = "gameevent-marker:";
+    private const string WorldEventManagerSyntheticFieldPrefix = "worldevent-manager:";
     private const string SyntheticSideEffectsTargetPath = "synthetic:side-effects";
     private const string SyntheticCraftingUiCategoryRecipesTargetPrefix = "synthetic:crafting-ui-category-recipes:";
     private const string SyntheticCargoMajorSpawnerOptionsTargetPath = "synthetic:cargo-major-spawner-options";
     private const string SyntheticCargoMajorSpawnerPresetOptionsTargetPath = "synthetic:cargo-major-spawner-preset-options";
     private const string SyntheticCargoMinorSpawnerOptionsTargetPath = "synthetic:cargo-minor-spawner-options";
     private const string SyntheticRecipeAllowedTypesTargetPrefix = "synthetic:recipe-allowed-types:";
+    private const string SyntheticWorldEventManagerEventTypesTargetPath = "synthetic:worldevent-manager-event-types";
     private const string QuestManagerAssetId = "game::scum/content/conz_files/quests/questmangerdata.uasset";
 
     private static readonly StarterSpawnFlagSpec[] StarterSpawnFlags =
@@ -233,6 +236,9 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _gameEventTeamEquipmentSetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _gameEventDropzoneCrateClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _gameEventDropzoneCargoClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _gameEventClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _gameEventBorderClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _worldEventClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _fishSpeciesReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _plantSpeciesReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _plantPestReferenceOptionsCache;
@@ -241,6 +247,14 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerSubpresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _vehicleSpawnPresetReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualStaticMeshObjectReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualStaticMeshSoftReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualSkeletalMeshObjectReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualSkeletalMeshSoftReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualMaterialObjectReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualMaterialSoftReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualTextureObjectReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _visualTextureSoftReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _ammoItemReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _ammoProjectileReferenceOptionsCache;
     private List<StudioModFieldOptionDto>? _itemSpawningCooldownGroupFieldOptionsCache;
@@ -597,22 +611,25 @@ internal sealed class StudioRuntime
             query = query.Where(x => x.CategoryId.Equals(categoryId, StringComparison.OrdinalIgnoreCase));
         }
 
+        List<StudioModAssetDto> materialized;
         if (!string.IsNullOrWhiteSpace(search))
         {
             var term = search.Trim();
             var looseTerm = NormalizeLooseSearch(term);
-            query = query.Where(x =>
-                x.RelativePath.Contains(term, StringComparison.OrdinalIgnoreCase)
-                || x.CategoryName.Contains(term, StringComparison.OrdinalIgnoreCase)
-                || x.DisplayName.Contains(term, StringComparison.OrdinalIgnoreCase)
-                || x.Summary.Contains(term, StringComparison.OrdinalIgnoreCase)
-                || (!string.IsNullOrWhiteSpace(looseTerm) && (
-                    NormalizeLooseSearch(x.RelativePath).Contains(looseTerm, StringComparison.Ordinal)
-                    || NormalizeLooseSearch(x.DisplayName).Contains(looseTerm, StringComparison.Ordinal)
-                    || NormalizeLooseSearch(x.Summary).Contains(looseTerm, StringComparison.Ordinal))));
+            materialized = query
+                .Select(x => new { Asset = x, Score = ComputeModAssetSearchScore(x, term, looseTerm) })
+                .Where(x => x.Score > 0)
+                .OrderByDescending(x => x.Score)
+                .ThenBy(x => x.Asset.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Asset.RelativePath, StringComparer.OrdinalIgnoreCase)
+                .Select(x => x.Asset)
+                .ToList();
+        }
+        else
+        {
+            materialized = query.ToList();
         }
 
-        var materialized = query.ToList();
         var total = materialized.Count;
         var pageCount = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
         var actualPage = Math.Min(page, pageCount);
@@ -733,6 +750,12 @@ internal sealed class StudioRuntime
                     _gameEventDropzoneCargoClassReferenceOptionsCache ??= BuildGameEventDropzoneClassReferenceOptions(
                         "bp_dropzonecargo",
                         "Груз Drop Zone"),
+                "gameevent-class" =>
+                    _gameEventClassReferenceOptionsCache ??= BuildGameEventClassReferenceOptions(),
+                "gameevent-border-class" =>
+                    _gameEventBorderClassReferenceOptionsCache ??= BuildGameEventBorderClassReferenceOptions(),
+                "worldevent-class" =>
+                    _worldEventClassReferenceOptionsCache ??= BuildWorldEventClassReferenceOptions(),
                 "fish-species-asset" or "fish-species" =>
                     _fishSpeciesReferenceOptionsCache ??= BuildFishSpeciesReferenceOptions(),
                 "plant-species-asset" or "plant-species" =>
@@ -749,6 +772,22 @@ internal sealed class StudioRuntime
                     _advancedItemSpawnerSubpresetReferenceOptionsCache ??= BuildAdvancedItemSpawnerSubpresetReferenceOptions(),
                 "vehicle-spawn-preset" or "vehicle-preset" =>
                     _vehicleSpawnPresetReferenceOptionsCache ??= BuildVehicleSpawnPresetReferenceOptions(),
+                "visual-static-mesh-object" =>
+                    _visualStaticMeshObjectReferenceOptionsCache ??= BuildVisualStaticMeshObjectReferenceOptions(),
+                "visual-static-mesh-asset" =>
+                    _visualStaticMeshSoftReferenceOptionsCache ??= BuildVisualStaticMeshSoftReferenceOptions(),
+                "visual-skeletal-mesh-object" =>
+                    _visualSkeletalMeshObjectReferenceOptionsCache ??= BuildVisualSkeletalMeshObjectReferenceOptions(),
+                "visual-skeletal-mesh-asset" =>
+                    _visualSkeletalMeshSoftReferenceOptionsCache ??= BuildVisualSkeletalMeshSoftReferenceOptions(),
+                "visual-material-object" =>
+                    _visualMaterialObjectReferenceOptionsCache ??= BuildVisualMaterialObjectReferenceOptions(),
+                "visual-material-asset" =>
+                    _visualMaterialSoftReferenceOptionsCache ??= BuildVisualMaterialSoftReferenceOptions(),
+                "visual-texture-object" or "visual-icon-object" =>
+                    _visualTextureObjectReferenceOptionsCache ??= BuildVisualTextureObjectReferenceOptions(),
+                "visual-texture-asset" or "visual-icon-asset" =>
+                    _visualTextureSoftReferenceOptionsCache ??= BuildVisualTextureSoftReferenceOptions(),
                 _ => []
             };
         }
@@ -1746,6 +1785,144 @@ internal sealed class StudioRuntime
             .ToList();
     }
 
+    private List<StudioReferenceOptionDto> BuildGameEventClassReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            IsGameEventClassAssetCandidate,
+            "/Script/Engine",
+            "BlueprintGeneratedClass",
+            assetInfo => PrefixReferenceOptionLabel("Режим события", ResolveGameEventClassDisplayName(assetInfo.RelativePath)));
+    }
+
+    private List<StudioReferenceOptionDto> BuildGameEventBorderClassReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            IsGameEventBorderClassAssetCandidate,
+            "/Script/Engine",
+            "BlueprintGeneratedClass",
+            assetInfo => PrefixReferenceOptionLabel("Граница события", ResolveGameEventBorderClassDisplayName(assetInfo.RelativePath)));
+    }
+
+    private static bool IsGameEventClassAssetCandidate(string relativePath)
+    {
+        if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.Contains("/gameevents/", StringComparison.Ordinal)
+            || normalized.Contains("/gameevents/markers/", StringComparison.Ordinal)
+            || normalized.Contains("/ui/gameevents/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(normalized);
+        if (string.IsNullOrWhiteSpace(stem)
+            || !stem.StartsWith("bp_", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!stem.Contains("gameevent", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !stem.Contains("manager", StringComparison.Ordinal)
+               && !stem.Contains("border", StringComparison.Ordinal)
+               && !stem.Contains("locationmarker", StringComparison.Ordinal);
+    }
+
+    private static bool IsGameEventBorderClassAssetCandidate(string relativePath)
+    {
+        if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.Contains("/gameevents/", StringComparison.Ordinal)
+            || normalized.Contains("/ui/gameevents/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(normalized);
+        return !string.IsNullOrWhiteSpace(stem)
+               && stem.Contains("gameeventborder", StringComparison.Ordinal);
+    }
+
+    private static string ResolveGameEventClassDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath).ToLowerInvariant();
+        return stem switch
+        {
+            "bp_deathmatchgameevent" => "бой насмерть",
+            "bp_teamdeathmatchgameevent" => "командный бой",
+            "bp_ctfgameevent" => "захват флага",
+            "bp_dropzonegameevent" => "зона сброса",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(Path.GetFileNameWithoutExtension(relativePath))))
+        };
+    }
+
+    private static string ResolveGameEventBorderClassDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath).ToLowerInvariant();
+        return stem switch
+        {
+            "bp_gameeventborder" => "стандартная граница события",
+            "bpc_gameeventborder_mma" => "граница MMA-события",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(Path.GetFileNameWithoutExtension(relativePath))))
+        };
+    }
+
+    private List<StudioReferenceOptionDto> BuildWorldEventClassReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            IsWorldEventClassAssetCandidate,
+            "/Script/Engine",
+            "BlueprintGeneratedClass",
+            assetInfo => PrefixReferenceOptionLabel("Мировой ивент", ResolveWorldEventClassDisplayName(assetInfo.RelativePath)));
+    }
+
+    private static bool IsWorldEventClassAssetCandidate(string relativePath)
+    {
+        if (!relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.Contains("/worldevents/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(normalized);
+        if (string.IsNullOrWhiteSpace(stem)
+            || !stem.StartsWith("bp_", StringComparison.Ordinal)
+            || !stem.Contains("event", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !stem.Contains("manager", StringComparison.Ordinal)
+               && !stem.Contains("locationmarker", StringComparison.Ordinal)
+               && !stem.Equals("bp_cargo", StringComparison.Ordinal);
+    }
+
+    private static string ResolveWorldEventClassDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath).ToLowerInvariant();
+        return stem switch
+        {
+            "bp_cargodropevent" => "грузовой дроп",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(Path.GetFileNameWithoutExtension(relativePath))))
+        };
+    }
+
     private static string ResolveGameEventTeamEquipmentSetDisplayName(string relativePath)
     {
         var stem = Path.GetFileNameWithoutExtension(relativePath);
@@ -1962,6 +2139,235 @@ internal sealed class StudioRuntime
             assetInfo => $"Пресет транспорта: {ResolveVehicleSpawnPresetOptionDisplayName(assetInfo.RelativePath)}");
     }
 
+    private List<StudioReferenceOptionDto> BuildVisualStaticMeshObjectReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            IsVisualStaticMeshAssetCandidate,
+            "/Script/Engine",
+            "StaticMesh",
+            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SM_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualStaticMeshSoftReferenceOptions()
+    {
+        return BuildSoftGameAssetReferenceOptions(
+            IsVisualStaticMeshAssetCandidate,
+            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SM_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualSkeletalMeshObjectReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            IsVisualSkeletalMeshAssetCandidate,
+            "/Script/Engine",
+            "SkeletalMesh",
+            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SK_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualSkeletalMeshSoftReferenceOptions()
+    {
+        return BuildSoftGameAssetReferenceOptions(
+            IsVisualSkeletalMeshAssetCandidate,
+            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SK_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualMaterialSoftReferenceOptions()
+    {
+        return BuildSoftGameAssetReferenceOptions(
+            IsVisualMaterialAssetCandidate,
+            assetInfo => PrefixReferenceOptionLabel("Материал", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "MI_", "M_", "MAT_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualMaterialObjectReferenceOptions()
+    {
+        var result = new List<StudioReferenceOptionDto>(512);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _gameAssetsCache ??= BuildGameAssetRows();
+
+        foreach (var assetInfo in _gameAssetsCache)
+        {
+            var relativePath = PathUtil.NormalizeRelative(assetInfo.RelativePath);
+            if (!IsVisualMaterialAssetCandidate(relativePath))
+            {
+                continue;
+            }
+
+            var stem = Path.GetFileNameWithoutExtension(relativePath);
+            if (string.IsNullOrWhiteSpace(stem))
+            {
+                continue;
+            }
+
+            var className = stem.StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+                ? "MaterialInstanceConstant"
+                : "Material";
+            var value = BuildGameObjectReferenceFromRelativePath(relativePath, "/Script/Engine", className);
+            if (!seen.Add(value))
+            {
+                continue;
+            }
+
+            result.Add(new StudioReferenceOptionDto(
+                value,
+                PrefixReferenceOptionLabel("Материал", ResolveVisualAssetDisplayName(relativePath, "MI_", "M_", "MAT_"))));
+        }
+
+        return result
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualTextureObjectReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            IsVisualTextureAssetCandidate,
+            "/Script/Engine",
+            "Texture2D",
+            assetInfo => PrefixReferenceOptionLabel("Текстура", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "T_", "TX_", "TEX_", "ICO_", "ICON_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualTextureSoftReferenceOptions()
+    {
+        return BuildSoftGameAssetReferenceOptions(
+            IsVisualTextureAssetCandidate,
+            assetInfo => PrefixReferenceOptionLabel("Текстура", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "T_", "TX_", "TEX_", "ICO_", "ICON_")));
+    }
+
+    private static bool IsGameplayVisualAssetPath(string relativePath)
+    {
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+            || !path.StartsWith("scum/content/", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (path.Contains("/ui/", StringComparison.Ordinal)
+            || path.Contains("/widgets/", StringComparison.Ordinal)
+            || path.Contains("/stringtables/", StringComparison.Ordinal)
+            || path.Contains("/vfx/", StringComparison.Ordinal)
+            || path.Contains("/fx/", StringComparison.Ordinal)
+            || path.Contains("/sounds/", StringComparison.Ordinal)
+            || path.Contains("/audio/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsVisualStaticMeshAssetCandidate(string relativePath)
+    {
+        if (!IsGameplayVisualAssetPath(relativePath))
+        {
+            return false;
+        }
+
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var stem = Path.GetFileNameWithoutExtension(path);
+        return stem.StartsWith("sm_", StringComparison.OrdinalIgnoreCase)
+               || (path.Contains("/meshes/", StringComparison.Ordinal) && !stem.StartsWith("sk_", StringComparison.OrdinalIgnoreCase))
+               || (path.Contains("/models/", StringComparison.Ordinal) && stem.StartsWith("sm_", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsVisualSkeletalMeshAssetCandidate(string relativePath)
+    {
+        if (!IsGameplayVisualAssetPath(relativePath))
+        {
+            return false;
+        }
+
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var stem = Path.GetFileNameWithoutExtension(path);
+        return stem.StartsWith("sk_", StringComparison.OrdinalIgnoreCase)
+               || path.Contains("/skeletal", StringComparison.Ordinal);
+    }
+
+    private static bool IsVisualMaterialAssetCandidate(string relativePath)
+    {
+        if (!IsGameplayVisualAssetPath(relativePath))
+        {
+            return false;
+        }
+
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var stem = Path.GetFileNameWithoutExtension(path);
+        if (stem.StartsWith("mf_", StringComparison.OrdinalIgnoreCase)
+            || stem.StartsWith("mpc_", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var looksLikeMaterial = stem.StartsWith("mi_", StringComparison.OrdinalIgnoreCase)
+                                || stem.StartsWith("m_", StringComparison.OrdinalIgnoreCase)
+                                || stem.StartsWith("mat_", StringComparison.OrdinalIgnoreCase);
+        if (!looksLikeMaterial)
+        {
+            return false;
+        }
+
+        return path.Contains("/materials/", StringComparison.Ordinal)
+               || path.Contains("/material/", StringComparison.Ordinal)
+               || path.Contains("/skins/", StringComparison.Ordinal)
+               || path.Contains("/paint/", StringComparison.Ordinal)
+               || path.Contains("/camouflage/", StringComparison.Ordinal);
+    }
+
+    private static bool IsVisualTextureAssetCandidate(string relativePath)
+    {
+        if (!IsGameplayVisualAssetPath(relativePath))
+        {
+            return false;
+        }
+
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var stem = Path.GetFileNameWithoutExtension(path);
+        var looksLikeTexture = stem.StartsWith("t_", StringComparison.OrdinalIgnoreCase)
+                               || stem.StartsWith("tx_", StringComparison.OrdinalIgnoreCase)
+                               || stem.StartsWith("tex_", StringComparison.OrdinalIgnoreCase)
+                               || stem.StartsWith("ico_", StringComparison.OrdinalIgnoreCase)
+                               || stem.StartsWith("icon_", StringComparison.OrdinalIgnoreCase);
+        if (!looksLikeTexture)
+        {
+            return false;
+        }
+
+        return path.Contains("/textures/", StringComparison.Ordinal)
+               || path.Contains("/texture/", StringComparison.Ordinal)
+               || path.Contains("/item_icons/", StringComparison.Ordinal)
+               || path.Contains("/icons/", StringComparison.Ordinal);
+    }
+
+    private static string ResolveVisualAssetDisplayName(string relativePath, params string[] prefixesToTrim)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath);
+        var stem = Path.GetFileNameWithoutExtension(normalized);
+        var workingStem = stem;
+        foreach (var prefix in prefixesToTrim)
+        {
+            if (!string.IsNullOrWhiteSpace(prefix)
+                && workingStem.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                workingStem = workingStem[prefix.Length..];
+                break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(workingStem))
+        {
+            workingStem = stem;
+        }
+
+        var localized = LocalizeAssetStem(workingStem);
+        if (string.IsNullOrWhiteSpace(localized) || localized.Equals(workingStem, StringComparison.OrdinalIgnoreCase))
+        {
+            localized = LocalizeAssetStem(stem);
+        }
+
+        return localized;
+    }
+
     private static string ResolveAdvancedItemSpawnerPresetDisplayName(string relativePath)
     {
         var normalized = PathUtil.NormalizeRelative(relativePath);
@@ -2143,6 +2549,18 @@ internal sealed class StudioRuntime
         return LocalizeAssetStem(candidate);
     }
 
+    private static string ResolveWorldEventClassEntryLabel(string rawReference)
+    {
+        var label = ResolveGameEventLoadoutEntryLabel(rawReference);
+        var normalized = NormalizeAssetKey(label);
+        if (normalized.Contains("cargodropevent", StringComparison.Ordinal))
+        {
+            return "грузовой дроп";
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(label));
+    }
+
     private static string ResolveQuestGiverDisplayName(string rawDisplayValue)
     {
         var label = (rawDisplayValue ?? string.Empty).Trim();
@@ -2286,14 +2704,22 @@ internal sealed class StudioRuntime
                     return false;
                 }
 
-                // Avoid offering event controller classes where container actor classes are expected.
+                // Avoid offering event/controller/visual helper classes where container actor classes are expected.
                 if (stem.Contains("event", StringComparison.Ordinal)
-                    || stem.Contains("manager", StringComparison.Ordinal))
+                    || stem.Contains("manager", StringComparison.Ordinal)
+                    || stem.Contains("monitor", StringComparison.Ordinal)
+                    || stem.Contains("warning", StringComparison.Ordinal)
+                    || stem.Contains("light", StringComparison.Ordinal)
+                    || stem.Contains("door", StringComparison.Ordinal)
+                    || stem.Contains("encounter", StringComparison.Ordinal))
                 {
                     return false;
                 }
 
-                return stem.StartsWith("bp_cargo", StringComparison.Ordinal);
+                return stem.StartsWith("bp_cargo", StringComparison.Ordinal)
+                    || stem.Contains("container", StringComparison.Ordinal)
+                    || stem.Contains("dropcontainer", StringComparison.Ordinal)
+                    || stem.Contains("dropzonecargo", StringComparison.Ordinal);
             },
             assetInfo => PrefixReferenceOptionLabel("Контейнер события", ResolveCargoDropContainerReferenceLabel(assetInfo.RelativePath)));
     }
@@ -2862,6 +3288,149 @@ internal sealed class StudioRuntime
         return new string(chars);
     }
 
+    private static bool ContainsIgnoreCase(string text, string term)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(term))
+        {
+            return false;
+        }
+
+        return text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static bool ContainsSearchTermAtBoundary(string text, string term)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(term))
+        {
+            return false;
+        }
+
+        var start = 0;
+        while (start < text.Length)
+        {
+            var index = text.IndexOf(term, start, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            var boundaryBefore = index == 0 || !char.IsLetterOrDigit(text[index - 1]);
+            if (boundaryBefore)
+            {
+                return true;
+            }
+
+            start = index + 1;
+        }
+
+        return false;
+    }
+
+    private static int ComputeModAssetSearchScore(StudioModAssetDto asset, string term, string looseTerm)
+    {
+        if (string.IsNullOrWhiteSpace(term))
+        {
+            return 1;
+        }
+
+        var displayName = asset.DisplayName ?? string.Empty;
+        var relativePath = asset.RelativePath ?? string.Empty;
+        var categoryName = asset.CategoryName ?? string.Empty;
+        var summary = asset.Summary ?? string.Empty;
+        var stem = Path.GetFileNameWithoutExtension(relativePath) ?? string.Empty;
+
+        var displayStarts = displayName.StartsWith(term, StringComparison.OrdinalIgnoreCase);
+        var displayBoundary = ContainsSearchTermAtBoundary(displayName, term);
+        var pathBoundary = ContainsSearchTermAtBoundary(relativePath, term);
+        var stemStarts = stem.StartsWith(term, StringComparison.OrdinalIgnoreCase);
+
+        var score = 0;
+        if (displayStarts)
+        {
+            score += 320;
+        }
+        else if (displayBoundary)
+        {
+            score += 260;
+        }
+        else if (ContainsIgnoreCase(displayName, term))
+        {
+            score += 150;
+        }
+
+        if (stemStarts)
+        {
+            score += 260;
+        }
+        else if (pathBoundary)
+        {
+            score += 180;
+        }
+        else if (ContainsIgnoreCase(relativePath, term))
+        {
+            score += 80;
+        }
+
+        if (ContainsIgnoreCase(categoryName, term))
+        {
+            score += 40;
+        }
+
+        if (ContainsIgnoreCase(summary, term))
+        {
+            score += 20;
+        }
+
+        if (!string.IsNullOrWhiteSpace(looseTerm))
+        {
+            var normalizedDisplay = NormalizeLooseSearch(displayName);
+            var normalizedPath = NormalizeLooseSearch(relativePath);
+            var normalizedSummary = NormalizeLooseSearch(summary);
+            var normalizedStem = NormalizeLooseSearch(stem);
+
+            if (normalizedStem.StartsWith(looseTerm, StringComparison.Ordinal))
+            {
+                score += 220;
+            }
+            else if (normalizedPath.Contains(looseTerm, StringComparison.Ordinal))
+            {
+                score += 80;
+            }
+
+            if (normalizedDisplay.StartsWith(looseTerm, StringComparison.Ordinal))
+            {
+                score += 180;
+            }
+            else if (normalizedDisplay.Contains(looseTerm, StringComparison.Ordinal))
+            {
+                score += 90;
+            }
+
+            if (normalizedSummary.Contains(looseTerm, StringComparison.Ordinal))
+            {
+                score += 15;
+            }
+
+            var isShortTerm = looseTerm.Length <= 2;
+            if (isShortTerm)
+            {
+                var strongMatch = displayStarts
+                                  || displayBoundary
+                                  || stemStarts
+                                  || pathBoundary
+                                  || normalizedStem.StartsWith(looseTerm, StringComparison.Ordinal);
+                if (!strongMatch)
+                {
+                    return 0;
+                }
+
+                score += 60;
+            }
+        }
+
+        return score;
+    }
+
     private static bool MatchesReferenceSearch(
         StudioReferenceOptionDto option,
         IReadOnlyList<string> searchTerms,
@@ -3160,6 +3729,18 @@ internal sealed class StudioRuntime
                 || normalizedTerm.Contains("empty", StringComparison.Ordinal))
             {
                 Add("empty", "пустой");
+            }
+        }
+
+        if (normalizedPicker == "cargodropvehiclepreset")
+        {
+            if (normalizedTerm.Contains("маш", StringComparison.Ordinal)
+                || normalizedTerm.Contains("техн", StringComparison.Ordinal)
+                || normalizedTerm.Contains("трансп", StringComparison.Ordinal)
+                || normalizedTerm.Contains("car", StringComparison.Ordinal)
+                || normalizedTerm.Contains("vehicle", StringComparison.Ordinal))
+            {
+                Add("car", "vehicle", "машина", "техника", "транспорт");
             }
         }
 
@@ -3610,6 +4191,52 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (normalizedPicker is "visualstaticmeshobject"
+            or "visualstaticmeshasset"
+            or "visualskeletalmeshobject"
+            or "visualskeletalmeshasset"
+            or "visualmaterialobject"
+            or "visualmaterialasset"
+            or "visualtextureobject"
+            or "visualtextureasset"
+            or "visualiconobject"
+            or "visualiconasset")
+        {
+            if (normalizedTerm.Contains("модел", StringComparison.Ordinal)
+                || normalizedTerm.Contains("mesh", StringComparison.Ordinal))
+            {
+                Add("mesh", "model", "sm_", "sk_", "модель");
+            }
+
+            if (normalizedTerm.Contains("стат", StringComparison.Ordinal))
+            {
+                Add("static mesh", "sm_", "статическая");
+            }
+
+            if (normalizedTerm.Contains("скел", StringComparison.Ordinal))
+            {
+                Add("skeletal mesh", "sk_", "скелетная");
+            }
+
+            if (normalizedTerm.Contains("матер", StringComparison.Ordinal)
+                || normalizedTerm.Contains("material", StringComparison.Ordinal))
+            {
+                Add("material", "mi_", "mat_", "материал");
+            }
+
+            if (normalizedTerm.Contains("текст", StringComparison.Ordinal)
+                || normalizedTerm.Contains("texture", StringComparison.Ordinal))
+            {
+                Add("texture", "tex", "t_", "текстура");
+            }
+
+            if (normalizedTerm.Contains("икон", StringComparison.Ordinal)
+                || normalizedTerm.Contains("icon", StringComparison.Ordinal))
+            {
+                Add("icon", "ico_", "item icon", "inventory icon", "иконка");
+            }
+        }
+
         return result;
     }
 
@@ -4041,6 +4668,11 @@ internal sealed class StudioRuntime
 
     private bool ShouldShowAssetInVisibleCatalog(StudioModAssetDto asset)
     {
+        if (asset.CategoryId.Equals("economy-trader", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         if (asset.AssetId.StartsWith(DataTableRowAssetPrefix, StringComparison.OrdinalIgnoreCase))
         {
             return true;
@@ -4063,9 +4695,13 @@ internal sealed class StudioRuntime
                || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
                || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
                || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal)
+               || path.Contains("/items/weapons/new_melee/", StringComparison.Ordinal)
                || (path.Contains("/items/crafting/ingredients/", StringComparison.Ordinal)
-                   && fileName.StartsWith("ci_", StringComparison.Ordinal))
+                    && fileName.StartsWith("ci_", StringComparison.Ordinal))
+               || (path.Contains("/items/crafting/ingredients/", StringComparison.Ordinal)
+                   && fileName.StartsWith("cl_", StringComparison.Ordinal))
                || path.Contains("/items/fishing/attachmentsockets/", StringComparison.Ordinal)
+               || path.EndsWith("/items/fishing/bp_trophyactor.uasset", StringComparison.Ordinal)
                || path.Contains("/items/weapons/turrets/turret_01_wip/", StringComparison.Ordinal)
                || path.Contains("/quests/interactables/", StringComparison.Ordinal)
                || path.Contains("/quests/tasksdata/actionmatchers/", StringComparison.Ordinal)
@@ -4080,26 +4716,33 @@ internal sealed class StudioRuntime
                || path.Contains("/foliage/farming/models/", StringComparison.Ordinal)
                || path.EndsWith("/foliage/farming/bp_garden.uasset", StringComparison.Ordinal)
                || path.EndsWith("/foliage/farming/bp_gardenmanager.uasset", StringComparison.Ordinal)
-               || path.EndsWith("/economy/table_tradeabledesc.uasset", StringComparison.Ordinal)
-                || (path.Contains("/economy/traderservices/", StringComparison.Ordinal)
-                    && fileName.StartsWith("servicebp_", StringComparison.Ordinal))
-                || path.EndsWith("/worldevents/bp_worldeventmanager.uasset", StringComparison.Ordinal)
-                || path.EndsWith("/worldevents/cargodrop/bp_cargodropcontainer_empty.uasset", StringComparison.Ordinal)
-                || path.EndsWith("/encounters/bp_globalencountermanager.uasset", StringComparison.Ordinal)
-                || path.EndsWith("/encounters/encountermanagercommondata.uasset", StringComparison.Ordinal)
+                || path.EndsWith("/economy/table_tradeabledesc.uasset", StringComparison.Ordinal)
+                 || (path.Contains("/economy/traderservices/", StringComparison.Ordinal)
+                     && fileName.StartsWith("servicebp_", StringComparison.Ordinal))
+                 || path.EndsWith("/worldevents/cargodrop/bp_cargodropcontainer_empty.uasset", StringComparison.Ordinal)
+                 || path.EndsWith("/encounters/bp_globalencountermanager.uasset", StringComparison.Ordinal)
+                 || path.EndsWith("/encounters/encountermanagercommondata.uasset", StringComparison.Ordinal)
                 || path.EndsWith("/encounters/bp_encounterstaticzone.uasset", StringComparison.Ordinal)
                || path.EndsWith("/encounters/encounterzones/bp_mediumthreatzone.uasset", StringComparison.Ordinal)
                || path.EndsWith("/characters/npcs/bp_guardedzonemanager.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/characters/prisoner/blueprints/metabolism/bp_prisonermetabolism.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/fortifications/locks/smallscrewdriverdata.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/fortifications/locks/testscrewdriverdata.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/fortifications/locks/bp_explosionfailurepenalty.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/fortifications/locks/bp_triggerfailurepenalty.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/skills/thieveryskill.uasset", StringComparison.Ordinal)
+               || path.EndsWith("/skills/cookingskill.uasset", StringComparison.Ordinal)
                || path.EndsWith("/encounters/encounterclasses/bb_encounters/bp_basebbflyingattackerencounter.uasset", StringComparison.Ordinal)
                || path.EndsWith("/encounters/encounterclasses/bp_encounterspawnairbornecharactersbase.uasset", StringComparison.Ordinal)
                || (path.Contains("radiation", StringComparison.Ordinal)
-                   && path.Contains("/manual/codex/", StringComparison.Ordinal))
+                    && path.Contains("/manual/codex/", StringComparison.Ordinal))
                || (path.Contains("radiation", StringComparison.Ordinal)
                    && path.Contains("/models/", StringComparison.Ordinal))
                || (path.Contains("radiation", StringComparison.Ordinal)
-                   && path.Contains("/particles/", StringComparison.Ordinal))
+                    && path.Contains("/particles/", StringComparison.Ordinal))
                || (path.Contains("radiation", StringComparison.Ordinal)
-                   && path.Contains("/items/postspawnactions/", StringComparison.Ordinal));
+                    && path.Contains("/items/postspawnactions/", StringComparison.Ordinal))
+               || IsHiddenSpawnerPreset2ContainerAsset(path, fileName);
     }
 
     private static bool IsHiddenGameEventAuxiliaryAsset(string lowerRelativePath, string lowerFileName)
@@ -4120,6 +4763,22 @@ internal sealed class StudioRuntime
             or "bp_dropzoneslot"
             or "dropzonekey"
             or "dropzonekey_es";
+    }
+
+    private static bool IsHiddenSpawnerPreset2ContainerAsset(string lowerRelativePath, string lowerFileName)
+    {
+        if (!lowerRelativePath.Contains("/items/spawnerpresets2/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (lowerFileName.StartsWith("examine_", StringComparison.Ordinal)
+            || lowerFileName.StartsWith("world_", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return lowerFileName is not "landscape";
     }
 
     private void AppendSyntheticItemSpawningRowAssets(List<StudioModAssetDto> output)
@@ -4696,7 +5355,7 @@ internal sealed class StudioRuntime
             warnings.Add(ResolveNoSafeFieldWarning(normalizedRelativePath, listTargets.Count > 0));
         }
 
-        var prettyFields = fields;
+        var prettyFields = ApplyVehicleAutomaticSpawnFieldContext(normalizedRelativePath, fields);
 
         return new StudioModAssetSchemaDto(
             assetId,
@@ -4708,6 +5367,91 @@ internal sealed class StudioRuntime
             prettyFields.Take(800).ToList(),
             listTargets.Take(200).ToList(),
             warnings);
+    }
+
+    private static List<StudioModFieldDto> ApplyVehicleAutomaticSpawnFieldContext(
+        string relativePath,
+        List<StudioModFieldDto> fields)
+    {
+        if (fields.Count == 0
+            || string.IsNullOrWhiteSpace(relativePath)
+            || !relativePath.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase))
+        {
+            return fields;
+        }
+
+        var duplicateLabels = fields
+            .GroupBy(field => field.Label, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (duplicateLabels.Count == 0)
+        {
+            return fields;
+        }
+
+        var exportIndices = fields
+            .Where(field => duplicateLabels.Contains(field.Label))
+            .Select(field => TryParseExportIndexFromFieldPath(field.FieldPath))
+            .Where(index => index.HasValue)
+            .Select(index => index!.Value)
+            .Distinct()
+            .OrderBy(index => index)
+            .ToList();
+        if (exportIndices.Count == 0)
+        {
+            return fields;
+        }
+
+        var exportVariantMap = new Dictionary<int, int>(exportIndices.Count);
+        for (var i = 0; i < exportIndices.Count; i++)
+        {
+            exportVariantMap[exportIndices[i]] = i + 1;
+        }
+
+        var rewritten = new List<StudioModFieldDto>(fields.Count);
+        foreach (var field in fields)
+        {
+            if (!duplicateLabels.Contains(field.Label)
+                || !TryParseExportIndexFromFieldPath(field.FieldPath).HasValue)
+            {
+                rewritten.Add(field);
+                continue;
+            }
+
+            var exportIndex = TryParseExportIndexFromFieldPath(field.FieldPath)!.Value;
+            if (!exportVariantMap.TryGetValue(exportIndex, out var variantOrder))
+            {
+                rewritten.Add(field);
+                continue;
+            }
+
+            var contextualLabel = $"Вариант транспорта #{variantOrder} / {field.Label}";
+            rewritten.Add(field with { Label = contextualLabel });
+        }
+
+        return rewritten;
+    }
+
+    private static int? TryParseExportIndexFromFieldPath(string? fieldPath)
+    {
+        if (string.IsNullOrWhiteSpace(fieldPath))
+        {
+            return null;
+        }
+
+        var path = fieldPath.Trim();
+        if (!path.StartsWith("e:", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var slashIndex = path.IndexOf('/');
+        var end = slashIndex < 0 ? path.Length : slashIndex;
+        var token = path.Substring(2, end - 2);
+        return int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var index)
+            ? index
+            : null;
     }
 
     private StudioModAssetSchemaDto BuildSyntheticDataTableRowSchema(
@@ -4898,6 +5642,7 @@ internal sealed class StudioRuntime
 
         var arrayType = arrayProperty.ArrayType?.ToString() ?? string.Empty;
         if (arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase)
+            || arrayType.Equals("ClassProperty", StringComparison.OrdinalIgnoreCase)
             || arrayType.Equals("SoftObjectProperty", StringComparison.OrdinalIgnoreCase)
             || arrayType.Equals("SoftObjectPathProperty", StringComparison.OrdinalIgnoreCase))
         {
@@ -5988,6 +6733,12 @@ internal sealed class StudioRuntime
             AppendSyntheticWeaponFields(weaponExport, output);
         }
 
+        if (IsWeaponClipAssetPath(relativePath)
+            && TryFindWeaponClipOwnerExport(asset, out var weaponClipExport, out _))
+        {
+            AppendSyntheticWeaponClipFields(weaponClipExport, output);
+        }
+
         if (IsAmmunitionAssetPath(relativePath)
             && TryFindAmmunitionOwnerExport(asset, out var ammunitionExport, out _))
         {
@@ -5999,11 +6750,18 @@ internal sealed class StudioRuntime
         {
             AppendSyntheticGameEventMarkerFields(asset, relativePath, markerExport, output);
         }
+
+        if (IsWorldEventManagerAsset(relativePath)
+            && TryFindWorldEventManagerOwnerExport(asset, out var worldEventManagerExport, out _))
+        {
+            AppendSyntheticWorldEventManagerFields(worldEventManagerExport, output);
+        }
     }
 
     private void AppendSyntheticSchemaListTargets(UAsset asset, string relativePath, List<StudioModListTargetDto> output)
     {
         AppendSyntheticCargoDropContainerListTargets(asset, relativePath, output);
+        AppendSyntheticWorldEventManagerListTargets(asset, relativePath, output);
 
         if (!SupportsSyntheticSideEffects(relativePath))
         {
@@ -6120,6 +6878,105 @@ internal sealed class StudioRuntime
                     ReferencePickerKind: null,
                     ReferencePickerPrompt: null));
         }
+    }
+
+    private static void AppendSyntheticWorldEventManagerFields(
+        NormalExport managerExport,
+        List<StudioModFieldDto> output)
+    {
+        AddMissingWorldEventManagerFloatField(
+            managerExport,
+            output,
+            "TimeBetweenEventsMin",
+            "Пауза между ивентами (минимум, сек)",
+            "Минимальная пауза в секундах между автоматическими запусками мировых ивентов.",
+            "Расписание ивентов",
+            "120",
+            "0",
+            "7200");
+        AddMissingWorldEventManagerFloatField(
+            managerExport,
+            output,
+            "TimeBetweenEventsMax",
+            "Пауза между ивентами (максимум, сек)",
+            "Максимальная пауза в секундах между автоматическими запусками мировых ивентов. Обычно ставят не меньше минимума.",
+            "Расписание ивентов",
+            "300",
+            "0",
+            "7200");
+    }
+
+    private static void AddMissingWorldEventManagerFloatField(
+        NormalExport managerExport,
+        List<StudioModFieldDto> output,
+        string propertyName,
+        string label,
+        string description,
+        string section,
+        string defaultValue,
+        string min,
+        string max)
+    {
+        var fieldPath = $"{WorldEventManagerSyntheticFieldPrefix}{propertyName}";
+        var labelKey = NormalizeAssetKey(label);
+        if (output.Any(field =>
+                string.Equals(field.FieldPath, fieldPath, StringComparison.OrdinalIgnoreCase)
+                || NormalizeAssetKey(field.Label) == labelKey))
+        {
+            return;
+        }
+
+        var currentValue = defaultValue;
+        var existing = FindTopLevelFloatPropertyLoose(managerExport, propertyName);
+        if (existing is not null)
+        {
+            currentValue = existing.Value.ToString(CultureInfo.InvariantCulture);
+        }
+
+        output.Add(new StudioModFieldDto(
+            fieldPath,
+            label,
+            description,
+            section,
+            "float",
+            "number",
+            currentValue,
+            true,
+            min,
+            max,
+            null));
+    }
+
+    private void AppendSyntheticWorldEventManagerListTargets(UAsset asset, string relativePath, List<StudioModListTargetDto> output)
+    {
+        if (!IsWorldEventManagerAsset(relativePath) || !TryFindWorldEventManagerOwnerExport(asset, out var ownerExport, out _))
+        {
+            return;
+        }
+
+        var eventTypes = FindTopLevelProperty<ArrayPropertyData>(ownerExport, "EventTypes", out _);
+        var values = eventTypes?.Value ?? [];
+        var entryLabels = values
+            .Select((value, index) => ResolveArrayEntryLabel(asset, relativePath, "Пул мировых ивентов", value, index))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToList();
+
+        UpsertSyntheticListTarget(
+            output,
+            new StudioModListTargetDto(
+                SyntheticWorldEventManagerEventTypesTargetPath,
+                "Пул мировых ивентов",
+                "Какие мировые ивенты менеджер может запускать на карте. Добавляй только совместимые классы событий.",
+                "reference",
+                values.Length,
+                SupportsAddClone: false,
+                SupportsRemove: values.Length > 0,
+                SupportsClear: values.Length > 0,
+                SupportsAddEmpty: false,
+                SupportsAddReference: true,
+                ReferencePickerKind: "worldevent-class",
+                ReferencePickerPrompt: "Найди класс мирового ивента, который нужно добавить в общий пул запуска.",
+                EntryLabels: entryLabels));
     }
 
     private static void UpsertSyntheticListTarget(List<StudioModListTargetDto> output, StudioModListTargetDto target)
@@ -6246,6 +7103,11 @@ internal sealed class StudioRuntime
         return stem.StartsWith("weapon_", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsWeaponClipAssetPath(string relativePath)
+    {
+        return relativePath.Contains("/items/weapons/weapon_clips/", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsAmmunitionAssetPath(string relativePath)
     {
         if (!relativePath.Contains("/items/ammunition/", StringComparison.OrdinalIgnoreCase))
@@ -6271,6 +7133,37 @@ internal sealed class StudioRuntime
             "RecoilRecoverySpeed",
             "UseCustomWeaponViewKickData",
             "WeaponViewKickData"
+        };
+
+        for (var i = 0; i < asset.Exports.Count; i++)
+        {
+            if (asset.Exports[i] is not NormalExport candidate)
+            {
+                continue;
+            }
+
+            var hasAnchorProperty = candidate.Data.Any(property =>
+                anchorProperties.Any(anchor => PropertyNamesMatch(property.Name?.ToString(), anchor)));
+            if (!hasAnchorProperty)
+            {
+                continue;
+            }
+
+            export = candidate;
+            exportIndex = i;
+            return true;
+        }
+
+        return TryGetFirstNormalExport(asset, out export, out exportIndex);
+    }
+
+    private static bool TryFindWeaponClipOwnerExport(UAsset asset, out NormalExport export, out int exportIndex)
+    {
+        var anchorProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Capacity",
+            "DefaultFillAmmo",
+            "EventMaxAmmo"
         };
 
         for (var i = 0; i < asset.Exports.Count; i++)
@@ -6362,6 +7255,45 @@ internal sealed class StudioRuntime
         return TryGetFirstNormalExport(asset, out export, out exportIndex);
     }
 
+    private static bool TryFindWorldEventManagerOwnerExport(UAsset asset, out NormalExport export, out int exportIndex)
+    {
+        var anchorProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "EventTypes",
+            "TimeBetweenEventsMin",
+            "TimeBetweenEventsMax"
+        };
+
+        for (var i = 0; i < asset.Exports.Count; i++)
+        {
+            if (asset.Exports[i] is not NormalExport candidate)
+            {
+                continue;
+            }
+
+            var objectName = candidate.ObjectName?.ToString() ?? string.Empty;
+            if (objectName.Equals("Default__BP_WorldEventManager_C", StringComparison.OrdinalIgnoreCase))
+            {
+                export = candidate;
+                exportIndex = i;
+                return true;
+            }
+
+            var hasAnchorProperty = candidate.Data.Any(property =>
+                anchorProperties.Any(anchor => PropertyNamesMatch(property.Name?.ToString(), anchor)));
+            if (!hasAnchorProperty)
+            {
+                continue;
+            }
+
+            export = candidate;
+            exportIndex = i;
+            return true;
+        }
+
+        return TryGetFirstNormalExport(asset, out export, out exportIndex);
+    }
+
     private static FloatPropertyData? FindTopLevelFloatPropertyLoose(NormalExport export, string propertyName)
     {
         return export.Data
@@ -6381,6 +7313,175 @@ internal sealed class StudioRuntime
         return export.Data
             .OfType<ObjectPropertyData>()
             .FirstOrDefault(property => PropertyNamesMatch(property.Name?.ToString(), propertyName));
+    }
+
+    private static PropertyData? FindTopLevelNumericPropertyLoose(NormalExport export, string propertyName)
+    {
+        return export.Data
+            .OfType<PropertyData>()
+            .FirstOrDefault(property =>
+                IsNumericPropertyType(property)
+                && PropertyNamesMatch(property.Name?.ToString(), propertyName));
+    }
+
+    private static PropertyData? FindTopLevelIntegerLikePropertyLoose(NormalExport export, string propertyName)
+    {
+        return export.Data
+            .OfType<PropertyData>()
+            .FirstOrDefault(property =>
+                IsIntegerLikePropertyType(property)
+                && PropertyNamesMatch(property.Name?.ToString(), propertyName));
+    }
+
+    private static bool HasTopLevelNumericPropertyLoose(NormalExport export, string propertyName)
+    {
+        return FindTopLevelNumericPropertyLoose(export, propertyName) is not null;
+    }
+
+    private static bool HasTopLevelIntegerLikePropertyLoose(NormalExport export, string propertyName)
+    {
+        return FindTopLevelIntegerLikePropertyLoose(export, propertyName) is not null;
+    }
+
+    private static bool IsIntegerLikePropertyType(PropertyData property)
+    {
+        return property is IntPropertyData
+            or Int8PropertyData
+            or Int16PropertyData
+            or Int64PropertyData
+            or UInt16PropertyData
+            or UInt32PropertyData
+            or UInt64PropertyData
+            or BytePropertyData;
+    }
+
+    private static bool IsNumericPropertyType(PropertyData property)
+    {
+        return property is FloatPropertyData
+            or DoublePropertyData
+            || IsIntegerLikePropertyType(property);
+    }
+
+    private static bool TrySetNumericPropertyValue(PropertyData property, double value, out string error)
+    {
+        error = string.Empty;
+        switch (property)
+        {
+            case FloatPropertyData floatProperty:
+                floatProperty.Value = (float)value;
+                return true;
+            case DoublePropertyData doubleProperty:
+                doubleProperty.Value = value;
+                return true;
+            default:
+                if (!TryGetWholeNumberValue(value, out var whole))
+                {
+                    error = "ожидается целое число";
+                    return false;
+                }
+
+                return TrySetIntegerLikePropertyValue(property, whole, out error);
+        }
+    }
+
+    private static bool TrySetIntegerLikePropertyValue(PropertyData property, long value, out string error)
+    {
+        error = string.Empty;
+        switch (property)
+        {
+            case IntPropertyData intProperty:
+                if (value < int.MinValue || value > int.MaxValue)
+                {
+                    error = "значение выходит за диапазон int32";
+                    return false;
+                }
+
+                intProperty.Value = (int)value;
+                return true;
+            case Int8PropertyData int8Property:
+                if (value < sbyte.MinValue || value > sbyte.MaxValue)
+                {
+                    error = "значение выходит за диапазон int8";
+                    return false;
+                }
+
+                int8Property.Value = (sbyte)value;
+                return true;
+            case Int16PropertyData int16Property:
+                if (value < short.MinValue || value > short.MaxValue)
+                {
+                    error = "значение выходит за диапазон int16";
+                    return false;
+                }
+
+                int16Property.Value = (short)value;
+                return true;
+            case Int64PropertyData int64Property:
+                int64Property.Value = value;
+                return true;
+            case UInt16PropertyData uint16Property:
+                if (value < ushort.MinValue || value > ushort.MaxValue)
+                {
+                    error = "значение выходит за диапазон uint16";
+                    return false;
+                }
+
+                uint16Property.Value = (ushort)value;
+                return true;
+            case UInt32PropertyData uint32Property:
+                if (value < uint.MinValue || value > uint.MaxValue)
+                {
+                    error = "значение выходит за диапазон uint32";
+                    return false;
+                }
+
+                uint32Property.Value = (uint)value;
+                return true;
+            case UInt64PropertyData uint64Property:
+                if (value < 0)
+                {
+                    error = "значение не может быть отрицательным";
+                    return false;
+                }
+
+                uint64Property.Value = (ulong)value;
+                return true;
+            case BytePropertyData byteProperty:
+                if (value < byte.MinValue || value > byte.MaxValue)
+                {
+                    error = "значение выходит за диапазон byte";
+                    return false;
+                }
+
+                byteProperty.Value = (byte)value;
+                return true;
+            default:
+                error = "поле не является числовым";
+                return false;
+        }
+    }
+
+    private static bool TryGetWholeNumberValue(double value, out long whole)
+    {
+        whole = 0;
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return false;
+        }
+
+        var rounded = Math.Round(value, MidpointRounding.AwayFromZero);
+        if (Math.Abs(value - rounded) > 0.000001d)
+        {
+            return false;
+        }
+
+        if (rounded < long.MinValue || rounded > long.MaxValue)
+        {
+            return false;
+        }
+
+        whole = (long)rounded;
+        return true;
     }
 
     private static bool PropertyNamesMatch(string? left, string? right)
@@ -6495,16 +7596,68 @@ internal sealed class StudioRuntime
         NormalExport export,
         List<StudioModFieldDto> output)
     {
-        var specs = new[]
+        if (FindTopLevelObjectPropertyLoose(export, "DefaultAmmunitionItemClass") is null)
         {
+            output.Add(new StudioModFieldDto(
+                $"{WeaponSyntheticFieldPrefix}DefaultAmmunitionItemClass",
+                "Патрон по умолчанию",
+                "Какой тип патрона это оружие использует как базовый. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "object",
+                "reference-picker",
+                string.Empty,
+                true,
+                null,
+                null,
+                null,
+                "ammo-item-asset",
+                "Найди тип патрона, который оружие должно считать базовым, и выбери его из списка."));
+        }
+
+        if (!HasTopLevelIntegerLikePropertyLoose(export, "MaxLoadedAmmo"))
+        {
+            output.Add(new StudioModFieldDto(
+                $"{WeaponSyntheticFieldPrefix}MaxLoadedAmmo",
+                "Патронов в магазине",
+                "Максимум патронов, которые вмещает оружие. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "int",
+                "number",
+                string.Empty,
+                true,
+                "0",
+                "500",
+                null));
+        }
+
+        if (!HasTopLevelIntegerLikePropertyLoose(export, "EventMaxAmmo"))
+        {
+            output.Add(new StudioModFieldDto(
+                $"{WeaponSyntheticFieldPrefix}EventMaxAmmo",
+                "Патронов для события",
+                "Лимит боеприпасов для режимов игровых событий. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "int",
+                "number",
+                string.Empty,
+                true,
+                "0",
+                "500",
+                null));
+        }
+
+        var floatSpecs = new[]
+        {
+            ("DamagePerShot", "Урон за выстрел", "Сколько здоровья снимает одно попадание. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Урон"),
+            ("ROF", "Скорострельность", "Как быстро оружие делает следующие выстрелы. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Стрельба"),
             ("ViewKickMultiplier", "Сила отдачи камеры", "Насколько резко экран и оружие дёргаются при выстреле. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Отдача"),
             ("MaxRecoilOffset", "Максимальная отдача", "Насколько сильно оружие может уводить вверх или в сторону при стрельбе. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Отдача"),
             ("RecoilRecoverySpeed", "Скорость возврата после отдачи", "Как быстро оружие возвращается под контроль после выстрела. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.", "Отдача")
         };
 
-        foreach (var spec in specs)
+        foreach (var spec in floatSpecs)
         {
-            if (FindTopLevelFloatPropertyLoose(export, spec.Item1) is not null)
+            if (HasTopLevelNumericPropertyLoose(export, spec.Item1))
             {
                 continue;
             }
@@ -6516,10 +7669,65 @@ internal sealed class StudioRuntime
                 spec.Item4,
                 "float",
                 "number",
-                "0",
+                string.Empty,
                 true,
                 "-100",
                 "100",
+                null));
+        }
+    }
+
+    private static void AppendSyntheticWeaponClipFields(
+        NormalExport export,
+        List<StudioModFieldDto> output)
+    {
+        if (FindTopLevelObjectPropertyLoose(export, "DefaultFillAmmo") is null)
+        {
+            output.Add(new StudioModFieldDto(
+                $"{WeaponClipSyntheticFieldPrefix}DefaultFillAmmo",
+                "Патрон по умолчанию",
+                "Какой тип патрона этот магазин использует по умолчанию. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "object",
+                "reference-picker",
+                string.Empty,
+                true,
+                null,
+                null,
+                null,
+                "ammo-item-asset",
+                "Найди тип патрона для магазина и выбери его из списка."));
+        }
+
+        if (!HasTopLevelIntegerLikePropertyLoose(export, "Capacity"))
+        {
+            output.Add(new StudioModFieldDto(
+                $"{WeaponClipSyntheticFieldPrefix}Capacity",
+                "Патронов в магазине",
+                "Сколько патронов помещается в этот магазин. Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "int",
+                "number",
+                string.Empty,
+                true,
+                "0",
+                "500",
+                null));
+        }
+
+        if (!HasTopLevelIntegerLikePropertyLoose(export, "EventMaxAmmo"))
+        {
+            output.Add(new StudioModFieldDto(
+                $"{WeaponClipSyntheticFieldPrefix}EventMaxAmmo",
+                "Патронов для события",
+                "Лимит патронов для игровых событий (PvP-режимов). Если override ещё не записан в этот ассет, студия создаст его сама при сохранении.",
+                "Боеприпасы",
+                "int",
+                "number",
+                string.Empty,
+                true,
+                "0",
+                "500",
                 null));
         }
     }
@@ -6546,7 +7754,7 @@ internal sealed class StudioRuntime
                 "Найди класс пули, который должен использовать этот боеприпас, и выбери его из списка."));
         }
 
-        if (FindTopLevelIntPropertyLoose(export, "MaxAmmoCount") is null)
+        if (!HasTopLevelIntegerLikePropertyLoose(export, "MaxAmmoCount"))
         {
             output.Add(new StudioModFieldDto(
                 $"{AmmunitionSyntheticFieldPrefix}MaxAmmoCount",
@@ -6555,14 +7763,14 @@ internal sealed class StudioRuntime
                 "Боеприпасы",
                 "int",
                 "number",
-                "0",
+                string.Empty,
                 true,
                 "0",
                 "500",
                 null));
         }
 
-        if (FindTopLevelFloatPropertyLoose(export, "_damageOverTime") is null)
+        if (!HasTopLevelNumericPropertyLoose(export, "_damageOverTime"))
         {
             output.Add(new StudioModFieldDto(
                 $"{AmmunitionSyntheticFieldPrefix}_damageOverTime",
@@ -6571,7 +7779,7 @@ internal sealed class StudioRuntime
                 "Урон",
                 "float",
                 "number",
-                "0",
+                string.Empty,
                 true,
                 "0",
                 "100",
@@ -7625,6 +8833,17 @@ internal sealed class StudioRuntime
             var listLabel = isCurvePointArray
                 ? ResolveCurvePointListLabel(relativePath)
                 : NormalizeListTargetLabel(relativePath, ToUserFieldLabel(relativePath, label));
+            var arrayType = arrayProperty.ArrayType?.ToString() ?? string.Empty;
+            var arrayItemKind = values.Length > 0
+                ? ResolveUassetArrayItemKind(values)
+                : arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase)
+                  || arrayType.Equals("ClassProperty", StringComparison.OrdinalIgnoreCase)
+                  || arrayType.Equals("SoftObjectProperty", StringComparison.OrdinalIgnoreCase)
+                  || arrayType.Equals("SoftObjectPathProperty", StringComparison.OrdinalIgnoreCase)
+                    ? "reference"
+                    : arrayType.Equals("StructProperty", StringComparison.OrdinalIgnoreCase)
+                        ? "struct"
+                        : "unknown";
             if (isCurvePointArray || ShouldExposeListTarget(relativePath, listLabel))
             {
                 var picker = ResolveListTargetReferencePicker(relativePath, listLabel, values);
@@ -7633,8 +8852,8 @@ internal sealed class StudioRuntime
                 {
                     entryLabels = BuildCurvePointEntryLabels(values.Length);
                 }
-                else if (ResolveUassetArrayItemKind(values).Equals("reference", StringComparison.OrdinalIgnoreCase)
-                    || (ResolveUassetArrayItemKind(values).Equals("struct", StringComparison.OrdinalIgnoreCase)
+                else if (arrayItemKind.Equals("reference", StringComparison.OrdinalIgnoreCase)
+                    || (arrayItemKind.Equals("struct", StringComparison.OrdinalIgnoreCase)
                         && IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, listLabel)))
                 {
                     entryLabels = values
@@ -7647,7 +8866,7 @@ internal sealed class StudioRuntime
                     fieldPath,
                     listLabel,
                     ResolveListTargetDescription(relativePath, listLabel),
-                    ResolveUassetArrayItemKind(values),
+                    arrayItemKind,
                     values.Length,
                     SupportsAddClone: values.Length > 0 && !picker.SupportsAddReference,
                     SupportsRemove: values.Length > 0,
@@ -7838,6 +9057,12 @@ internal sealed class StudioRuntime
         {
             prefix = "набор";
         }
+        else if (IsWorldEventManagerAsset(relativePath)
+                 && (parentLabel.Contains("пул мировых ивентов", StringComparison.OrdinalIgnoreCase)
+                     || parentLabel.Contains("event types", StringComparison.OrdinalIgnoreCase)))
+        {
+            prefix = "ивент";
+        }
         else if (IsPlantSpeciesListSurface(relativePath, parentLabel))
         {
             prefix = "растение";
@@ -7887,6 +9112,18 @@ internal sealed class StudioRuntime
                 => $"{prefix} {ResolveGameEventLoadoutEntryLabel(ExtractSoftObjectReference(softObjectValue.Value))}",
             SoftObjectPathPropertyData softObjectPathValue when IsGameEventMarkerAsset(relativePath) && IsGameEventLoadoutListLabel(parentLabel)
                 => $"{prefix} {ResolveGameEventLoadoutEntryLabel(ExtractSoftObjectReference(softObjectPathValue.Value))}",
+            ObjectPropertyData objectValue when IsWorldEventManagerAsset(relativePath)
+                                            && (parentLabel.Contains("пул мировых ивентов", StringComparison.OrdinalIgnoreCase)
+                                                || parentLabel.Contains("event types", StringComparison.OrdinalIgnoreCase))
+                => $"{prefix} {ResolveWorldEventClassEntryLabel(ResolveObjectReferenceLabel(asset, objectValue.Value))}",
+            SoftObjectPropertyData softObjectValue when IsWorldEventManagerAsset(relativePath)
+                                                     && (parentLabel.Contains("пул мировых ивентов", StringComparison.OrdinalIgnoreCase)
+                                                         || parentLabel.Contains("event types", StringComparison.OrdinalIgnoreCase))
+                => $"{prefix} {ResolveWorldEventClassEntryLabel(ExtractSoftObjectReference(softObjectValue.Value))}",
+            SoftObjectPathPropertyData softObjectPathValue when IsWorldEventManagerAsset(relativePath)
+                                                             && (parentLabel.Contains("пул мировых ивентов", StringComparison.OrdinalIgnoreCase)
+                                                                 || parentLabel.Contains("event types", StringComparison.OrdinalIgnoreCase))
+                => $"{prefix} {ResolveWorldEventClassEntryLabel(ExtractSoftObjectReference(softObjectPathValue.Value))}",
             StructPropertyData structValue when IsAdvancedItemSpawnerPresetSubpresetListSurface(relativePath, parentLabel)
                 => ResolveAdvancedSpawnerSubpresetEntryLabel(asset, structValue, prefix, fallbackIndex),
             ObjectPropertyData objectValue when (normalizedParent.Contains("sideeffects", StringComparison.Ordinal)
@@ -8417,6 +9654,17 @@ internal sealed class StudioRuntime
 
         var path = relativePath.ToLowerInvariant();
         return path.Contains("/worldevents/cargodrop/", StringComparison.Ordinal);
+    }
+
+    private static bool IsWorldEventManagerAsset(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return false;
+        }
+
+        var path = relativePath.ToLowerInvariant();
+        return path.EndsWith("/worldevents/bp_worldeventmanager.uasset", StringComparison.Ordinal);
     }
 
     private static bool IsCargoDropContainerAsset(string relativePath)
@@ -9149,6 +10397,65 @@ internal sealed class StudioRuntime
             label = NormalizeItemSpawningUserLabel(label);
         }
 
+        if (path.Contains("/items/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("disinfection required disinfectant amount", "сколько дезинфекции нужно", StringComparison.OrdinalIgnoreCase)
+                .Replace("should drop when entering combat mode", "выбрасывать при входе в боевой режим", StringComparison.OrdinalIgnoreCase)
+                .Replace("washing item consumed during crafting", "расход предмета при стирке", StringComparison.OrdinalIgnoreCase)
+                .Replace("washing item расход за крафт", "расход предмета при стирке", StringComparison.OrdinalIgnoreCase)
+                .Replace("item mesh", "модель предмета", StringComparison.OrdinalIgnoreCase)
+                .Replace("static mesh", "статическая модель", StringComparison.OrdinalIgnoreCase)
+                .Replace("skeletal mesh", "скелетная модель", StringComparison.OrdinalIgnoreCase)
+                .Replace("in hands icon", "иконка в руках", StringComparison.OrdinalIgnoreCase)
+                .Replace("inventory icon", "иконка в инвентаре", StringComparison.OrdinalIgnoreCase)
+                .Replace("vicinity icon", "иконка рядом", StringComparison.OrdinalIgnoreCase)
+                .Replace("item icon", "иконка предмета", StringComparison.OrdinalIgnoreCase)
+                .Replace("thumbnail icon", "иконка предпросмотра", StringComparison.OrdinalIgnoreCase)
+                .Replace("default material", "базовый материал", StringComparison.OrdinalIgnoreCase)
+                .Replace("skin material", "материал окраски", StringComparison.OrdinalIgnoreCase)
+                .Replace("clean mesh", "модель (чистая версия)", StringComparison.OrdinalIgnoreCase)
+                .Replace("clean material", "материал (чистая версия)", StringComparison.OrdinalIgnoreCase)
+                .Replace("stove pipe mesh", "модель неисправности (застрявшая гильза)", StringComparison.OrdinalIgnoreCase)
+                .Replace("double feed mesh", "модель неисправности (двойная подача)", StringComparison.OrdinalIgnoreCase)
+                .Replace("default texture", "базовая текстура", StringComparison.OrdinalIgnoreCase)
+                .Replace("should apply location specific spawn chance modifier", "учитывать модификатор шанса по локации", StringComparison.OrdinalIgnoreCase)
+                .Replace("should apply location specific chance modifier", "учитывать модификатор шанса по локации", StringComparison.OrdinalIgnoreCase)
+                .Replace("should apply location specific шанс появления набора модификатор", "учитывать модификатор шанса по локации", StringComparison.OrdinalIgnoreCase)
+                .Replace("should apply location specific weight modifier", "учитывать модификатор веса по локации", StringComparison.OrdinalIgnoreCase)
+                .Replace("should apply location specific вес модификатор", "учитывать модификатор веса по локации", StringComparison.OrdinalIgnoreCase);
+
+            label = Regex.Replace(
+                label,
+                @"should\s+apply\s+location\s+specific.*chance.*modifier",
+                "учитывать модификатор шанса по локации",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+            if (label.Contains("location specific", StringComparison.OrdinalIgnoreCase)
+                && label.Contains("шанс появления", StringComparison.OrdinalIgnoreCase))
+            {
+                label = "учитывать модификатор шанса по локации";
+            }
+        }
+
+        if ((path.Contains("/items/", StringComparison.OrdinalIgnoreCase)
+             || path.Contains("/vehicles/", StringComparison.OrdinalIgnoreCase)
+             || path.Contains("/fortifications/", StringComparison.OrdinalIgnoreCase)
+             || path.Contains("/basebuilding/", StringComparison.OrdinalIgnoreCase))
+            && string.Equals(label, "mesh", StringComparison.OrdinalIgnoreCase))
+        {
+            label = "модель";
+        }
+
+        if ((path.Contains("/items/", StringComparison.OrdinalIgnoreCase)
+             || path.Contains("/vehicles/", StringComparison.OrdinalIgnoreCase)
+             || path.Contains("/fortifications/", StringComparison.OrdinalIgnoreCase)
+             || path.Contains("/basebuilding/", StringComparison.OrdinalIgnoreCase))
+            && string.Equals(label, "material", StringComparison.OrdinalIgnoreCase))
+        {
+            label = "материал";
+        }
+
         if (path.Contains("/bodyeffects/", StringComparison.OrdinalIgnoreCase) || path.Contains("movementsettings", StringComparison.OrdinalIgnoreCase))
         {
             label = label
@@ -9269,6 +10576,10 @@ internal sealed class StudioRuntime
                 .Replace("whistle detection range", "дальность реакции на свисток", StringComparison.OrdinalIgnoreCase)
                 .Replace("spawn cooldown", "время до следующей выдачи", StringComparison.OrdinalIgnoreCase)
                 .Replace("появление cooldown", "время до следующей выдачи", StringComparison.OrdinalIgnoreCase);
+
+            label = ReplaceSemanticLabelPart(label, "event types", "пул мировых ивентов");
+            label = ReplaceSemanticLabelPart(label, "time between events min", "пауза между ивентами (минимум, сек)");
+            label = ReplaceSemanticLabelPart(label, "time between events max", "пауза между ивентами (максимум, сек)");
         }
 
         if (path.Contains("/economy/", StringComparison.OrdinalIgnoreCase))
@@ -9440,6 +10751,21 @@ internal sealed class StudioRuntime
                 .Replace("points for detected item", "опыт за найденный предмет", StringComparison.OrdinalIgnoreCase)
                 .Replace("points for detected watching prisoner", "опыт за замеченного игрока", StringComparison.OrdinalIgnoreCase)
                 .Replace("points for detected camouflaged prisoner", "опыт за замеченного замаскированного игрока", StringComparison.OrdinalIgnoreCase)
+                .Replace("points for", "опыт за", StringComparison.OrdinalIgnoreCase)
+                .Replace("bonus experience", "бонусный опыт", StringComparison.OrdinalIgnoreCase)
+                .Replace("skill level bonus points", "бонус очков навыка", StringComparison.OrdinalIgnoreCase)
+                .Replace("skill level bonus experience", "бонусный опыт навыка", StringComparison.OrdinalIgnoreCase)
+                .Replace("subsequent hit multiplier", "множитель серии попаданий", StringComparison.OrdinalIgnoreCase)
+                .Replace("compass skill level", "уровень компаса", StringComparison.OrdinalIgnoreCase)
+                .Replace("prone", "лёжа", StringComparison.OrdinalIgnoreCase)
+                .Replace("crouching", "сидя", StringComparison.OrdinalIgnoreCase)
+                .Replace("standing", "стоя", StringComparison.OrdinalIgnoreCase)
+                .Replace("low wind speed", "слабый ветер", StringComparison.OrdinalIgnoreCase)
+                .Replace("medium wind speed", "средний ветер", StringComparison.OrdinalIgnoreCase)
+                .Replace("high wind speed", "сильный ветер", StringComparison.OrdinalIgnoreCase)
+                .Replace("per second", "в секунду", StringComparison.OrdinalIgnoreCase)
+                .Replace("per minute", "в минуту", StringComparison.OrdinalIgnoreCase)
+                .Replace("per kilometer", "за километр", StringComparison.OrdinalIgnoreCase)
                 .Replace("item detection radius", "радиус поиска предметов", StringComparison.OrdinalIgnoreCase)
                 .Replace("item detection highlight by day radius", "радиус подсветки предметов днём", StringComparison.OrdinalIgnoreCase)
                 .Replace("item detection highlight by night radius", "радиус подсветки предметов ночью", StringComparison.OrdinalIgnoreCase)
@@ -9625,6 +10951,10 @@ internal sealed class StudioRuntime
                 .Replace("deathmatch parameters", "параметры боя насмерть", StringComparison.OrdinalIgnoreCase)
                 .Replace("team deathmatch parameters", "параметры командного боя", StringComparison.OrdinalIgnoreCase)
                 .Replace("game event parameters", "настройки события", StringComparison.OrdinalIgnoreCase)
+                .Replace("game event border class", "класс границы события", StringComparison.OrdinalIgnoreCase)
+                .Replace("border class", "класс границы события", StringComparison.OrdinalIgnoreCase)
+                .Replace("gameevent class", "класс события", StringComparison.OrdinalIgnoreCase)
+                .Replace("game event class", "класс события", StringComparison.OrdinalIgnoreCase)
                 .Replace("possible primary weapons", "основное оружие на выбор", StringComparison.OrdinalIgnoreCase)
                 .Replace("possible secondary weapons", "пистолет на выбор", StringComparison.OrdinalIgnoreCase)
                 .Replace("possible tertiary weapons", "ближний бой на выбор", StringComparison.OrdinalIgnoreCase)
@@ -9777,6 +11107,15 @@ internal sealed class StudioRuntime
                 .Replace("are fame points required", "требуются очки славы", StringComparison.OrdinalIgnoreCase)
                 .Replace("locked message", "текст при закрытом замке", StringComparison.OrdinalIgnoreCase)
                 .Replace("lockpick message", "текст для взлома", StringComparison.OrdinalIgnoreCase);
+            label = ReplaceSemanticLabelPart(label, "lock mesh outer", "внешняя модель замка");
+            label = ReplaceSemanticLabelPart(label, "lock mesh inner", "внутренняя модель замка");
+
+            var lockTimeKey = NormalizeAssetKey(label);
+            if (lockTimeKey.Equals("time", StringComparison.Ordinal)
+                || lockTimeKey.Equals("время", StringComparison.Ordinal))
+            {
+                label = "время взлома";
+            }
         }
 
         label = NormalizeLocalizedLabel(label);
@@ -10004,9 +11343,22 @@ internal sealed class StudioRuntime
             ("is ignored by spawners", "не использовать для спавна в мире"),
             ("cached max draw distance", "максимальная дистанция отображения"),
             ("mesh slices", "части 3D-модели"),
+            ("item mesh", "модель предмета"),
+            ("static mesh", "статическая модель"),
+            ("skeletal mesh", "скелетная модель"),
             ("skeletal mesh socket overrides", "переопределение сокетов скелета"),
             ("static mesh socket overrides", "переопределение сокетов статической модели"),
             ("override materials", "переопределение материалов"),
+            ("inventory icon", "иконка в инвентаре"),
+            ("in hands icon", "иконка в руках"),
+            ("vicinity icon", "иконка рядом"),
+            ("item icon", "иконка предмета"),
+            ("thumbnail icon", "иконка предпросмотра"),
+            ("default material", "базовый материал"),
+            ("skin material", "материал окраски"),
+            ("stove pipe mesh", "модель неисправности (застрявшая гильза)"),
+            ("double feed mesh", "модель неисправности (двойная подача)"),
+            ("default texture", "базовая текстура"),
             ("damage ratio", "потеря здоровья"),
             ("damage percentage on uncraft", "повреждение при разборе"),
             ("intensity", "сила эффекта"),
@@ -10059,6 +11411,10 @@ internal sealed class StudioRuntime
             ("table b class", "набор снаряжения команды B"),
             ("crate class", "класс ящика события"),
             ("cargo class", "класс груза события"),
+            ("game event border class", "класс границы события"),
+            ("border class", "класс границы события"),
+            ("gameevent class", "класс события"),
+            ("game event class", "класс события"),
             ("character spawn distance range", "дистанция появления персонажей"),
             ("character fallback spawn distance range", "запасная дистанция появления персонажей"),
             ("exterior spawn points view check distance", "дистанция проверки видимости внешних точек появления"),
@@ -10619,6 +11975,22 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (relativePath.Contains("/items/spawnerpresets2/", StringComparison.OrdinalIgnoreCase)
+            && userLabel.Contains("location specific", StringComparison.OrdinalIgnoreCase))
+        {
+            if (userLabel.Contains("chance", StringComparison.OrdinalIgnoreCase)
+                || userLabel.Contains("шанс появления", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Учитывать модификатор шанса по локации";
+            }
+
+            if (userLabel.Contains("weight", StringComparison.OrdinalIgnoreCase)
+                || userLabel.Contains("вес", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Учитывать модификатор веса по локации";
+            }
+        }
+
         return userLabel;
     }
 
@@ -10669,6 +12041,11 @@ internal sealed class StudioRuntime
 
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
+
+        if (IsVisualReferenceFieldCandidate(relativePath, userLabel, valueType))
+        {
+            return true;
+        }
 
         var technicalNoiseTokens = new[]
         {
@@ -10738,6 +12115,18 @@ internal sealed class StudioRuntime
             return allowedFishTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
+        if (IsWorldEventManagerAsset(relativePath))
+        {
+            var allowedWorldEventManagerTokens = new[]
+            {
+                "пул мировых ивентов",
+                "пауза между ивентами (минимум, сек)",
+                "пауза между ивентами (максимум, сек)"
+            };
+
+            return allowedWorldEventManagerTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
         if (path.Contains("/worldevents/halloweenwhistlecandydispenser", StringComparison.Ordinal))
         {
             var allowedHalloweenTokens = new[]
@@ -10794,6 +12183,7 @@ internal sealed class StudioRuntime
             {
                 "всегда выдавать", "шанс появления набора", "учитывать игровую зону предмета",
                 "учитывать редкость предмета", "учитывать группу появления предмета",
+                "учитывать модификатор шанса по локации", "учитывать модификатор веса по локации",
                 "начальная повреждённость", "разброс повреждённости",
                 "начальный ресурс или заряд", "разброс ресурса или заряда",
                 "начальная грязь", "разброс грязи",
@@ -10811,6 +12201,7 @@ internal sealed class StudioRuntime
                 "всегда выдавать", "шанс появления набора",
                 "сколько предметов выдавать", "разрешать повторы предметов", "учитывать игровую зону предмета",
                 "готовый подпакет", "редкость набора",
+                "учитывать модификатор шанса по локации", "учитывать модификатор веса по локации",
                 "начальная повреждённость", "разброс повреждённости",
                 "начальный ресурс или заряд", "разброс ресурса или заряда"
             };
@@ -10824,6 +12215,7 @@ internal sealed class StudioRuntime
             {
                 "всегда создавать предмет", "шанс появления предмета", "учитывать игровую зону предмета",
                 "учитывать редкость предмета", "учитывать группу появления предмета",
+                "учитывать модификатор шанса по локации", "учитывать модификатор веса по локации",
                 "начальная повреждённость", "разброс повреждённости",
                 "начальный ресурс или заряд", "разброс ресурса или заряда",
                 "начальная грязь", "разброс грязи",
@@ -10861,6 +12253,7 @@ internal sealed class StudioRuntime
                 "очки славы за участие", "перевод очков в славу",
                 "длительность раунда", "лимит раундов", "лимит побед", "задержка возрождения",
                 "разрешить возрождение", "время ожидания события", "лимит игроков по командам",
+                "класс события", "класс границы события", "game event class", "border class",
                 "пропустить фазу ключа", "очки за захват флага",
                 "лимит очков раунда", "интервал сужения зоны", "длительность сужения зоны",
                 "шаг сужения зоны", "время прогрева барьера",
@@ -10976,7 +12369,14 @@ internal sealed class StudioRuntime
                 "порог переключения вверх", "порог переключения вниз",
                 "срыв двигателя", "шанс заглушить двигатель", "частота рывков",
                 "ручного улучшения bcu", "время взятия крови",
-                "когда начинается эта ступень", "насколько сильно действует эта ступень"
+                "когда начинается эта ступень", "насколько сильно действует эта ступень",
+                "points for", "bonus experience", "bonus points", "subsequent hit",
+                "skill level bonus", "compass skill level",
+                "multiplier", "modifier",
+                "detection", "radius", "distance", "duration", "timer",
+                "per second", "per minute", "per kilometer",
+                "pickpocket", "lockpicking", "thievery", "cooking", "tactics",
+                "successful harvest", "planting seed", "weeding", "craft garden"
             };
 
             return allowedSkillTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
@@ -11064,6 +12464,46 @@ internal sealed class StudioRuntime
         }
 
         return true;
+    }
+
+    private static bool IsVisualReferenceFieldCandidate(string relativePath, string userLabel, string valueType)
+    {
+        if (!IsReferenceValueType(valueType))
+        {
+            return false;
+        }
+
+        var label = userLabel.ToLowerInvariant();
+        var path = relativePath.ToLowerInvariant();
+        var hardBlockTokens = new[]
+        {
+            "draw distance", "дистанция отображения", "ignored by spawners", "игнорируется спавнерами",
+            "не использовать для спавна в мире", "socket", "сокет",
+            "mesh slice", "части 3d-модели", "override materials", "переопределение материалов",
+            "asset user data", "query token stream", "token stream version",
+            "net update frequency", "частота обновления сети",
+            "служебный поток условий", "служебная версия потока условий",
+            "дальность отображения (lod)", "ld максимум draw", "ld maximum draw",
+            "animation", "анимац", "curve", "кривая", "atlas", "sprite"
+        };
+        if (hardBlockTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var supportedPath = path.Contains("/items/", StringComparison.Ordinal)
+                            || path.Contains("/vehicles/", StringComparison.Ordinal)
+                            || path.Contains("/fortifications/", StringComparison.Ordinal)
+                            || path.Contains("/basebuilding/", StringComparison.Ordinal)
+                            || path.Contains("/worldevents/", StringComparison.Ordinal)
+                            || path.Contains("/gameevents/", StringComparison.Ordinal)
+                            || path.Contains("/characters/", StringComparison.Ordinal);
+        if (!supportedPath || path.Contains("/ui/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label);
     }
 
     private static bool ShouldExposeReferenceInfoField(string relativePath, string userLabel)
@@ -11322,6 +12762,25 @@ internal sealed class StudioRuntime
     {
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
+
+        if ((path.Contains("/items/", StringComparison.Ordinal)
+             || path.Contains("/vehicles/", StringComparison.Ordinal)
+             || path.Contains("/fortifications/", StringComparison.Ordinal)
+             || path.Contains("/basebuilding/", StringComparison.Ordinal)
+             || path.Contains("/worldevents/", StringComparison.Ordinal)
+             || path.Contains("/gameevents/", StringComparison.Ordinal)
+             || path.Contains("/characters/", StringComparison.Ordinal))
+            && (IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label)))
+        {
+            return "Внешний вид";
+        }
+
+        if (IsWorldEventManagerAsset(relativePath)
+            && (label.Contains("пауза между ивентами", StringComparison.Ordinal)
+                || label.Contains("пул мировых ивентов", StringComparison.Ordinal)))
+        {
+            return "Расписание ивентов";
+        }
 
         if (IsGameEventMarkerAsset(relativePath))
         {
@@ -12109,6 +13568,36 @@ internal sealed class StudioRuntime
     private static string ResolveFieldDescription(string relativePath, string userLabel)
     {
         var label = userLabel.ToLowerInvariant();
+        var path = relativePath.ToLowerInvariant();
+        if (path.Contains("/fortifications/locks/", StringComparison.Ordinal)
+            && (label.Contains("внешняя модель замка", StringComparison.Ordinal)
+                || label.Contains("внутренняя модель замка", StringComparison.Ordinal)))
+        {
+            return "Какая модель используется у внешней и внутренней части замка в мини-игре. Ставь только совместимые модели замка, чтобы не сломать визуал и анимацию.";
+        }
+
+        if ((path.Contains("/items/", StringComparison.Ordinal)
+             || path.Contains("/vehicles/", StringComparison.Ordinal)
+             || path.Contains("/fortifications/", StringComparison.Ordinal)
+             || path.Contains("/basebuilding/", StringComparison.Ordinal)
+             || path.Contains("/worldevents/", StringComparison.Ordinal)
+             || path.Contains("/gameevents/", StringComparison.Ordinal)
+             || path.Contains("/characters/", StringComparison.Ordinal))
+            && (IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label)))
+        {
+            if (IsVisualModelLabel(label))
+            {
+                return "Определяет 3D-модель объекта в мире. Замена позволяет подменить внешний вид предмета или объекта без изменения его игровой логики.";
+            }
+
+            if (IsVisualMaterialLabel(label))
+            {
+                return "Определяет материал поверхности: окраску, отражение и общий стиль. Используй совместимые материалы, чтобы избежать визуальных артефактов.";
+            }
+
+            return "Определяет текстуру или иконку для инвентаря/интерфейса. Замена меняет отображение предмета, но не его характеристики.";
+        }
+
         if (IsGameEventMarkerAsset(relativePath))
         {
             if (label.Contains("минимум участников", StringComparison.Ordinal)
@@ -12200,6 +13689,24 @@ internal sealed class StudioRuntime
             if (label.Contains("название события", StringComparison.Ordinal))
             {
                 return "Как это событие будет называться в интерфейсе и уведомлениях.";
+            }
+        }
+
+        if (IsWorldEventManagerAsset(relativePath))
+        {
+            if (label.Contains("пул мировых ивентов", StringComparison.Ordinal))
+            {
+                return "Список типов мировых ивентов, которые менеджер может автоматически запускать на карте.";
+            }
+
+            if (label.Contains("пауза между ивентами (минимум, сек)", StringComparison.Ordinal))
+            {
+                return "Минимальная пауза между запусками мировых ивентов. Игра случайно выбирает значение в диапазоне от минимума до максимума.";
+            }
+
+            if (label.Contains("пауза между ивентами (максимум, сек)", StringComparison.Ordinal))
+            {
+                return "Максимальная пауза между запусками мировых ивентов. Обычно ставят не меньше минимального значения.";
             }
         }
 
@@ -12885,6 +14392,18 @@ internal sealed class StudioRuntime
             return "Если включено, эта защита грузового дропа будет запускаться не сразу, а с паузой после начала события.";
         }
 
+        if (path.Contains("/gameevents/markers/", StringComparison.Ordinal)
+            && label.Contains("класс события", StringComparison.Ordinal))
+        {
+            return "Какой игровой режим запускается в этой точке карты: бой насмерть, командный бой, захват флага или зона сброса.";
+        }
+
+        if (path.Contains("/gameevents/markers/", StringComparison.Ordinal)
+            && label.Contains("класс границы события", StringComparison.Ordinal))
+        {
+            return "Какой тип границы события будет создан вокруг зоны. Обычно оставляют стандартную границу.";
+        }
+
         if (label.Contains("какое событие может запуститься", StringComparison.Ordinal))
         {
             return "Выбери готовый игровой класс события, который эта зона или менеджер сможет запускать.";
@@ -12912,7 +14431,7 @@ internal sealed class StudioRuntime
 
         if (label.Contains("класс груза события", StringComparison.Ordinal))
         {
-            return "Какой класс основного груза будет сбрасываться в режиме Drop Zone.";
+            return "Какой тип центрального груза будет сбрасываться в режиме Drop Zone. Это объект события, а наполнение настраивается отдельно.";
         }
 
         if (label.Contains("класс орды защитников", StringComparison.Ordinal))
@@ -13276,6 +14795,12 @@ internal sealed class StudioRuntime
             return "Насколько сильно эффект влияет на персонажа.";
         }
 
+        if (path.Contains("/fortifications/locks/", StringComparison.Ordinal)
+            && label.Contains("время взлома", StringComparison.Ordinal))
+        {
+            return "Сколько времени длится базовая попытка взлома этого замка.";
+        }
+
         if ((label.Contains("длитель", StringComparison.Ordinal) || label.Contains("время", StringComparison.Ordinal))
             && !label.Contains("время до следующей выдачи", StringComparison.Ordinal))
         {
@@ -13349,7 +14874,8 @@ internal sealed class StudioRuntime
             return "Сколько секунд нужно подождать после срабатывания, прежде чем автомат снова сможет выдать конфету.";
         }
 
-        if (label.Contains("шанс", StringComparison.Ordinal) || label.Contains("probability", StringComparison.Ordinal))
+        if ((label.Contains("шанс", StringComparison.Ordinal) || label.Contains("probability", StringComparison.Ordinal))
+            && !label.Contains("модификатор шанса по локации", StringComparison.OrdinalIgnoreCase))
         {
             return "Вероятность срабатывания (обычно 0..1).";
         }
@@ -13357,6 +14883,31 @@ internal sealed class StudioRuntime
         if (label.Contains("цена", StringComparison.Ordinal) || label.Contains("стоим", StringComparison.Ordinal))
         {
             return "Экономический параметр продажи/покупки.";
+        }
+
+        if (label.Contains("сколько дезинфекции нужно", StringComparison.Ordinal))
+        {
+            return "Сколько дезинфицирующего ресурса тратится на обработку этого предмета.";
+        }
+
+        if (label.Contains("выбрасывать при входе в боевой режим", StringComparison.Ordinal))
+        {
+            return "Если включено, предмет автоматически сбрасывается при переходе персонажа в боевой режим.";
+        }
+
+        if (label.Contains("расход предмета при стирке", StringComparison.Ordinal))
+        {
+            return "Сколько единиц этого предмета тратится при использовании его для стирки или очистки.";
+        }
+
+        if (label.Contains("учитывать модификатор шанса по локации", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Если включено, шанс появления набора дополнительно умножается на коэффициент конкретной локации.";
+        }
+
+        if (label.Contains("учитывать модификатор веса по локации", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Если включено, вес выбора этого набора дополнительно умножается на коэффициент текущей локации.";
         }
 
         if (label.Contains("урон за выстрел", StringComparison.Ordinal))
@@ -13377,6 +14928,11 @@ internal sealed class StudioRuntime
         if (label.Contains("патронов в магазине", StringComparison.Ordinal))
         {
             return "Максимум патронов, которые вмещает оружие.";
+        }
+
+        if (label.Contains("патронов для события", StringComparison.Ordinal))
+        {
+            return "Лимит патронов для игровых событий (PvP-режимов). На обычный режим влияет меньше или не влияет.";
         }
 
         if (label.Contains("максимум патронов в пачке", StringComparison.Ordinal))
@@ -13449,6 +15005,17 @@ internal sealed class StudioRuntime
         if (label.Contains("состояние предмета", StringComparison.Ordinal))
         {
             return "Насколько целым или изношенным будет выдан предмет.";
+        }
+
+        if (label.Contains("внешняя модель замка", StringComparison.Ordinal)
+            || label.Contains("внутренняя модель замка", StringComparison.Ordinal))
+        {
+            return "Какая 3D-модель используется у частей замка в мини-игре. Меняй на совместимую модель замка, чтобы не сломать отображение или анимацию.";
+        }
+
+        if (label.Contains("время взлома", StringComparison.Ordinal))
+        {
+            return "Сколько времени длится базовая попытка взлома этого замка.";
         }
 
         if (label.Contains("число попыток обезвреживания", StringComparison.Ordinal))
@@ -13666,6 +15233,11 @@ internal sealed class StudioRuntime
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
 
+        if (TryResolveVisualReferencePicker(valueType, label, currentValue, out var visualPickerKind, out var visualPickerPrompt))
+        {
+            return (visualPickerKind, visualPickerPrompt);
+        }
+
         if (IsCargoDropContainerAsset(relativePath))
         {
             if (label.Contains("основные пресеты лута", StringComparison.Ordinal)
@@ -13742,6 +15314,24 @@ internal sealed class StudioRuntime
                 "Найди квест, который должен входить в этот набор, и выбери его из списка.");
         }
 
+        if (IsGameEventMarkerAsset(relativePath)
+            && (label.Contains("класс события", StringComparison.Ordinal)
+                || label.Contains("game event class", StringComparison.Ordinal)))
+        {
+            return (
+                "gameevent-class",
+                "Найди игровой режим, который эта точка карты должна запускать (бой насмерть, командный бой, захват флага, зона сброса).");
+        }
+
+        if (IsGameEventMarkerAsset(relativePath)
+            && (label.Contains("класс границы события", StringComparison.Ordinal)
+                || label.Contains("border class", StringComparison.Ordinal)))
+        {
+            return (
+                "gameevent-border-class",
+                "Найди класс границы события, который должен ограничивать игровую зону.");
+        }
+
         if (IsGameEventCoreAsset(relativePath)
             && (label.Contains("набор снаряжения команды a", StringComparison.Ordinal)
                 || label.Contains("набор снаряжения команды b", StringComparison.Ordinal)))
@@ -13766,7 +15356,7 @@ internal sealed class StudioRuntime
         {
             return (
                 "gameevent-dropzone-cargo-class",
-                "Найди класс груза для Drop Zone: именно этот объект будет сбрасываться в центре события.");
+                "Найди тип центрального груза для Drop Zone: именно этот объект события будет создан в центре, а его наполнение настраивается отдельно.");
         }
 
         if (path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal)
@@ -13832,6 +15422,93 @@ internal sealed class StudioRuntime
         }
 
         return (null, null);
+    }
+
+    private static bool TryResolveVisualReferencePicker(
+        string valueType,
+        string label,
+        string currentValue,
+        out string pickerKind,
+        out string pickerPrompt)
+    {
+        pickerKind = string.Empty;
+        pickerPrompt = string.Empty;
+        if (!IsReferenceValueType(valueType))
+        {
+            return false;
+        }
+
+        var lowerCurrent = (currentValue ?? string.Empty).ToLowerInvariant();
+        var isMaterial = IsVisualMaterialLabel(label);
+        var isTexture = IsVisualTextureLabel(label);
+        var isModel = IsVisualModelLabel(label);
+        if (!isMaterial && !isTexture && !isModel)
+        {
+            return false;
+        }
+
+        if (isMaterial)
+        {
+            pickerKind = IsObjectReferenceType(valueType) ? "visual-material-object" : "visual-material-asset";
+            pickerPrompt = "Найди материал внешнего вида, который должен использовать этот предмет или объект.";
+            return true;
+        }
+
+        if (isTexture)
+        {
+            pickerKind = IsObjectReferenceType(valueType) ? "visual-icon-object" : "visual-icon-asset";
+            pickerPrompt = "Найди подходящую текстуру или иконку, чтобы заменить внешний вид в интерфейсе и инвентаре.";
+            return true;
+        }
+
+        var prefersSkeletal = label.Contains("skeletal", StringComparison.Ordinal)
+                              || label.Contains("скелет", StringComparison.Ordinal)
+                              || lowerCurrent.Contains(".sk_", StringComparison.Ordinal)
+                              || lowerCurrent.Contains("/sk_", StringComparison.Ordinal);
+        pickerKind = prefersSkeletal
+            ? (IsObjectReferenceType(valueType) ? "visual-skeletal-mesh-object" : "visual-skeletal-mesh-asset")
+            : (IsObjectReferenceType(valueType) ? "visual-static-mesh-object" : "visual-static-mesh-asset");
+        pickerPrompt = "Найди модель, которую нужно использовать вместо текущей для этого предмета или объекта.";
+        return true;
+    }
+
+    private static bool IsVisualModelLabel(string label)
+    {
+        var hasModelToken = ContainsSearchTermAtBoundary(label, "mesh")
+                            || ContainsSearchTermAtBoundary(label, "модель");
+        return hasModelToken
+               && !label.Contains("slice", StringComparison.Ordinal)
+               && !label.Contains("части 3d-модели", StringComparison.Ordinal)
+               && !label.Contains("socket", StringComparison.Ordinal)
+               && !label.Contains("сокет", StringComparison.Ordinal);
+    }
+
+    private static bool IsVisualMaterialLabel(string label)
+    {
+        return (label.Contains("material", StringComparison.Ordinal)
+                || label.Contains("материал", StringComparison.Ordinal))
+               && !label.Contains("override", StringComparison.Ordinal)
+               && !label.Contains("переопределение", StringComparison.Ordinal)
+               && !label.Contains("расход", StringComparison.Ordinal)
+               && !label.Contains("ингредиент", StringComparison.Ordinal);
+    }
+
+    private static bool IsVisualTextureLabel(string label)
+    {
+        return label.Contains("texture", StringComparison.Ordinal)
+               || label.Contains("текстур", StringComparison.Ordinal)
+               || label.Contains("icon", StringComparison.Ordinal)
+               || label.Contains("икон", StringComparison.Ordinal);
+    }
+
+    private static bool IsReferenceValueType(string valueType)
+    {
+        return valueType is "object" or "soft-object" or "soft-object-path";
+    }
+
+    private static bool IsObjectReferenceType(string valueType)
+    {
+        return valueType.Equals("object", StringComparison.Ordinal);
     }
 
     private static string ResolveEditorKind(
@@ -13912,6 +15589,11 @@ internal sealed class StudioRuntime
             return ("5", "600");
         }
 
+        if (IsWorldEventManagerAsset(relativePath) && label.Contains("пауза между ивентами", StringComparison.Ordinal))
+        {
+            return ("0", "7200");
+        }
+
         if (IsCargoDropContainerAsset(relativePath) && label.Contains("множитель шанса выбора", StringComparison.Ordinal))
         {
             return ("0", "10");
@@ -13979,6 +15661,38 @@ internal sealed class StudioRuntime
             if (label.Contains("шаг сужения зоны", StringComparison.Ordinal))
             {
                 return ("0", "500");
+            }
+        }
+
+        if (relativePath.Contains("/items/weapons/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("патронов в магазине", StringComparison.Ordinal)
+                || label.Contains("патронов для события", StringComparison.Ordinal))
+            {
+                return ("0", "500");
+            }
+
+            if (label.Contains("скорострельност", StringComparison.Ordinal))
+            {
+                return ("0", "5000");
+            }
+
+            if (label.Contains("урон за выстрел", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+        }
+
+        if (relativePath.Contains("/items/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("сколько дезинфекции нужно", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+
+            if (label.Contains("расход предмета при стирке", StringComparison.Ordinal))
+            {
+                return ("0", "100");
             }
         }
 
@@ -14334,7 +16048,14 @@ internal sealed class StudioRuntime
 
         if (IsCargoDropContainerClassListSurface(relativePath, userLabel))
         {
-            return "Какие типы контейнера может запускать этот ивент грузового дропа. Добавь совместимый контейнер, чтобы расширить сценарии события.";
+            return "Какие типы контейнера может запускать этот ивент грузового дропа. Это выбор контейнера события, а не прямой выбор машины: транспортный дроп делается через совместимый контейнерный класс.";
+        }
+
+        if (IsWorldEventManagerAsset(relativePath)
+            && (label.Contains("пул мировых ивентов", StringComparison.Ordinal)
+                || label.Contains("event types", StringComparison.Ordinal)))
+        {
+            return "Какие типы мировых ивентов менеджер может запускать в случайной ротации.";
         }
 
         if (label.Contains("персонажи для события", StringComparison.Ordinal))
@@ -14525,6 +16246,7 @@ internal sealed class StudioRuntime
             var keyType = mapProperty.KeyType?.ToString() ?? string.Empty;
             var isReferenceKeyType =
                 string.Equals(keyType, "ObjectProperty", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(keyType, "ClassProperty", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(keyType, "SoftObjectProperty", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(keyType, "SoftObjectPathProperty", StringComparison.OrdinalIgnoreCase);
             return isReferenceKeyType ? "reference-map" : "map";
@@ -14550,6 +16272,7 @@ internal sealed class StudioRuntime
             {
                 "StructProperty" => "struct",
                 "ObjectProperty" => "reference",
+                "ClassProperty" => "reference",
                 "SoftObjectProperty" => "reference",
                 "SoftObjectPathProperty" => "reference",
                 _ => "scalar"
@@ -14622,7 +16345,19 @@ internal sealed class StudioRuntime
             return (
                 true,
                 "cargo-drop-container-class",
-                "Найди совместимый класс контейнера грузового дропа, который событие сможет запускать.");
+                "Найди совместимый класс контейнера грузового дропа. Это контейнер события, а не прямой класс транспорта.");
+        }
+
+        if (IsWorldEventManagerAsset(relativePath)
+            && (label.Contains("пул мировых ивентов", StringComparison.Ordinal)
+                || label.Contains("event types", StringComparison.Ordinal))
+            && (values.Length == 0
+                || values.All(value => value is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)))
+        {
+            return (
+                true,
+                "worldevent-class",
+                "Найди класс мирового ивента, который менеджер должен уметь запускать.");
         }
 
         if (IsVehicleSpawnPresetListSurface(relativePath, userLabel)
@@ -14851,6 +16586,7 @@ internal sealed class StudioRuntime
         var supportsReferenceKey = entries.Count > 0
             ? entries.All(entry => entry.Key is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)
             : string.Equals(mapProperty.KeyType?.ToString(), "ObjectProperty", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(mapProperty.KeyType?.ToString(), "ClassProperty", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(mapProperty.KeyType?.ToString(), "SoftObjectProperty", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(mapProperty.KeyType?.ToString(), "SoftObjectPathProperty", StringComparison.OrdinalIgnoreCase);
         var supportsNumericValue = entries.Count > 0
@@ -16809,6 +18545,14 @@ internal sealed class StudioRuntime
             return true;
         }
 
+        if (path.EndsWith("/worldevents/bp_worldeventmanager.uasset", StringComparison.Ordinal))
+        {
+            descriptor = new ModAssetDescriptor(
+                "Мировые ивенты: общий менеджер",
+                "Главный менеджер мировых ивентов: какие типы событий он может запускать и какой интервал выдерживает между запусками.");
+            return true;
+        }
+
         if (path.Contains("/worldevents/cargodrop/", StringComparison.Ordinal)
             && lowerStem.Equals("bp_cargo", StringComparison.Ordinal))
         {
@@ -17364,6 +19108,7 @@ internal sealed class StudioRuntime
         var blockedVisualTokens = new[]
         {
             "/textures/", "/texture/", "/materials/", "/material/", "/meshes/", "/mesh/",
+            "/models/", "/model/",
             "/skeletal", "/animations/", "/anim/", "/vfx/", "/fx/", "/sounds/", "/audio/", "/icons/", "/ui/"
         };
 
@@ -19418,9 +21163,19 @@ internal sealed class StudioRuntime
             return TryApplyGameEventMarkerSyntheticFieldEdit(asset, edit, warnings, out applied);
         }
 
+        if (edit.FieldPath.StartsWith(WorldEventManagerSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return TryApplyWorldEventManagerSyntheticFieldEdit(asset, edit, warnings, out applied);
+        }
+
         if (edit.FieldPath.StartsWith(WeaponSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
         {
             return TryApplyWeaponSyntheticFieldEdit(asset, edit, warnings, out applied);
+        }
+
+        if (edit.FieldPath.StartsWith(WeaponClipSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return TryApplyWeaponClipSyntheticFieldEdit(asset, edit, warnings, out applied);
         }
 
         if (edit.FieldPath.StartsWith(AmmunitionSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
@@ -19477,6 +21232,60 @@ internal sealed class StudioRuntime
                 warnings.Add($"UAsset edit skipped: неизвестный режим маркера события {mode}");
                 return true;
         }
+    }
+
+    private static bool TryApplyWorldEventManagerSyntheticFieldEdit(
+        UAsset asset,
+        StudioFieldEditDto edit,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var propertyToken = edit.FieldPath[WorldEventManagerSyntheticFieldPrefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(propertyToken))
+        {
+            warnings.Add("UAsset edit skipped: не указан параметр менеджера мировых ивентов.");
+            return true;
+        }
+
+        var propertyName = propertyToken.ToLowerInvariant() switch
+        {
+            "timebetweeneventsmin" => "TimeBetweenEventsMin",
+            "timebetweeneventsmax" => "TimeBetweenEventsMax",
+            _ => string.Empty
+        };
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            warnings.Add($"UAsset edit skipped: неподдерживаемый параметр менеджера мировых ивентов {propertyToken}");
+            return true;
+        }
+
+        if (!TryFindWorldEventManagerOwnerExport(asset, out var export, out _))
+        {
+            warnings.Add($"UAsset edit skipped: экспорт для {propertyName} не найден.");
+            return true;
+        }
+
+        if (!float.TryParse(edit.Value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} (ожидается число)");
+            return true;
+        }
+
+        var conflictingProperty = export.Data
+            .OfType<PropertyData>()
+            .FirstOrDefault(property =>
+                PropertyNamesMatch(property.Name?.ToString(), propertyName)
+                && property is not FloatPropertyData);
+        if (conflictingProperty is not null)
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как число.");
+            return true;
+        }
+
+        EnsureTopLevelFloatProperty(asset, export, propertyName).Value = value;
+        applied = true;
+        return true;
     }
 
     private static bool TryApplyCommonGameEventMarkerSyntheticEdit(
@@ -19827,6 +21636,11 @@ internal sealed class StudioRuntime
 
         var allowedProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
+            "DefaultAmmunitionItemClass",
+            "MaxLoadedAmmo",
+            "EventMaxAmmo",
+            "DamagePerShot",
+            "ROF",
             "ViewKickMultiplier",
             "MaxRecoilOffset",
             "RecoilRecoverySpeed"
@@ -19843,24 +21657,169 @@ internal sealed class StudioRuntime
             return true;
         }
 
+        if (propertyName.Equals("DefaultAmmunitionItemClass", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!TryBuildObjectReferenceFromPicker(asset, edit.Value, out var objectReference, out var objectError))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} ({objectError})");
+                return true;
+            }
+
+            var conflictingObjectProperty = export.Data
+                .OfType<PropertyData>()
+                .FirstOrDefault(property =>
+                    PropertyNamesMatch(property.Name?.ToString(), propertyName)
+                    && property is not ObjectPropertyData);
+            if (conflictingObjectProperty is not null)
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как object-ссылка.");
+                return true;
+            }
+
+            EnsureTopLevelObjectProperty(asset, export, propertyName).Value = objectReference;
+            applied = true;
+            return true;
+        }
+
+        if (propertyName.Equals("MaxLoadedAmmo", StringComparison.OrdinalIgnoreCase)
+            || propertyName.Equals("EventMaxAmmo", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!long.TryParse(edit.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var intValue))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} (ожидается целое число)");
+                return true;
+            }
+
+            var existingIntegerProperty = FindTopLevelIntegerLikePropertyLoose(export, propertyName);
+            if (existingIntegerProperty is not null)
+            {
+                if (!TrySetIntegerLikePropertyValue(existingIntegerProperty, intValue, out var setError))
+                {
+                    warnings.Add($"UAsset edit skipped: {propertyName} ({setError}).");
+                    return true;
+                }
+            }
+            else
+            {
+                if (intValue < int.MinValue || intValue > int.MaxValue)
+                {
+                    warnings.Add($"UAsset edit skipped: {propertyName} (значение выходит за диапазон int32).");
+                    return true;
+                }
+
+                EnsureTopLevelIntProperty(asset, export, propertyName).Value = (int)intValue;
+            }
+
+            applied = true;
+            return true;
+        }
+
         if (!float.TryParse(edit.Value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var value))
         {
             warnings.Add($"UAsset edit skipped: {propertyName} (ожидается float)");
             return true;
         }
 
-        var conflictingProperty = export.Data
-            .OfType<PropertyData>()
-            .FirstOrDefault(property =>
-                PropertyNamesMatch(property.Name?.ToString(), propertyName)
-                && property is not FloatPropertyData);
-        if (conflictingProperty is not null)
+        var existingNumericProperty = FindTopLevelNumericPropertyLoose(export, propertyName);
+        if (existingNumericProperty is not null)
         {
-            warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как число.");
+            if (!TrySetNumericPropertyValue(existingNumericProperty, value, out var setError))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} ({setError}).");
+                return true;
+            }
+        }
+        else
+        {
+            EnsureTopLevelFloatProperty(asset, export, propertyName).Value = (float)value;
+        }
+
+        applied = true;
+        return true;
+    }
+
+    private static bool TryApplyWeaponClipSyntheticFieldEdit(
+        UAsset asset,
+        StudioFieldEditDto edit,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var propertyName = edit.FieldPath[WeaponClipSyntheticFieldPrefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(propertyName))
+        {
+            warnings.Add("UAsset edit skipped: не указан параметр магазина.");
             return true;
         }
 
-        EnsureTopLevelFloatProperty(asset, export, propertyName).Value = value;
+        var allowedProperties = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "DefaultFillAmmo",
+            "Capacity",
+            "EventMaxAmmo"
+        };
+        if (!allowedProperties.Contains(propertyName))
+        {
+            warnings.Add($"UAsset edit skipped: неподдерживаемый параметр магазина {propertyName}");
+            return true;
+        }
+
+        if (!TryFindWeaponClipOwnerExport(asset, out var export, out _))
+        {
+            warnings.Add($"UAsset edit skipped: экспорт для {propertyName} не найден.");
+            return true;
+        }
+
+        if (propertyName.Equals("DefaultFillAmmo", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!TryBuildObjectReferenceFromPicker(asset, edit.Value, out var objectReference, out var objectError))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} ({objectError})");
+                return true;
+            }
+
+            var conflictingObjectProperty = export.Data
+                .OfType<PropertyData>()
+                .FirstOrDefault(property =>
+                    PropertyNamesMatch(property.Name?.ToString(), propertyName)
+                    && property is not ObjectPropertyData);
+            if (conflictingObjectProperty is not null)
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как object-ссылка.");
+                return true;
+            }
+
+            EnsureTopLevelObjectProperty(asset, export, propertyName).Value = objectReference;
+            applied = true;
+            return true;
+        }
+
+        if (!long.TryParse(edit.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var intValue))
+        {
+            warnings.Add($"UAsset edit skipped: {propertyName} (ожидается целое число)");
+            return true;
+        }
+
+        var existingIntegerProperty = FindTopLevelIntegerLikePropertyLoose(export, propertyName);
+        if (existingIntegerProperty is not null)
+        {
+            if (!TrySetIntegerLikePropertyValue(existingIntegerProperty, intValue, out var setError))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} ({setError}).");
+                return true;
+            }
+        }
+        else
+        {
+            if (intValue < int.MinValue || intValue > int.MaxValue)
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} (значение выходит за диапазон int32).");
+                return true;
+            }
+
+            EnsureTopLevelIntProperty(asset, export, propertyName).Value = (int)intValue;
+        }
+
         applied = true;
         return true;
     }
@@ -19923,24 +21882,32 @@ internal sealed class StudioRuntime
 
         if (propertyName.Equals("MaxAmmoCount", StringComparison.OrdinalIgnoreCase))
         {
-            if (!int.TryParse(edit.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+            if (!long.TryParse(edit.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
             {
                 warnings.Add($"UAsset edit skipped: {propertyName} (ожидается целое число)");
                 return true;
             }
 
-            var conflictingIntProperty = export.Data
-                .OfType<PropertyData>()
-                .FirstOrDefault(property =>
-                    PropertyNamesMatch(property.Name?.ToString(), propertyName)
-                    && property is not IntPropertyData);
-            if (conflictingIntProperty is not null)
+            var existingIntegerProperty = FindTopLevelIntegerLikePropertyLoose(export, propertyName);
+            if (existingIntegerProperty is not null)
             {
-                warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как целое число.");
-                return true;
+                if (!TrySetIntegerLikePropertyValue(existingIntegerProperty, value, out var setError))
+                {
+                    warnings.Add($"UAsset edit skipped: {propertyName} ({setError}).");
+                    return true;
+                }
+            }
+            else
+            {
+                if (value < int.MinValue || value > int.MaxValue)
+                {
+                    warnings.Add($"UAsset edit skipped: {propertyName} (значение выходит за диапазон int32).");
+                    return true;
+                }
+
+                EnsureTopLevelIntProperty(asset, export, propertyName).Value = (int)value;
             }
 
-            EnsureTopLevelIntProperty(asset, export, propertyName).Value = value;
             applied = true;
             return true;
         }
@@ -19951,18 +21918,20 @@ internal sealed class StudioRuntime
             return true;
         }
 
-        var conflictingFloatProperty = export.Data
-            .OfType<PropertyData>()
-            .FirstOrDefault(property =>
-                PropertyNamesMatch(property.Name?.ToString(), propertyName)
-                && property is not FloatPropertyData);
-        if (conflictingFloatProperty is not null)
+        var existingNumericProperty = FindTopLevelNumericPropertyLoose(export, propertyName);
+        if (existingNumericProperty is not null)
         {
-            warnings.Add($"UAsset edit skipped: {propertyName} уже существует, но хранится не как число.");
-            return true;
+            if (!TrySetNumericPropertyValue(existingNumericProperty, floatValue, out var setError))
+            {
+                warnings.Add($"UAsset edit skipped: {propertyName} ({setError}).");
+                return true;
+            }
+        }
+        else
+        {
+            EnsureTopLevelFloatProperty(asset, export, propertyName).Value = floatValue;
         }
 
-        EnsureTopLevelFloatProperty(asset, export, propertyName).Value = floatValue;
         applied = true;
         return true;
     }
@@ -21004,6 +22973,16 @@ internal sealed class StudioRuntime
                 continue;
             }
 
+            if (string.Equals(listEdit.TargetPath, SyntheticWorldEventManagerEventTypesTargetPath, StringComparison.OrdinalIgnoreCase))
+            {
+                if (TryApplySyntheticWorldEventManagerListEdit(asset, listEdit, warnings))
+                {
+                    applied++;
+                }
+
+                continue;
+            }
+
             if (listEdit.TargetPath.StartsWith(SyntheticRecipeAllowedTypesTargetPrefix, StringComparison.OrdinalIgnoreCase))
             {
                 if (TryApplySyntheticRecipeAllowedTypesListEdit(asset, listEdit, warnings))
@@ -21481,6 +23460,78 @@ internal sealed class StudioRuntime
         return false;
     }
 
+    private bool TryApplySyntheticWorldEventManagerListEdit(
+        UAsset asset,
+        StudioListEditDto listEdit,
+        List<string> warnings)
+    {
+        if (!TryFindWorldEventManagerOwnerExport(asset, out var ownerExport, out _))
+        {
+            warnings.Add("List edit skipped: не найден основной экспорт менеджера мировых ивентов.");
+            return false;
+        }
+
+        var array = EnsureTopLevelWorldEventTypesArray(asset, ownerExport);
+        var values = array.Value ?? [];
+        var action = (listEdit.Action ?? string.Empty).Trim().ToLowerInvariant();
+
+        if (action == "add-reference")
+        {
+            if (!TryCreateReferenceListItem(asset, array, values, listEdit, out var created, out var error))
+            {
+                warnings.Add($"List edit skipped: {error} ({listEdit.TargetPath})");
+                return false;
+            }
+
+            if (ContainsEquivalentReference(asset, values, created))
+            {
+                warnings.Add("List edit skipped: такой класс мирового ивента уже есть в этом пуле.");
+                return false;
+            }
+
+            var expanded = new PropertyData[values.Length + 1];
+            Array.Copy(values, expanded, values.Length);
+            expanded[^1] = created;
+            array.Value = expanded;
+            return true;
+        }
+
+        if (action == "remove-index")
+        {
+            if (values.Length == 0)
+            {
+                warnings.Add("List edit skipped: в пуле мировых ивентов пока нет элементов.");
+                return false;
+            }
+
+            var index = listEdit.Index ?? (values.Length - 1);
+            if (index < 0 || index >= values.Length)
+            {
+                warnings.Add($"List edit skipped: неверный index={index} для {listEdit.TargetPath}");
+                return false;
+            }
+
+            var reduced = values.ToList();
+            reduced.RemoveAt(index);
+            array.Value = reduced.ToArray();
+            return true;
+        }
+
+        if (action == "clear")
+        {
+            if (values.Length == 0)
+            {
+                return false;
+            }
+
+            array.Value = [];
+            return true;
+        }
+
+        warnings.Add($"List edit skipped: действие {listEdit.Action} не поддерживается для пула мировых ивентов.");
+        return false;
+    }
+
     private bool TryApplySyntheticArrayReferenceListEdit(
         UAsset asset,
         ArrayPropertyData arrayProperty,
@@ -21660,7 +23711,8 @@ internal sealed class StudioRuntime
 
         var arrayType = arrayProperty.ArrayType?.ToString() ?? string.Empty;
         var rawValue = rawReference;
-        if (arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase))
+        if (arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase)
+            || arrayType.Equals("ClassProperty", StringComparison.OrdinalIgnoreCase))
         {
             var created = new ObjectPropertyData(new FName());
             if (!TryAssignReferenceCloneValue(asset, created, rawValue, out error))
@@ -21743,7 +23795,8 @@ internal sealed class StudioRuntime
         }
 
         var arrayType = setProperty.ArrayType?.ToString() ?? string.Empty;
-        if (arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase))
+        if (arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase)
+            || arrayType.Equals("ClassProperty", StringComparison.OrdinalIgnoreCase))
         {
             var created = new ObjectPropertyData(new FName());
             if (!TryAssignReferenceCloneValue(asset, created, rawReference, out error))
@@ -22067,7 +24120,8 @@ internal sealed class StudioRuntime
         error = string.Empty;
 
         PropertyData? created = null;
-        if (string.Equals(keyType, "ObjectProperty", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(keyType, "ObjectProperty", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(keyType, "ClassProperty", StringComparison.OrdinalIgnoreCase))
         {
             created = new ObjectPropertyData(new FName());
         }
@@ -22622,6 +24676,32 @@ internal sealed class StudioRuntime
         };
         export.Data.Add(property);
         return property;
+    }
+
+    private static ArrayPropertyData EnsureTopLevelClassArrayProperty(UAsset asset, NormalExport export, string propertyName)
+    {
+        var property = FindTopLevelProperty<ArrayPropertyData>(export, propertyName, out _);
+        if (property is not null)
+        {
+            property.ArrayType = CreateFName(asset, "ClassProperty");
+            property.Value ??= [];
+            return property;
+        }
+
+        EnsureAssetNameReference(asset, "ArrayProperty");
+        EnsureAssetNameReference(asset, "ClassProperty");
+        property = new ArrayPropertyData(CreateFName(asset, propertyName))
+        {
+            ArrayType = CreateFName(asset, "ClassProperty"),
+            Value = []
+        };
+        export.Data.Add(property);
+        return property;
+    }
+
+    private static ArrayPropertyData EnsureTopLevelWorldEventTypesArray(UAsset asset, NormalExport export)
+    {
+        return EnsureTopLevelClassArrayProperty(asset, export, "EventTypes");
     }
 
     private static ArrayPropertyData EnsureTopLevelCargoDropMinorSpawnerArray(UAsset asset, NormalExport export)
