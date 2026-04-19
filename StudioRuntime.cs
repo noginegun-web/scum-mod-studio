@@ -32,6 +32,8 @@ internal sealed class StudioRuntime
     private const string AmmunitionSyntheticFieldPrefix = "ammo-field:";
     private const string GameEventMarkerSyntheticFieldPrefix = "gameevent-marker:";
     private const string WorldEventManagerSyntheticFieldPrefix = "worldevent-manager:";
+    private const string VectorComponentFieldTokenPrefix = "/vc:";
+    private const string RotatorComponentFieldTokenPrefix = "/rc:";
     private const string SyntheticSideEffectsTargetPath = "synthetic:side-effects";
     private const string SyntheticCraftingUiCategoryRecipesTargetPrefix = "synthetic:crafting-ui-category-recipes:";
     private const string SyntheticCargoMajorSpawnerOptionsTargetPath = "synthetic:cargo-major-spawner-options";
@@ -5636,6 +5638,8 @@ internal sealed class StudioRuntime
         {
             prettyFields = ApplyMapFieldContext(asset, prettyFields);
             prettyListTargets = ApplyMapListTargetContext(asset, prettyListTargets);
+            prettyFields = PrioritizeMapFields(prettyFields);
+            prettyListTargets = PrioritizeMapListTargets(prettyListTargets);
         }
 
         return new StudioModAssetSchemaDto(
@@ -5780,9 +5784,10 @@ internal sealed class StudioRuntime
 
         var relevantTokens = new[]
         {
-            "sentry", "spawner", "spawnbox", "itemspawner", "worlditemspawner",
-            "vehiclespawnbox", "npcinteractionbox", "questgiver", "trader",
-            "waypoint", "patrol", "route", "marker", "sedentarynpc"
+            "sentry", "sentryspawner", "vehiclespawner", "vehiclespawnbox",
+            "npcinteractionbox", "questgiver", "trader",
+            "waypoint", "patrol", "route", "marker", "sedentarynpc",
+            "guardvolume", "guardedzone", "spline"
         };
 
         return relevantTokens.Any(value => token.Contains(value, StringComparison.Ordinal));
@@ -5909,6 +5914,16 @@ internal sealed class StudioRuntime
             return fields;
         }
 
+        var exportIndices = fields
+            .Where(field => duplicateLabels.Contains(field.Label))
+            .Select(field => TryParseExportIndexFromFieldPath(field.FieldPath))
+            .Where(index => index.HasValue)
+            .Select(index => ResolveMapContextRootExportIndex(asset, index!.Value))
+            .Distinct()
+            .OrderBy(index => index)
+            .ToList();
+        var exportOrderByIndex = BuildMapContextVariantOrderMap(asset, exportIndices);
+
         var rewritten = new List<StudioModFieldDto>(fields.Count);
         foreach (var field in fields)
         {
@@ -5927,9 +5942,10 @@ internal sealed class StudioRuntime
                 continue;
             }
 
-            var objectName = asset.Exports[exportIndex.Value].ObjectName?.ToString() ?? $"export_{exportIndex.Value}";
-            var entityLabel = ResolveMapEntityLabel(objectName);
-            rewritten.Add(field with { Label = $"{entityLabel} / {field.Label}" });
+            var rootExportIndex = ResolveMapContextRootExportIndex(asset, exportIndex.Value);
+            var entityLabel = ResolveMapExportContextLabel(asset, rootExportIndex);
+            var variantOrder = exportOrderByIndex.TryGetValue(rootExportIndex, out var order) ? order : rootExportIndex + 1;
+            rewritten.Add(field with { Label = $"{entityLabel} #{variantOrder} / {field.Label}" });
         }
 
         return rewritten;
@@ -5956,13 +5972,11 @@ internal sealed class StudioRuntime
             .Where(target => duplicateLabels.Contains(target.Label))
             .Select(target => TryParseExportIndexFromFieldPath(target.TargetPath))
             .Where(index => index.HasValue)
-            .Select(index => index!.Value)
+            .Select(index => ResolveMapContextRootExportIndex(asset, index!.Value))
             .Distinct()
             .OrderBy(index => index)
             .ToList();
-        var exportOrderByIndex = exportIndices
-            .Select((index, order) => new { index, order = order + 1 })
-            .ToDictionary(x => x.index, x => x.order);
+        var exportOrderByIndex = BuildMapContextVariantOrderMap(asset, exportIndices);
 
         var rewritten = new List<StudioModListTargetDto>(targets.Count);
         foreach (var target in targets)
@@ -5982,13 +5996,225 @@ internal sealed class StudioRuntime
                 continue;
             }
 
-            var objectName = asset.Exports[exportIndex.Value].ObjectName?.ToString() ?? $"export_{exportIndex.Value}";
-            var entityLabel = ResolveMapEntityLabel(objectName);
-            var variantOrder = exportOrderByIndex.TryGetValue(exportIndex.Value, out var order) ? order : exportIndex.Value + 1;
+            var rootExportIndex = ResolveMapContextRootExportIndex(asset, exportIndex.Value);
+            var entityLabel = ResolveMapExportContextLabel(asset, rootExportIndex);
+            var variantOrder = exportOrderByIndex.TryGetValue(rootExportIndex, out var order) ? order : rootExportIndex + 1;
             rewritten.Add(target with { Label = $"{entityLabel} #{variantOrder} / {target.Label}" });
         }
 
         return rewritten;
+    }
+
+    private static List<StudioModFieldDto> PrioritizeMapFields(List<StudioModFieldDto> fields)
+    {
+        if (fields.Count <= 1)
+        {
+            return fields;
+        }
+
+        return fields
+            .OrderByDescending(field => ScoreMapField(field.Label))
+            .ThenBy(field => field.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(field => field.FieldPath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static List<StudioModListTargetDto> PrioritizeMapListTargets(List<StudioModListTargetDto> targets)
+    {
+        if (targets.Count <= 1)
+        {
+            return targets;
+        }
+
+        return targets
+            .OrderByDescending(target => ScoreMapField(target.Label))
+            .ThenBy(target => target.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(target => target.TargetPath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static int ScoreMapField(string? rawLabel)
+    {
+        var label = (rawLabel ?? string.Empty).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return 0;
+        }
+
+        var score = 0;
+        var highValueTokens = new[]
+        {
+            "маршрут", "patrol", "waypoint", "точка маршрута робота",
+            "робот", "sentry", "guard", "охраня",
+            "торгов", "trader", "npc", "quest giver", "квест",
+            "транспорт", "vehicle", "точка на карте", "поворот точки",
+            "точка появления npc", "где появляются купленные товары", "где появляется запас торговца"
+        };
+        if (highValueTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
+        {
+            score += 500;
+        }
+
+        var mediumTokens = new[]
+        {
+            "точки спавна", "spawn transform", "метки торговца", "координаты", "класс сидячего npc",
+            "активность сидячего npc", "дистанция активности сидячего npc",
+            "проверять позицию спавна лучом", "пресеты транспорта", "варианты транспорта"
+        };
+        if (mediumTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
+        {
+            score += 220;
+        }
+
+        if (label.Contains("маршрут робота", StringComparison.Ordinal)
+            || label.Contains("точка маршрута робота", StringComparison.Ordinal))
+        {
+            score += 240;
+        }
+
+        if (label.Contains("brush component", StringComparison.Ordinal)
+            || label.Contains("scene component", StringComparison.Ordinal)
+            || label.Contains("default scene root", StringComparison.Ordinal))
+        {
+            score -= 180;
+        }
+
+        if (label.Contains("метки торговца", StringComparison.Ordinal)
+            && label.Contains("масштаб", StringComparison.Ordinal))
+        {
+            score -= 260;
+        }
+
+        if (label.Contains(" / spawner / ", StringComparison.Ordinal)
+            || label.Contains(" spawner / ", StringComparison.Ordinal))
+        {
+            score -= 180;
+        }
+
+        var lowValueTokens = new[]
+        {
+            "always spawn", "probability", "use item zone", "use item rarity", "use item spawn group",
+            "начальный damage", "randomize damage", "начальный dirtiness", "randomize dirtiness",
+            "ammo count", "stack amount", "начальный расход за крафт", "randomize расход за крафт",
+            "пресеты лута"
+        };
+        if (lowValueTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
+        {
+            score -= 320;
+        }
+
+        return score;
+    }
+
+    private static string ResolveMapExportContextLabel(UAsset asset, int exportIndex)
+    {
+        var rootExportIndex = ResolveMapContextRootExportIndex(asset, exportIndex);
+        if (rootExportIndex < 0 || rootExportIndex >= asset.Exports.Count)
+        {
+            return "Точка карты";
+        }
+
+        var currentIndex = rootExportIndex;
+        for (var guard = 0; guard < 8 && currentIndex >= 0 && currentIndex < asset.Exports.Count; guard++)
+        {
+            var export = asset.Exports[currentIndex];
+            var objectName = export.ObjectName?.ToString() ?? $"export_{currentIndex}";
+            var candidate = ResolveMapEntityLabel(objectName);
+            if (!IsGenericMapEntityName(objectName))
+            {
+                return candidate;
+            }
+
+            if (export.OuterIndex.Index <= 0)
+            {
+                return candidate;
+            }
+
+            currentIndex = export.OuterIndex.Index - 1;
+        }
+
+        var fallbackName = asset.Exports[rootExportIndex].ObjectName?.ToString() ?? $"export_{rootExportIndex}";
+        return ResolveMapEntityLabel(fallbackName);
+    }
+
+    private static Dictionary<int, int> BuildMapContextVariantOrderMap(UAsset asset, IEnumerable<int> exportIndices)
+    {
+        var result = new Dictionary<int, int>();
+        var groups = exportIndices
+            .Distinct()
+            .Select(index => new
+            {
+                Index = index,
+                Label = ResolveMapExportContextLabel(asset, index)
+            })
+            .GroupBy(item => item.Label, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in groups)
+        {
+            var ordered = group
+                .OrderBy(item => item.Index)
+                .ToList();
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                result[ordered[i].Index] = i + 1;
+            }
+        }
+
+        return result;
+    }
+
+    private static int ResolveMapContextRootExportIndex(UAsset asset, int exportIndex)
+    {
+        if (exportIndex < 0 || exportIndex >= asset.Exports.Count)
+        {
+            return exportIndex;
+        }
+
+        var currentIndex = exportIndex;
+        for (var guard = 0; guard < 8 && currentIndex >= 0 && currentIndex < asset.Exports.Count; guard++)
+        {
+            var export = asset.Exports[currentIndex];
+            var objectName = export.ObjectName?.ToString() ?? $"export_{currentIndex}";
+            if (!IsGenericMapEntityName(objectName))
+            {
+                return currentIndex;
+            }
+
+            if (export.OuterIndex.Index <= 0)
+            {
+                return currentIndex;
+            }
+
+            currentIndex = export.OuterIndex.Index - 1;
+        }
+
+        return exportIndex;
+    }
+
+    private static bool IsGenericMapEntityName(string rawObjectName)
+    {
+        var key = NormalizeAssetKey(rawObjectName);
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return true;
+        }
+
+        var genericTokens = new[]
+        {
+            "brushcomponent",
+            "scenecomponent",
+            "rootcomponent",
+            "defaultsceneroot",
+            "staticmeshcomponent",
+            "instancedstaticmeshcomponent",
+            "hierarchicalinstancedstaticmeshcomponent",
+            "boxcomponent",
+            "arrowcomponent",
+            "billboardcomponent",
+            "childactorcomponent"
+        };
+
+        return genericTokens.Any(token => key.Contains(token, StringComparison.Ordinal));
     }
 
     private static string ResolveMapEntityLabel(string objectName)
@@ -6008,6 +6234,36 @@ internal sealed class StudioRuntime
         if (normalized.Contains("vehiclespawnbox", StringComparison.Ordinal))
         {
             return "Точка спавна транспорта";
+        }
+
+        if (normalized.Contains("vehiclespawner", StringComparison.Ordinal))
+        {
+            return "Спавнер транспорта";
+        }
+
+        if (normalized.Contains("sentryspawner", StringComparison.Ordinal))
+        {
+            return "Спавнер робота";
+        }
+
+        if (normalized.Contains("guardedzonemanager", StringComparison.Ordinal))
+        {
+            return "Менеджер охраняемой зоны";
+        }
+
+        if (normalized.Contains("guardvolume", StringComparison.Ordinal))
+        {
+            return "Охраняемая зона";
+        }
+
+        if (normalized.Contains("splinezone", StringComparison.Ordinal))
+        {
+            return "Сплайн-зона";
+        }
+
+        if (normalized.Contains("splinecomponent", StringComparison.Ordinal))
+        {
+            return "Линия маршрута";
         }
 
         if (normalized.Contains("itemspawnergroup", StringComparison.Ordinal))
@@ -9403,6 +9659,133 @@ internal sealed class StudioRuntime
         }
     }
 
+    private static bool TryCollectSpecialStructFields(
+        UAsset asset,
+        StructPropertyData structProperty,
+        string fieldPath,
+        string label,
+        string relativePath,
+        List<StudioModFieldDto> output,
+        List<StudioModListTargetDto> listTargets,
+        int depth)
+    {
+        var structType = structProperty.StructType?.ToString() ?? string.Empty;
+        if (structType.Equals("Transform", StringComparison.OrdinalIgnoreCase))
+        {
+            for (var i = 0; i < structProperty.Value.Count; i++)
+            {
+                if (structProperty.Value[i] is not StructPropertyData childStruct)
+                {
+                    continue;
+                }
+
+                var childName = GetReadablePropertyName(childStruct, i);
+                if (!TryUnwrapSingleMathStructProperty(childStruct, out var innerIndex, out var innerProperty))
+                {
+                    continue;
+                }
+
+                if (childName.Equals("Translation", StringComparison.OrdinalIgnoreCase))
+                {
+                    CollectUassetFields(
+                        asset,
+                        innerProperty,
+                        $"{fieldPath}/p:{i}/p:{innerIndex}",
+                        $"{label}.Translation",
+                        relativePath,
+                        output,
+                        listTargets,
+                        depth + 1);
+                }
+                else if (childName.Equals("Scale3D", StringComparison.OrdinalIgnoreCase))
+                {
+                    CollectUassetFields(
+                        asset,
+                        innerProperty,
+                        $"{fieldPath}/p:{i}/p:{innerIndex}",
+                        $"{label}.Scale3D",
+                        relativePath,
+                        output,
+                        listTargets,
+                        depth + 1);
+                }
+            }
+
+            return true;
+        }
+
+        if (TryUnwrapSingleMathStructProperty(structProperty, out var mathChildIndex, out var mathChild))
+        {
+            CollectUassetFields(
+                asset,
+                mathChild,
+                $"{fieldPath}/p:{mathChildIndex}",
+                label,
+                relativePath,
+                output,
+                listTargets,
+                depth + 1);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryUnwrapSingleMathStructProperty(
+        StructPropertyData structProperty,
+        out int childIndex,
+        out PropertyData childProperty)
+    {
+        childIndex = -1;
+        childProperty = null!;
+        if (structProperty.Value.Count != 1)
+        {
+            return false;
+        }
+
+        var candidate = structProperty.Value[0];
+        if (candidate is not (VectorPropertyData or RotatorPropertyData))
+        {
+            return false;
+        }
+
+        childIndex = 0;
+        childProperty = candidate;
+        return true;
+    }
+
+    private static void AddVectorComponentFields(
+        List<StudioModFieldDto> output,
+        string relativePath,
+        string fieldPath,
+        string label,
+        FVector vector)
+    {
+        var x = vector.X.ToString(CultureInfo.InvariantCulture);
+        var y = vector.Y.ToString(CultureInfo.InvariantCulture);
+        var z = vector.Z.ToString(CultureInfo.InvariantCulture);
+
+        TryAddSafeField(output, relativePath, $"{fieldPath}{VectorComponentFieldTokenPrefix}x", $"{label}.X", "double", x, x);
+        TryAddSafeField(output, relativePath, $"{fieldPath}{VectorComponentFieldTokenPrefix}y", $"{label}.Y", "double", y, y);
+        TryAddSafeField(output, relativePath, $"{fieldPath}{VectorComponentFieldTokenPrefix}z", $"{label}.Z", "double", z, z);
+    }
+
+    private static void AddRotatorComponentFields(
+        List<StudioModFieldDto> output,
+        string relativePath,
+        string fieldPath,
+        string label,
+        FRotator rotator)
+    {
+        var pitch = rotator.Pitch.ToString(CultureInfo.InvariantCulture);
+        var yaw = rotator.Yaw.ToString(CultureInfo.InvariantCulture);
+        var roll = rotator.Roll.ToString(CultureInfo.InvariantCulture);
+
+        TryAddSafeField(output, relativePath, $"{fieldPath}{RotatorComponentFieldTokenPrefix}pitch", $"{label}.Pitch", "double", pitch, pitch);
+        TryAddSafeField(output, relativePath, $"{fieldPath}{RotatorComponentFieldTokenPrefix}yaw", $"{label}.Yaw", "double", yaw, yaw);
+        TryAddSafeField(output, relativePath, $"{fieldPath}{RotatorComponentFieldTokenPrefix}roll", $"{label}.Roll", "double", roll, roll);
+    }
+
     private static void CollectUassetFields(
         UAsset asset,
         PropertyData property,
@@ -9418,6 +9801,18 @@ internal sealed class StudioRuntime
             return;
         }
 
+        if (property is VectorPropertyData vectorProperty)
+        {
+            AddVectorComponentFields(output, relativePath, fieldPath, label, vectorProperty.Value);
+            return;
+        }
+
+        if (property is RotatorPropertyData rotatorProperty)
+        {
+            AddRotatorComponentFields(output, relativePath, fieldPath, label, rotatorProperty.Value);
+            return;
+        }
+
         if (property is RichCurveKeyPropertyData richCurveKey)
         {
             AddRichCurveKeyFields(output, relativePath, fieldPath, label, richCurveKey);
@@ -9426,6 +9821,19 @@ internal sealed class StudioRuntime
 
         if (property is StructPropertyData structProperty)
         {
+            if (TryCollectSpecialStructFields(
+                    asset,
+                    structProperty,
+                    fieldPath,
+                    label,
+                    relativePath,
+                    output,
+                    listTargets,
+                    depth))
+            {
+                return;
+            }
+
             for (var i = 0; i < structProperty.Value.Count; i++)
             {
                 var child = structProperty.Value[i];
@@ -11223,25 +11631,42 @@ internal sealed class StudioRuntime
                 .Replace("relative location", "точка на карте", StringComparison.OrdinalIgnoreCase)
                 .Replace("relative rotation", "поворот точки", StringComparison.OrdinalIgnoreCase)
                 .Replace("relative scale 3 d", "масштаб зоны", StringComparison.OrdinalIgnoreCase)
+                .Replace("location relative to sentry", "точка маршрута робота", StringComparison.OrdinalIgnoreCase)
+                .Replace("spawn transform translation", "точка появления NPC", StringComparison.OrdinalIgnoreCase)
+                .Replace("depot spawn transform translation", "где появляется запас торговца", StringComparison.OrdinalIgnoreCase)
+                .Replace("purchased tradeables spawn transform translation", "где появляются купленные товары", StringComparison.OrdinalIgnoreCase)
                 .Replace("quest giver component", "компонент выдачи квестов", StringComparison.OrdinalIgnoreCase)
                 .Replace("npc interaction box", "зона взаимодействия с NPC", StringComparison.OrdinalIgnoreCase)
                 .Replace("npc interraction box", "зона взаимодействия с NPC", StringComparison.OrdinalIgnoreCase)
+                .Replace("sedentary npc class", "класс сидячего NPC", StringComparison.OrdinalIgnoreCase)
+                .Replace("trader personality", "профиль торговца", StringComparison.OrdinalIgnoreCase)
                 .Replace("vehicle spawn box", "точка спавна транспорта", StringComparison.OrdinalIgnoreCase)
                 .Replace("world item spawner", "спавнер мирового предмета", StringComparison.OrdinalIgnoreCase)
                 .Replace("item spawner", "спавнер предметов", StringComparison.OrdinalIgnoreCase)
                 .Replace("root component", "корневая точка", StringComparison.OrdinalIgnoreCase);
 
+            label = ReplaceSemanticLabelPart(label, "depot spawn transform", "точка появления запаса торговца");
+            label = ReplaceSemanticLabelPart(label, "purchased tradeables spawn transform", "точка выдачи купленных товаров");
+            label = ReplaceSemanticLabelPart(label, "spawn transform", "точка появления NPC");
+            label = ReplaceSemanticLabelPart(label, "depot появление transform", "точка появления запаса торговца");
+            label = ReplaceSemanticLabelPart(label, "purchased tradeables появление transform", "точка выдачи купленных товаров");
+            label = ReplaceSemanticLabelPart(label, "появление transform", "точка появления NPC");
             label = ReplaceSemanticLabelPart(label, "spawner markers", "точки спавна в группе");
             label = ReplaceSemanticLabelPart(label, "trader markers", "метки торговца");
+            label = ReplaceSemanticLabelPart(label, "patrol points", "маршрут робота");
             label = ReplaceSemanticLabelPart(label, "item classes", "пресеты лута");
             label = ReplaceSemanticLabelPart(label, "sedentary npc relevancy distance", "дистанция активности сидячего NPC");
             label = ReplaceSemanticLabelPart(label, "sedentary npc relevancy", "активность сидячего NPC");
             label = ReplaceSemanticLabelPart(label, "should raycast spawn position", "проверять позицию спавна лучом");
             label = ReplaceSemanticLabelPart(label, "allow cull distance volume", "разрешить отсечение по дистанции");
+            label = ReplaceSemanticLabelPart(label, "translation", "координаты");
+            label = ReplaceSemanticLabelPart(label, "scale 3 d", "масштаб");
             label = ReplaceSemanticLabelPart(label, "sentry", "робот");
             label = ReplaceSemanticLabelPart(label, "spawn", "спавн");
             label = ReplaceSemanticLabelPart(label, "waypoint", "точка маршрута");
             label = ReplaceSemanticLabelPart(label, "patrol", "патруль");
+            label = ReplaceSemanticLabelPart(label, "_sentry spawners", "спавнеры роботов");
+            label = ReplaceSemanticLabelPart(label, "hot zones buildings", "здания тревожной зоны");
 
             label = Regex.Replace(
                 label,
@@ -12787,12 +13212,37 @@ internal sealed class StudioRuntime
                 return false;
             }
 
+            if ((label.Contains(" / spawner / ", StringComparison.OrdinalIgnoreCase)
+                 || label.Contains(" spawner / ", StringComparison.OrdinalIgnoreCase))
+                && (label.Contains("always spawn", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("probability", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("use item zone", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("use item rarity", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("use item spawn group", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("ammo count", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("stack amount", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("damage", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("dirtiness", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("расход за крафт", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            if ((label.Contains("метки торговца", StringComparison.OrdinalIgnoreCase)
+                 || label.Contains("точка спавна транспорта", StringComparison.OrdinalIgnoreCase))
+                && (label.Contains("scale 3 d", StringComparison.OrdinalIgnoreCase)
+                    || label.Contains("масштаб", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
             var allowedMapTokens = new[]
             {
                 "робот", "sentry", "mech", "спавн", "spawn", "spawner", "маршрут", "waypoint", "patrol",
                 "точка", "координат", "поворот", "масштаб зоны", "радиус", "лимит",
                 "respawn", "перезапуск", "npc", "транспорт", "vehicle", "quest giver", "квест",
-                "trader", "торгов", "relevancy", "активность", "проверять позицию спавна лучом"
+                "trader", "торгов", "relevancy", "активность", "проверять позицию спавна лучом",
+                "профиль торговца", "класс сидячего npc", "точка появления npc", "точка маршрута робота"
             };
             var hasAllowedToken = allowedMapTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
             if (!hasAllowedToken)
@@ -13695,6 +14145,14 @@ internal sealed class StudioRuntime
                 return "Транспортные точки";
             }
 
+            if (label.Contains("торгов", StringComparison.Ordinal)
+                || label.Contains("trader", StringComparison.Ordinal)
+                || label.Contains("npc", StringComparison.Ordinal)
+                || label.Contains("квест", StringComparison.Ordinal))
+            {
+                return "NPC и торговцы";
+            }
+
             if (label.Contains("спавнер", StringComparison.Ordinal)
                 || label.Contains("spawner", StringComparison.Ordinal)
                 || label.Contains("лимит", StringComparison.Ordinal))
@@ -14557,6 +15015,31 @@ internal sealed class StudioRuntime
                 || label.Contains("дистанц", StringComparison.Ordinal))
             {
                 return "Размер или дальность действия этой зоны на карте.";
+            }
+
+            if (label.Contains("точка маршрута робота", StringComparison.Ordinal))
+            {
+                return "Смещение этой точки относительно спавнера робота. Изменение меняет маршрут обхода и позицию патруля.";
+            }
+
+            if (label.Contains("точка появления npc", StringComparison.Ordinal))
+            {
+                return "Где именно на карте появляется NPC или торговец для этой метки.";
+            }
+
+            if (label.Contains("где появляется запас торговца", StringComparison.Ordinal))
+            {
+                return "Где на локации появляется запас торговца или складская точка для этой метки.";
+            }
+
+            if (label.Contains("где появляются купленные товары", StringComparison.Ordinal))
+            {
+                return "Где на карте будут появляться товары, которые игрок покупает у торговца.";
+            }
+
+            if (label.Contains("класс сидячего npc", StringComparison.Ordinal))
+            {
+                return "Какой класс NPC должен использоваться для этой точки торговца или сидячего персонажа.";
             }
 
             if (label.Contains("лимит предметов в группе", StringComparison.Ordinal))
@@ -16217,6 +16700,15 @@ internal sealed class StudioRuntime
             return (visualPickerKind, visualPickerPrompt);
         }
 
+        if (IsMapGameplayAsset(relativePath)
+            && (label.Contains("класс сидячего npc", StringComparison.Ordinal)
+                || label.Contains("sedentary npc class", StringComparison.Ordinal)))
+        {
+            return (
+                "encounter-npc-class",
+                "Найди класс NPC, который должен использоваться для этой точки торговца или сидячего персонажа.");
+        }
+
         if (IsCargoDropContainerAsset(relativePath))
         {
             if (label.Contains("основные пресеты лута", StringComparison.Ordinal)
@@ -16907,6 +17399,12 @@ internal sealed class StudioRuntime
                 || label.Contains("spawner markers", StringComparison.Ordinal))
             {
                 return "Ключевые точки появления внутри группы спавна на карте. Можно добавлять новые точки по шаблону существующих.";
+            }
+
+            if (label.Contains("метки торговца", StringComparison.Ordinal)
+                || label.Contains("trader markers", StringComparison.Ordinal))
+            {
+                return "Точки появления торговца и его связанных зон. Можно клонировать готовую метку и затем отдельно настроить NPC, склад и точку выдачи покупок.";
             }
 
             if (label.Contains("пресеты лута", StringComparison.Ordinal)
@@ -22323,6 +22821,16 @@ internal sealed class StudioRuntime
                 continue;
             }
 
+            if (TryApplyMathComponentEdit(asset, edit, warnings, out var mathApplied))
+            {
+                if (mathApplied)
+                {
+                    applied++;
+                }
+
+                continue;
+            }
+
             if (!TryResolveUassetProperty(asset, edit.FieldPath, out var property))
             {
                 warnings.Add($"UAsset edit skipped: путь не найден {edit.FieldPath}");
@@ -22383,6 +22891,99 @@ internal sealed class StudioRuntime
         if (edit.FieldPath.StartsWith(AmmunitionSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
         {
             return TryApplyAmmunitionSyntheticFieldEdit(asset, edit, warnings, out applied);
+        }
+
+        return false;
+    }
+
+    private static bool TryApplyMathComponentEdit(
+        UAsset asset,
+        StudioFieldEditDto edit,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        if (string.IsNullOrWhiteSpace(edit.FieldPath))
+        {
+            return false;
+        }
+
+        var vectorMarkerIndex = edit.FieldPath.LastIndexOf(VectorComponentFieldTokenPrefix, StringComparison.OrdinalIgnoreCase);
+        if (vectorMarkerIndex >= 0)
+        {
+            var basePath = edit.FieldPath[..vectorMarkerIndex];
+            var component = edit.FieldPath[(vectorMarkerIndex + VectorComponentFieldTokenPrefix.Length)..].Trim();
+            if (!TryResolveUassetProperty(asset, basePath, out var property) || property is not VectorPropertyData vectorProperty)
+            {
+                warnings.Add($"UAsset edit skipped: вектор не найден {edit.FieldPath}");
+                return true;
+            }
+
+            if (!double.TryParse(edit.Value ?? string.Empty, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var nextValue))
+            {
+                warnings.Add($"UAsset edit skipped: {edit.FieldPath} (ожидается число)");
+                return true;
+            }
+
+            var current = vectorProperty.Value;
+            switch (component.ToLowerInvariant())
+            {
+                case "x":
+                    current.X = nextValue;
+                    break;
+                case "y":
+                    current.Y = nextValue;
+                    break;
+                case "z":
+                    current.Z = nextValue;
+                    break;
+                default:
+                    warnings.Add($"UAsset edit skipped: неизвестная ось вектора {edit.FieldPath}");
+                    return true;
+            }
+
+            vectorProperty.Value = current;
+            applied = true;
+            return true;
+        }
+
+        var rotatorMarkerIndex = edit.FieldPath.LastIndexOf(RotatorComponentFieldTokenPrefix, StringComparison.OrdinalIgnoreCase);
+        if (rotatorMarkerIndex >= 0)
+        {
+            var basePath = edit.FieldPath[..rotatorMarkerIndex];
+            var component = edit.FieldPath[(rotatorMarkerIndex + RotatorComponentFieldTokenPrefix.Length)..].Trim();
+            if (!TryResolveUassetProperty(asset, basePath, out var property) || property is not RotatorPropertyData rotatorProperty)
+            {
+                warnings.Add($"UAsset edit skipped: поворот не найден {edit.FieldPath}");
+                return true;
+            }
+
+            if (!double.TryParse(edit.Value ?? string.Empty, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var nextValue))
+            {
+                warnings.Add($"UAsset edit skipped: {edit.FieldPath} (ожидается число)");
+                return true;
+            }
+
+            var current = rotatorProperty.Value;
+            switch (component.ToLowerInvariant())
+            {
+                case "pitch":
+                    current.Pitch = nextValue;
+                    break;
+                case "yaw":
+                    current.Yaw = nextValue;
+                    break;
+                case "roll":
+                    current.Roll = nextValue;
+                    break;
+                default:
+                    warnings.Add($"UAsset edit skipped: неизвестный компонент поворота {edit.FieldPath}");
+                    return true;
+            }
+
+            rotatorProperty.Value = current;
+            applied = true;
+            return true;
         }
 
         return false;
