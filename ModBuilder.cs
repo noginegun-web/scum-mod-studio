@@ -106,6 +106,16 @@ internal sealed class ModBuilder
             throw new InvalidOperationException("После объединения нет файлов для сборки.");
         }
 
+        if (string.IsNullOrWhiteSpace(_unrealPakPath) || !File.Exists(_unrealPakPath))
+        {
+            throw new InvalidOperationException("UnrealPak.exe не найден. Добавь его в Engine\\Binaries\\Win64 внутри папки программы или собери релиз через publish_release.ps1.");
+        }
+
+        if (installToGame && (!_scum.IsAvailable || !Directory.Exists(_scum.PaksPath)))
+        {
+            throw new InvalidOperationException("SCUM не найдена, поэтому авто-установка мода в папку игры недоступна.");
+        }
+
         writeLog("Копирую выбранные изменения в staging...");
         foreach (var file in binaryMap.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
         {
@@ -131,18 +141,25 @@ internal sealed class ModBuilder
         var seededCompanions = 0;
         if (shouldSeedCompanions)
         {
-            writeLog("Строю/загружаю индекс ассетов игры...");
-            var pakIndex = PakIndexService.LoadOrBuild(_scum, _unrealPakPath, cryptoFile, writeLog);
-            seededCompanions = SeedCompanionFiles(
-                binaryMap.Keys.Concat(textMap.Keys),
-                pakIndex,
-                extractRoot,
-                stageRoot,
-                cryptoFile,
-                seedMissingCompanions,
-                forceCompanionStems,
-                skipCompanionStems,
-                warnings);
+            if (!_scum.IsAvailable || !Directory.Exists(_scum.PaksPath))
+            {
+                warnings.Add("SCUM не найдена: companion-файлы из игры не добавлены.");
+            }
+            else
+            {
+                writeLog("Строю/загружаю индекс ассетов игры...");
+                var pakIndex = PakIndexService.LoadOrBuild(_scum, _unrealPakPath, cryptoFile, writeLog);
+                seededCompanions = SeedCompanionFiles(
+                    binaryMap.Keys.Concat(textMap.Keys),
+                    pakIndex,
+                    extractRoot,
+                    stageRoot,
+                    cryptoFile,
+                    seedMissingCompanions,
+                    forceCompanionStems,
+                    skipCompanionStems,
+                    warnings);
+            }
         }
 
         var buildsModsRoot = Path.Combine(_runtimePaths.BuildsRoot, "mods");
@@ -247,10 +264,13 @@ internal sealed class ModBuilder
     {
         yield return buildsModsRoot;
 
-        var gameModsRoot = Path.Combine(_scum.PaksPath, "mods");
-        if (!string.Equals(gameModsRoot, buildsModsRoot, StringComparison.OrdinalIgnoreCase))
+        if (_scum.IsAvailable && Directory.Exists(_scum.PaksPath))
         {
-            yield return gameModsRoot;
+            var gameModsRoot = Path.Combine(_scum.PaksPath, "mods");
+            if (!string.Equals(gameModsRoot, buildsModsRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return gameModsRoot;
+            }
         }
     }
 

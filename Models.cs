@@ -11,7 +11,8 @@ internal sealed record ScumInstallation(
     string ExePath,
     string PaksPath,
     string? AppManifestPath,
-    string? BuildId);
+    string? BuildId,
+    bool IsAvailable = true);
 
 internal enum PresetRootMode
 {

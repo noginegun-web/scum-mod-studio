@@ -131,6 +131,39 @@
         </div>
       </details>
 
+      <div id="sceneEditorPanel" class="panel-sub scene-editor-panel" hidden>
+        <div class="panel-sub-title">Карта и точки</div>
+        <div id="sceneEditorHint" class="small muted"></div>
+        <div id="sceneEditorMeta" class="muted small"></div>
+        <div class="scene-toolbar">
+          <label>Показывать
+            <select id="sceneTypeFilter">
+              <option value="all" selected>Все точки</option>
+              <option value="trader">Только торговцев</option>
+              <option value="npc">Только NPC</option>
+              <option value="vehicle">Только транспорт</option>
+              <option value="route">Только маршруты роботов</option>
+            </select>
+          </label>
+          <label>Найти точку
+            <input id="sceneSearchInput" type="text" placeholder="механик, торговец, маршрут, выдача">
+          </label>
+          <label>Вид
+            <select id="sceneFocusMode">
+              <option value="all" selected>Вся сцена</option>
+              <option value="selected">Приблизить выбранную</option>
+            </select>
+          </label>
+        </div>
+        <div class="scene-editor-layout">
+          <div class="scene-viewport-wrap">
+            <svg id="sceneViewport" class="scene-viewport" viewBox="0 0 1000 620" aria-label="Сцена карты"></svg>
+            <div id="sceneViewportEmpty" class="scene-empty" hidden></div>
+          </div>
+          <div id="sceneSelection" class="scene-selection"></div>
+        </div>
+      </div>
+
       <div class="panel-sub">
         <div class="panel-sub-title">Что можно настроить</div>
         <div id="schemaSections" class="schema-sections"></div>

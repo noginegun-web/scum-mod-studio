@@ -18,6 +18,13 @@ const state = {
     currentFieldDisplayValues: new Map(),
     currentOriginalValues: new Map(),
     currentListEdits: [],
+    currentScene: null,
+    currentSceneSelectionId: "",
+    currentSceneDrag: null,
+    currentSceneFilterKind: "all",
+    currentSceneSearch: "",
+    currentSceneFocusMode: "all",
+    currentSceneNudgeStep: 25,
     stagedByAssetId: new Map(),
     showOnlyEditable: false,
     schemaFieldFilter: ""
@@ -25,6 +32,9 @@ const state = {
 };
 
 let modAssetSearchDebounce = 0;
+const SCENE_VIEWBOX_WIDTH = 1000;
+const SCENE_VIEWBOX_HEIGHT = 620;
+const SCENE_VIEWBOX_PADDING = 72;
 
 function el(id) {
   return document.getElementById(id);
@@ -72,6 +82,21 @@ function releaseNotesToPlainText(markdown) {
 function toIntSafe(value, fallback = 1) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function toNumberSafe(value, fallback = 0) {
+  const parsed = Number(String(value ?? "").replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function formatSceneFieldValue(value) {
+  const rounded = Math.round(toNumberSafe(value, 0) * 1000) / 1000;
+  return Number.isFinite(rounded) ? String(rounded) : "0";
+}
+
+function formatSceneNumber(value) {
+  const rounded = Math.round(toNumberSafe(value, 0) * 100) / 100;
+  return Number.isFinite(rounded) ? rounded.toLocaleString("ru-RU") : "0";
 }
 
 function timestampNow() {
@@ -230,6 +255,571 @@ function sectionPriority(name) {
 function schemaActionableTargets(schema) {
   const listTargets = Array.isArray(schema?.listTargets) ? schema.listTargets : [];
   return listTargets.filter((target) => target.supportsAddReference && target.referencePickerKind);
+}
+
+function cssEscapeValue(value) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(String(value));
+  }
+
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
+}
+
+function findFieldInputElement(fieldPath) {
+  if (!fieldPath) {
+    return null;
+  }
+
+  return document.querySelector(`[data-field-path="${cssEscapeValue(fieldPath)}"]`);
+}
+
+function syncFieldInputElement(fieldPath, value) {
+  const input = findFieldInputElement(fieldPath);
+  if (!input || document.activeElement === input) {
+    return;
+  }
+
+  if (input instanceof HTMLInputElement && input.type === "checkbox") {
+    input.checked = String(value).toLowerCase() === "true";
+    return;
+  }
+
+  if ("value" in input && String(input.value) !== String(value)) {
+    input.value = String(value);
+  }
+}
+
+function sceneUsesFieldPath(fieldPath) {
+  const scene = state.modding.currentScene;
+  return Boolean(fieldPath && scene?.fieldPaths instanceof Set && scene.fieldPaths.has(fieldPath));
+}
+
+function setCurrentFieldValue(fieldPath, value, options = {}) {
+  const nextValue = String(value ?? "");
+  state.modding.currentFieldValues.set(fieldPath, nextValue);
+
+  if (Object.prototype.hasOwnProperty.call(options, "displayValue")) {
+    state.modding.currentFieldDisplayValues.set(fieldPath, options.displayValue);
+  }
+
+  if (options.syncDom !== false) {
+    syncFieldInputElement(fieldPath, nextValue);
+  }
+
+  if (options.renderScene !== false && sceneUsesFieldPath(fieldPath)) {
+    renderSceneEditor();
+  }
+}
+
+function attachFieldInputMeta(input, field) {
+  if (input && field?.fieldPath && typeof input.setAttribute === "function") {
+    input.setAttribute("data-field-path", field.fieldPath);
+  }
+
+  return input;
+}
+
+function isMapSchema(schema) {
+  const relativePath = String(schema?.relativePath || state.modding.selectedAsset?.relativePath || "").trim().toLowerCase();
+  return relativePath.endsWith(".umap");
+}
+
+function parseSceneFieldComponent(field) {
+  const path = String(field?.fieldPath || "").trim();
+  let match = path.match(/^(.*)\/vc:(x|y|z)$/i);
+  if (match) {
+    return {
+      kind: "vector",
+      basePath: match[1],
+      component: match[2].toLowerCase()
+    };
+  }
+
+  match = path.match(/^(.*)\/rc:(pitch|yaw|roll)$/i);
+  if (match) {
+    return {
+      kind: "rotator",
+      basePath: match[1],
+      component: match[2].toLowerCase()
+    };
+  }
+
+  return null;
+}
+
+function stripSceneComponentLabel(label) {
+  return String(label || "")
+    .trim()
+    .replace(/\s*(?:\.|\/)\s*(x|y|z|pitch|yaw|roll)$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getSceneGroupParentPath(basePath) {
+  const idx = String(basePath || "").lastIndexOf("/");
+  return idx > 0 ? basePath.slice(0, idx) : String(basePath || "");
+}
+
+function isSupportedScenePositionLabel(label) {
+  const text = String(label || "").toLowerCase();
+  if (!text || text.includes("масштаб")) {
+    return false;
+  }
+
+  return text.includes("точка на карте")
+    || text.includes("координаты")
+    || text.includes("точка маршрута")
+    || text.includes("точка появления")
+    || text.includes("где появляется")
+    || text.includes("где появляются")
+    || text.includes("метки торговца")
+    || text.includes("спавна транспорта")
+    || text.includes("зона взаимодействия")
+    || text.includes("корневая точка");
+}
+
+function isSupportedSceneRotationLabel(label) {
+  const text = String(label || "").toLowerCase();
+  return text.includes("поворот точки") || text.includes("rotation");
+}
+
+function classifySceneNodeKind(label) {
+  const text = String(label || "").toLowerCase();
+  if (text.includes("маршрут робота") || text.includes("точка маршрута")) {
+    return "route";
+  }
+
+  if (text.includes("спавна транспорта")) {
+    return "vehicle";
+  }
+
+  if (text.includes("точка появления npc")) {
+    return "npc";
+  }
+
+  if (text.includes("запаса торговца")) {
+    return "trader-depot";
+  }
+
+  if (text.includes("купленных товаров")) {
+    return "trader-pickup";
+  }
+
+  if (text.includes("метки торговца") || text.includes("торговца")) {
+    return "trader";
+  }
+
+  if (text.includes("взаимодействия")) {
+    return "interaction";
+  }
+
+  if (text.includes("квест")) {
+    return "quest";
+  }
+
+  if (text.includes("робот")) {
+    return "sentry";
+  }
+
+  return "point";
+}
+
+function sceneKindTitle(kind) {
+  return {
+    route: "Маршрут робота",
+    vehicle: "Точка транспорта",
+    npc: "Точка NPC",
+    "trader-depot": "Запас торговца",
+    "trader-pickup": "Выдача покупок",
+    trader: "Точка торговца",
+    interaction: "Зона NPC",
+    quest: "Квестовая точка",
+    sentry: "Точка робота",
+    point: "Точка на карте"
+  }[kind] || "Точка на карте";
+}
+
+function sceneKindColor(kind) {
+  return {
+    route: "#ffd166",
+    vehicle: "#ff8b6b",
+    npc: "#7ee787",
+    "trader-depot": "#eebd5c",
+    "trader-pickup": "#9fd8ff",
+    trader: "#66c5ff",
+    interaction: "#c792ea",
+    quest: "#89ddff",
+    sentry: "#ff6b6b",
+    point: "#d8e6f7"
+  }[kind] || "#d8e6f7";
+}
+
+function sceneKindBadge(kind) {
+  return {
+    route: "М",
+    vehicle: "ТС",
+    npc: "NPC",
+    "trader-depot": "СК",
+    "trader-pickup": "ВЫ",
+    trader: "ТР",
+    interaction: "ЗН",
+    quest: "КВ",
+    sentry: "РБ",
+    point: "•"
+  }[kind] || "•";
+}
+
+function simplifySceneOwnerName(owner, kind) {
+  const text = String(owner || "").trim();
+  if (!text) {
+    return sceneKindTitle(kind);
+  }
+
+  if (/зона взаимодействия npc/i.test(text)) {
+    const number = text.match(/#\s*(\d+)/i)?.[1];
+    return number ? `Точка NPC #${number}` : "Точка NPC";
+  }
+
+  if (/спавнер транспорта/i.test(text)) {
+    const number = text.match(/#\s*(\d+)/i)?.[1];
+    return number ? `Транспорт #${number}` : "Транспорт";
+  }
+
+  if (/торговец/i.test(text)) {
+    return text
+      .replace(/торговец-рыбак/ig, "Торговец-рыбак")
+      .replace(/sedentary/ig, "")
+      .trim();
+  }
+
+  if (/робот/i.test(text)) {
+    return text;
+  }
+
+  return text;
+}
+
+function buildSceneFriendlyName(node) {
+  const parts = String(node?.label || "")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const owner = simplifySceneOwnerName(parts[0] || "", node.kind);
+
+  switch (node.kind) {
+    case "trader-pickup":
+      return `${owner} / выдача покупок`;
+    case "trader-depot":
+      return `${owner} / место запаса`;
+    case "npc":
+      return `${owner} / место появления`;
+    case "vehicle":
+      return `${owner} / место транспорта`;
+    case "route":
+      return node.routeOrder
+        ? `${owner} / точка маршрута ${node.routeOrder}`
+        : `${owner} / точка маршрута`;
+    case "interaction":
+      return `${owner} / зона общения`;
+    default:
+      return parts.slice(0, 2).join(" / ") || owner;
+  }
+}
+
+function describeSceneNodeUsage(node) {
+  switch (node.kind) {
+    case "trader-pickup":
+      return "Куда у этого торговца будут падать купленные вещи.";
+    case "trader-depot":
+      return "Где стоит запас или склад этой торговой точки.";
+    case "npc":
+      return "Где именно появляется NPC или продавец на этой точке.";
+    case "vehicle":
+      return "Где стоит техника или транспортная точка на карте.";
+    case "route":
+      return "Одна из точек обхода робота. Порядок маршрута можно видеть по номеру на карте.";
+    case "interaction":
+      return "Точка и зона, через которую игрок подходит к NPC и открывает взаимодействие.";
+    default:
+      return "Игровая точка на карте, которую можно безопасно передвинуть в пределах поддерживаемой сцены.";
+  }
+}
+
+function extractSceneRouteGroupKey(label) {
+  const raw = String(label || "").trim();
+  const direct = raw.match(/^(.*?маршрут робота\s*\d+)/i);
+  if (direct) {
+    return direct[1].trim();
+  }
+
+  const fallback = raw.match(/^(.*?)(?:\s*\/\s*точка маршрута.*)$/i);
+  return fallback ? fallback[1].trim() : "";
+}
+
+function computeSceneBounds(nodes) {
+  if (!nodes.length) {
+    return {
+      minX: -500,
+      maxX: 500,
+      minY: -500,
+      maxY: 500
+    };
+  }
+
+  let minX = nodes[0].x;
+  let maxX = nodes[0].x;
+  let minY = nodes[0].y;
+  let maxY = nodes[0].y;
+  for (const node of nodes) {
+    minX = Math.min(minX, node.x);
+    maxX = Math.max(maxX, node.x);
+    minY = Math.min(minY, node.y);
+    maxY = Math.max(maxY, node.y);
+  }
+
+  const spanX = Math.max(300, maxX - minX);
+  const spanY = Math.max(300, maxY - minY);
+  const pad = Math.max(140, Math.max(spanX, spanY) * 0.18);
+  return {
+    minX: minX - pad,
+    maxX: maxX + pad,
+    minY: minY - pad,
+    maxY: maxY + pad
+  };
+}
+
+function computeSceneProjection(bounds) {
+  const worldWidth = Math.max(1, bounds.maxX - bounds.minX);
+  const worldHeight = Math.max(1, bounds.maxY - bounds.minY);
+  const scale = Math.min(
+    (SCENE_VIEWBOX_WIDTH - SCENE_VIEWBOX_PADDING * 2) / worldWidth,
+    (SCENE_VIEWBOX_HEIGHT - SCENE_VIEWBOX_PADDING * 2) / worldHeight
+  );
+  const contentWidth = worldWidth * scale;
+  const contentHeight = worldHeight * scale;
+  return {
+    scale,
+    offsetX: (SCENE_VIEWBOX_WIDTH - contentWidth) / 2,
+    offsetY: (SCENE_VIEWBOX_HEIGHT - contentHeight) / 2
+  };
+}
+
+function projectScenePoint(scene, x, y) {
+  const bounds = scene.bounds;
+  const projection = scene.projection;
+  return {
+    x: projection.offsetX + (x - bounds.minX) * projection.scale,
+    y: SCENE_VIEWBOX_HEIGHT - (projection.offsetY + (y - bounds.minY) * projection.scale)
+  };
+}
+
+function sceneNodeMatchesKindFilter(node, filterKind) {
+  if (!filterKind || filterKind === "all") {
+    return true;
+  }
+
+  if (filterKind === "trader") {
+    return node.kind === "trader" || node.kind === "trader-depot" || node.kind === "trader-pickup";
+  }
+
+  return node.kind === filterKind;
+}
+
+function sceneNodeMatchesSearch(node, searchTerm) {
+  const normalized = String(searchTerm || "").trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  const haystack = `${buildSceneFriendlyName(node)} ${node.label} ${sceneKindTitle(node.kind)}`.toLowerCase();
+  return normalized.split(/\s+/).every((chunk) => haystack.includes(chunk));
+}
+
+function getVisibleSceneNodes(scene) {
+  const filterKind = state.modding.currentSceneFilterKind;
+  const searchTerm = state.modding.currentSceneSearch;
+  return scene.nodes.filter((node) => sceneNodeMatchesKindFilter(node, filterKind) && sceneNodeMatchesSearch(node, searchTerm));
+}
+
+function computeSceneFocusBounds(visibleNodes, selectedNode) {
+  if (!visibleNodes.length) {
+    return computeSceneBounds([]);
+  }
+
+  if (state.modding.currentSceneFocusMode === "selected" && selectedNode) {
+    const radius = 260;
+    return {
+      minX: selectedNode.x - radius,
+      maxX: selectedNode.x + radius,
+      minY: selectedNode.y - radius,
+      maxY: selectedNode.y + radius
+    };
+  }
+
+  return computeSceneBounds(visibleNodes);
+}
+
+function scenePointerToWorld(svg, clientX, clientY, scene) {
+  const rect = svg.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return { x: 0, y: 0 };
+  }
+
+  const vx = ((clientX - rect.left) / rect.width) * SCENE_VIEWBOX_WIDTH;
+  const vy = ((clientY - rect.top) / rect.height) * SCENE_VIEWBOX_HEIGHT;
+  const worldX = scene.bounds.minX + ((vx - scene.projection.offsetX) / scene.projection.scale);
+  const worldY = scene.bounds.minY + (((SCENE_VIEWBOX_HEIGHT - vy) - scene.projection.offsetY) / scene.projection.scale);
+  return { x: worldX, y: worldY };
+}
+
+function svgElement(name, attrs = {}) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attrs)) {
+    node.setAttribute(key, String(value));
+  }
+  return node;
+}
+
+function buildSceneModel(schema) {
+  if (!isMapSchema(schema)) {
+    return null;
+  }
+
+  const vectorGroups = new Map();
+  const rotationGroups = new Map();
+  const fields = Array.isArray(schema?.fields) ? schema.fields : [];
+  const fieldPaths = new Set();
+
+  fields.forEach((field, index) => {
+    const componentInfo = parseSceneFieldComponent(field);
+    if (!componentInfo) {
+      return;
+    }
+
+    const groupMap = componentInfo.kind === "vector" ? vectorGroups : rotationGroups;
+    if (!groupMap.has(componentInfo.basePath)) {
+      groupMap.set(componentInfo.basePath, {
+        basePath: componentInfo.basePath,
+        parentPath: getSceneGroupParentPath(componentInfo.basePath),
+        label: stripSceneComponentLabel(field.label),
+        order: index,
+        componentFieldPaths: {},
+        componentEditable: {},
+        componentValues: {}
+      });
+    }
+
+    const group = groupMap.get(componentInfo.basePath);
+    group.label = stripSceneComponentLabel(field.label) || group.label;
+    group.componentFieldPaths[componentInfo.component] = field.fieldPath;
+    group.componentEditable[componentInfo.component] = field.editable !== false;
+    group.componentValues[componentInfo.component] = toNumberSafe(
+      state.modding.currentFieldValues.get(field.fieldPath) ?? field.currentValue,
+      0
+    );
+    fieldPaths.add(field.fieldPath);
+  });
+
+  const rotationsByParent = new Map();
+  for (const rotation of rotationGroups.values()) {
+    if (!isSupportedSceneRotationLabel(rotation.label)) {
+      continue;
+    }
+
+    if (!rotationsByParent.has(rotation.parentPath)) {
+      rotationsByParent.set(rotation.parentPath, []);
+    }
+
+    rotationsByParent.get(rotation.parentPath).push(rotation);
+  }
+
+  const nodes = [];
+  for (const group of vectorGroups.values()) {
+    if (!isSupportedScenePositionLabel(group.label)) {
+      continue;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(group.componentValues, "x")
+      || !Object.prototype.hasOwnProperty.call(group.componentValues, "y")) {
+      continue;
+    }
+
+    const rotationCandidates = rotationsByParent.get(group.parentPath) || [];
+    const rotation = rotationCandidates
+      .slice()
+      .sort((a, b) => Math.abs(a.order - group.order) - Math.abs(b.order - group.order))[0] || null;
+
+    const label = group.label;
+    const kind = classifySceneNodeKind(label);
+    nodes.push({
+      id: group.basePath,
+      label,
+      kind,
+      color: sceneKindColor(kind),
+      badge: sceneKindBadge(kind),
+      order: group.order,
+      routeGroupKey: kind === "route" ? extractSceneRouteGroupKey(label) : "",
+      x: group.componentValues.x,
+      y: group.componentValues.y,
+      z: group.componentValues.z ?? 0,
+      pitch: rotation?.componentValues?.pitch ?? 0,
+      yaw: rotation?.componentValues?.yaw ?? 0,
+      roll: rotation?.componentValues?.roll ?? 0,
+      editable: group.componentEditable.x !== false && group.componentEditable.y !== false,
+      fieldPaths: {
+        x: group.componentFieldPaths.x || "",
+        y: group.componentFieldPaths.y || "",
+        z: group.componentFieldPaths.z || ""
+      },
+      rotationFieldPaths: {
+        pitch: rotation?.componentFieldPaths?.pitch || "",
+        yaw: rotation?.componentFieldPaths?.yaw || "",
+        roll: rotation?.componentFieldPaths?.roll || ""
+      }
+    });
+  }
+
+  nodes.sort((a, b) => a.order - b.order);
+
+  const links = [];
+  const routeGroups = new Map();
+  nodes.forEach((node) => {
+    if (!node.routeGroupKey) {
+      return;
+    }
+
+    if (!routeGroups.has(node.routeGroupKey)) {
+      routeGroups.set(node.routeGroupKey, []);
+    }
+
+    routeGroups.get(node.routeGroupKey).push(node);
+  });
+
+  for (const routeNodes of routeGroups.values()) {
+    routeNodes.sort((a, b) => a.order - b.order);
+    routeNodes.forEach((node, index) => {
+      node.badge = String(index + 1);
+      node.routeOrder = index + 1;
+      if (index > 0) {
+        links.push({
+          fromId: routeNodes[index - 1].id,
+          toId: node.id
+        });
+      }
+    });
+  }
+
+  const view = state.modding.currentSceneDrag?.view || null;
+  const bounds = view?.bounds || computeSceneBounds(nodes);
+  return {
+    nodes,
+    links,
+    fieldPaths,
+    bounds,
+    projection: view?.projection || computeSceneProjection(bounds)
+  };
 }
 
 function getReferencePickerBaseName(pickerKind) {
@@ -781,8 +1371,24 @@ async function fetchReferenceOptions(pickerKind, term, limit = 12) {
 async function loadStatus() {
   const status = await api("/api/status");
   state.status = status;
+  renderStatusLine(status.features?.length || 0);
+}
+
+function renderStatusLine(categoryCount = 0) {
+  if (!state.status) {
+    return;
+  }
+
+  const status = state.status;
+  const scumText = status.scumFound
+    ? status.scumRoot
+    : "не найдена";
+  const pakText = status.unrealPakFound
+    ? "UnrealPak готов"
+    : "UnrealPak не найден";
+  const buildText = status.buildId || "неизвестно";
   el("statusLine").textContent =
-    `SCUM: ${status.scumRoot} | Сборка игры: ${status.buildId || "неизвестно"} | Категорий: ${status.features?.length || 0}`;
+    `SCUM: ${scumText} | Сборка игры: ${buildText} | ${pakText} | Разделов в студии: ${categoryCount}`;
 }
 
 function renderAppUpdateBanner() {
@@ -948,8 +1554,7 @@ async function loadModdingCategories() {
   const categories = await api("/api/modding/categories");
   state.modding.categories = Array.isArray(categories) ? categories : [];
   if (state.status) {
-    el("statusLine").textContent =
-      `SCUM: ${state.status.scumRoot} | Сборка игры: ${state.status.buildId || "неизвестно"} | Разделов в студии: ${state.modding.categories.length}`;
+    renderStatusLine(state.modding.categories.length);
   }
   if (!state.modding.selectedCategoryId) {
     if (state.modding.categories.some((x) => x.categoryId === "body-effects")) {
@@ -1152,6 +1757,12 @@ function clearSchemaView() {
   state.modding.currentFieldDisplayValues = new Map();
   state.modding.currentOriginalValues = new Map();
   state.modding.currentListEdits = [];
+  state.modding.currentScene = null;
+  state.modding.currentSceneSelectionId = "";
+  state.modding.currentSceneDrag = null;
+  state.modding.currentSceneFilterKind = "all";
+  state.modding.currentSceneSearch = "";
+  state.modding.currentSceneFocusMode = "all";
   state.modding.schemaFieldFilter = "";
   el("schemaAssetTitle").textContent = "Раздел не выбран";
   el("schemaAssetSummary").textContent = "";
@@ -1165,8 +1776,49 @@ function clearSchemaView() {
   if (el("schemaFilterMeta")) {
     el("schemaFilterMeta").textContent = "";
   }
+  if (el("sceneTypeFilter")) {
+    el("sceneTypeFilter").value = "all";
+  }
+  if (el("sceneSearchInput")) {
+    el("sceneSearchInput").value = "";
+  }
+  if (el("sceneFocusMode")) {
+    el("sceneFocusMode").value = "all";
+  }
   renderCurrentListOps();
+  renderSceneEditor();
   renderSelectedAssetPreview();
+}
+
+function clearScenePanelContent() {
+  state.modding.currentScene = null;
+  state.modding.currentSceneSelectionId = "";
+  state.modding.currentSceneDrag = null;
+  const panel = el("sceneEditorPanel");
+  const viewport = el("sceneViewport");
+  const selection = el("sceneSelection");
+  const empty = el("sceneViewportEmpty");
+  const hint = el("sceneEditorHint");
+  const meta = el("sceneEditorMeta");
+  if (panel) {
+    panel.hidden = true;
+  }
+  if (viewport) {
+    viewport.innerHTML = "";
+  }
+  if (selection) {
+    selection.innerHTML = "";
+  }
+  if (empty) {
+    empty.hidden = true;
+    empty.textContent = "";
+  }
+  if (hint) {
+    hint.textContent = "";
+  }
+  if (meta) {
+    meta.textContent = "";
+  }
 }
 
 function renderSchemaWarnings(warnings) {
@@ -1293,9 +1945,9 @@ function createFieldInput(field) {
     input.type = "checkbox";
     input.checked = String(currentValue).toLowerCase() === "true";
     input.addEventListener("change", () => {
-      state.modding.currentFieldValues.set(field.fieldPath, input.checked ? "true" : "false");
+      setCurrentFieldValue(field.fieldPath, input.checked ? "true" : "false");
     });
-    return applyFieldEditableState(field, input);
+    return applyFieldEditableState(field, attachFieldInputMeta(input, field));
   }
 
   if (field.editorKind === "number") {
@@ -1310,9 +1962,9 @@ function createFieldInput(field) {
     }
     input.value = currentValue;
     input.addEventListener("input", () => {
-      state.modding.currentFieldValues.set(field.fieldPath, input.value);
+      setCurrentFieldValue(field.fieldPath, input.value);
     });
-    return applyFieldEditableState(field, input);
+    return applyFieldEditableState(field, attachFieldInputMeta(input, field));
   }
 
   if (field.editorKind === "select" || Array.isArray(field.options)) {
@@ -1336,9 +1988,9 @@ function createFieldInput(field) {
 
     input.value = currentValue;
     input.addEventListener("change", () => {
-      state.modding.currentFieldValues.set(field.fieldPath, input.value);
+      setCurrentFieldValue(field.fieldPath, input.value);
     });
-    return applyFieldEditableState(field, input);
+    return applyFieldEditableState(field, attachFieldInputMeta(input, field));
   }
 
   if (field.editorKind === "item-picker") {
@@ -1393,7 +2045,7 @@ function createFieldInput(field) {
 
           row.addEventListener("click", () => {
             const softRef = buildItemClassRef(item);
-            state.modding.currentFieldValues.set(field.fieldPath, softRef);
+            setCurrentFieldValue(field.fieldPath, softRef, { renderScene: false });
             state.modding.currentFieldDisplayValues.set(field.fieldPath, item.itemName || referenceValueToReadableName(softRef));
             current.textContent = `Сейчас выбрано: ${item.itemName || softObjectToReadableName(softRef)}`;
             search.value = "";
@@ -1500,7 +2152,7 @@ function createFieldInput(field) {
           row.appendChild(text);
 
           row.addEventListener("click", () => {
-            state.modding.currentFieldValues.set(field.fieldPath, option.value);
+            setCurrentFieldValue(field.fieldPath, option.value, { renderScene: false });
             state.modding.currentFieldDisplayValues.set(field.fieldPath, option.label || referenceValueToReadableName(option.value));
             current.textContent = `Сейчас выбрано: ${option.label || referenceValueToReadableName(option.value)}`;
             search.value = "";
@@ -1539,9 +2191,9 @@ function createFieldInput(field) {
   input.type = "text";
   input.value = currentValue;
   input.addEventListener("input", () => {
-    state.modding.currentFieldValues.set(field.fieldPath, input.value);
+    setCurrentFieldValue(field.fieldPath, input.value);
   });
-  return applyFieldEditableState(field, input);
+  return applyFieldEditableState(field, attachFieldInputMeta(input, field));
 }
 
 function buildFieldRow(field) {
@@ -1795,6 +2447,493 @@ function appendFieldSections(host, fields) {
     section.appendChild(body);
     host.appendChild(section);
   });
+}
+
+function buildSceneLegend(nodes) {
+  const legend = document.createElement("div");
+  legend.className = "scene-legend";
+  const seen = new Set();
+  nodes.forEach((node) => {
+    if (seen.has(node.kind)) {
+      return;
+    }
+
+    seen.add(node.kind);
+    const chip = document.createElement("div");
+    chip.className = "scene-legend-chip";
+
+    const dot = document.createElement("span");
+    dot.className = "scene-legend-dot";
+    dot.style.setProperty("--scene-color", node.color);
+
+    const text = document.createElement("span");
+    text.textContent = sceneKindTitle(node.kind);
+    chip.append(dot, text);
+    legend.appendChild(chip);
+  });
+  return legend;
+}
+
+function nudgeSelectedSceneNode(dx, dy, dz = 0) {
+  const scene = state.modding.currentScene;
+  const selectedNode = scene?.nodes.find((node) => node.id === state.modding.currentSceneSelectionId) || null;
+  if (!selectedNode) {
+    return;
+  }
+
+  const step = Number(state.modding.currentSceneNudgeStep || 25);
+  if (dx && selectedNode.fieldPaths.x) {
+    setCurrentFieldValue(selectedNode.fieldPaths.x, formatSceneFieldValue(selectedNode.x + dx * step), { renderScene: false });
+  }
+  if (dy && selectedNode.fieldPaths.y) {
+    setCurrentFieldValue(selectedNode.fieldPaths.y, formatSceneFieldValue(selectedNode.y + dy * step), { renderScene: false });
+  }
+  if (dz && selectedNode.fieldPaths.z) {
+    setCurrentFieldValue(selectedNode.fieldPaths.z, formatSceneFieldValue(selectedNode.z + dz * step), { renderScene: false });
+  }
+
+  renderSceneEditor();
+}
+
+function renderSceneSelection(scene) {
+  const host = el("sceneSelection");
+  host.innerHTML = "";
+  const visibleNodes = Array.isArray(scene.visibleNodes) ? scene.visibleNodes : scene.nodes;
+  const selectionId = state.modding.currentSceneSelectionId;
+  const selectedNode = scene.nodes.find((node) => node.id === selectionId) || null;
+  if (!selectedNode) {
+    const empty = document.createElement("div");
+    empty.className = "scene-selection-empty";
+
+    const title = document.createElement("div");
+    title.className = "scene-selection-title";
+    title.textContent = "Выбери точку на сцене";
+
+    const note = document.createElement("div");
+    note.className = "scene-selection-note";
+    note.textContent = visibleNodes.length
+      ? "Сцена показывает только поддерживаемые игровые точки. Выбери нужную точку из списка ниже или кликни по ней прямо на карте."
+      : "По текущему фильтру или поиску ничего не найдено. Попробуй снять ограничение или ввести другое игровое слово.";
+
+    empty.append(title, note, buildSceneLegend(scene.nodes));
+    host.appendChild(empty);
+  } else {
+    const titleRow = document.createElement("div");
+    titleRow.className = "scene-selection-title-row";
+
+    const title = document.createElement("div");
+    title.className = "scene-selection-title";
+    title.textContent = buildSceneFriendlyName(selectedNode);
+
+    const badge = document.createElement("div");
+    badge.className = "scene-selection-badge";
+    badge.textContent = sceneKindTitle(selectedNode.kind);
+
+    titleRow.append(title, badge);
+    host.appendChild(titleRow);
+
+    const rawLabel = document.createElement("div");
+    rawLabel.className = "small muted";
+    rawLabel.textContent = selectedNode.label;
+    host.appendChild(rawLabel);
+
+    const hint = document.createElement("div");
+    hint.className = "scene-selection-note";
+    hint.textContent = selectedNode.editable
+      ? describeSceneNodeUsage(selectedNode)
+      : "Эта точка сейчас доступна только для просмотра. Состав системы можно менять ниже, а затем открыть новый результат.";
+    host.appendChild(hint);
+
+    const grid = document.createElement("div");
+    grid.className = "scene-selection-grid";
+
+    function appendNumberEditor(label, value, fieldPath) {
+      if (!fieldPath) {
+        return;
+      }
+
+      const row = document.createElement("label");
+      row.className = "scene-input-row";
+
+      const caption = document.createElement("span");
+      caption.textContent = label;
+
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "0.1";
+      input.value = formatSceneFieldValue(value);
+      input.addEventListener("change", () => {
+        setCurrentFieldValue(fieldPath, input.value);
+      });
+
+      row.append(caption, input);
+      grid.appendChild(row);
+    }
+
+    appendNumberEditor("X", selectedNode.x, selectedNode.fieldPaths.x);
+    appendNumberEditor("Y", selectedNode.y, selectedNode.fieldPaths.y);
+    appendNumberEditor("Z", selectedNode.z, selectedNode.fieldPaths.z);
+    appendNumberEditor("Yaw", selectedNode.yaw, selectedNode.rotationFieldPaths.yaw);
+    appendNumberEditor("Pitch", selectedNode.pitch, selectedNode.rotationFieldPaths.pitch);
+    appendNumberEditor("Roll", selectedNode.roll, selectedNode.rotationFieldPaths.roll);
+    host.appendChild(grid);
+
+    if (selectedNode.editable) {
+      const nudgeBox = document.createElement("div");
+      nudgeBox.className = "scene-nudge-box";
+
+      const nudgeTitle = document.createElement("div");
+      nudgeTitle.className = "scene-nudge-title";
+      nudgeTitle.textContent = "Точная подстройка";
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "scene-nudge-toolbar";
+
+      const stepLabel = document.createElement("label");
+      stepLabel.className = "scene-input-row";
+      const stepCaption = document.createElement("span");
+      stepCaption.textContent = "Шаг смещения";
+      const stepSelect = document.createElement("select");
+      [10, 25, 50, 100].forEach((value) => {
+        const option = document.createElement("option");
+        option.value = String(value);
+        option.textContent = `${value} ед.`;
+        if (value === Number(state.modding.currentSceneNudgeStep || 25)) {
+          option.selected = true;
+        }
+        stepSelect.appendChild(option);
+      });
+      stepSelect.addEventListener("change", () => {
+        state.modding.currentSceneNudgeStep = Number(stepSelect.value || 25);
+      });
+      stepLabel.append(stepCaption, stepSelect);
+      toolbar.appendChild(stepLabel);
+
+      const pad = document.createElement("div");
+      pad.className = "scene-nudge-pad";
+      [
+        [{ label: "↑", dx: 0, dy: 1 }],
+        [{ label: "←", dx: -1, dy: 0 }, { label: "→", dx: 1, dy: 0 }],
+        [{ label: "↓", dx: 0, dy: -1 }]
+      ].forEach((rowButtons) => {
+        const row = document.createElement("div");
+        row.className = "scene-nudge-row";
+        rowButtons.forEach((buttonConfig) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = buttonConfig.label;
+          button.addEventListener("click", () => nudgeSelectedSceneNode(buttonConfig.dx, buttonConfig.dy, 0));
+          row.appendChild(button);
+        });
+        pad.appendChild(row);
+      });
+
+      const zRow = document.createElement("div");
+      zRow.className = "scene-nudge-row";
+      const zDown = document.createElement("button");
+      zDown.type = "button";
+      zDown.textContent = "Z−";
+      zDown.addEventListener("click", () => nudgeSelectedSceneNode(0, 0, -1));
+      const zUp = document.createElement("button");
+      zUp.type = "button";
+      zUp.textContent = "Z+";
+      zUp.addEventListener("click", () => nudgeSelectedSceneNode(0, 0, 1));
+      zRow.append(zDown, zUp);
+      pad.appendChild(zRow);
+
+      nudgeBox.append(nudgeTitle, toolbar, pad);
+      host.appendChild(nudgeBox);
+    }
+  }
+
+  const listTitle = document.createElement("div");
+  listTitle.className = "scene-nudge-title";
+  listTitle.textContent = `Быстрый выбор точки (${visibleNodes.length})`;
+  host.appendChild(listTitle);
+
+  const list = document.createElement("div");
+  list.className = "scene-node-list";
+  visibleNodes.slice(0, 48).forEach((node) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "scene-node-item";
+    if (node.id === selectionId) {
+      item.classList.add("is-active");
+    }
+
+    const title = document.createElement("div");
+    title.className = "scene-node-item-title";
+    title.textContent = buildSceneFriendlyName(node);
+
+    const meta = document.createElement("div");
+    meta.className = "scene-node-item-meta";
+    meta.textContent = `${sceneKindTitle(node.kind)} · X ${formatSceneNumber(node.x)} · Y ${formatSceneNumber(node.y)}`;
+
+    item.append(title, meta);
+    item.addEventListener("click", () => {
+      state.modding.currentSceneSelectionId = node.id;
+      state.modding.currentSceneFocusMode = "selected";
+      if (el("sceneFocusMode")) {
+        el("sceneFocusMode").value = "selected";
+      }
+      renderSceneEditor();
+    });
+    list.appendChild(item);
+  });
+  host.appendChild(list);
+
+  if (visibleNodes.length > 48) {
+    const more = document.createElement("div");
+    more.className = "small muted";
+    more.textContent = "Показаны первые 48 точек. Чтобы сузить список, используй фильтр по типу или поиск выше.";
+    host.appendChild(more);
+  }
+}
+
+function renderSceneViewport(scene) {
+  const svg = el("sceneViewport");
+  svg.innerHTML = "";
+  svg.setAttribute("viewBox", `0 0 ${SCENE_VIEWBOX_WIDTH} ${SCENE_VIEWBOX_HEIGHT}`);
+
+  const bg = svgElement("rect", {
+    x: 0,
+    y: 0,
+    width: SCENE_VIEWBOX_WIDTH,
+    height: SCENE_VIEWBOX_HEIGHT,
+    fill: "transparent"
+  });
+  svg.appendChild(bg);
+
+  const gridGroup = svgElement("g");
+  for (let index = 0; index <= 10; index += 1) {
+    const x = (SCENE_VIEWBOX_WIDTH / 10) * index;
+    const y = (SCENE_VIEWBOX_HEIGHT / 10) * index;
+    gridGroup.appendChild(svgElement("line", {
+      x1: x,
+      y1: 0,
+      x2: x,
+      y2: SCENE_VIEWBOX_HEIGHT,
+      stroke: "#213244",
+      "stroke-width": 1
+    }));
+    gridGroup.appendChild(svgElement("line", {
+      x1: 0,
+      y1: y,
+      x2: SCENE_VIEWBOX_WIDTH,
+      y2: y,
+      stroke: "#213244",
+      "stroke-width": 1
+    }));
+  }
+  svg.appendChild(gridGroup);
+
+  const visibleNodes = Array.isArray(scene.visibleNodes) ? scene.visibleNodes : scene.nodes;
+  const visibleLinks = Array.isArray(scene.visibleLinks) ? scene.visibleLinks : scene.links;
+  const nodeById = new Map(scene.nodes.map((node) => [node.id, node]));
+  const linkGroup = svgElement("g");
+  visibleLinks.forEach((link) => {
+    const from = nodeById.get(link.fromId);
+    const to = nodeById.get(link.toId);
+    if (!from || !to) {
+      return;
+    }
+
+    const fromPoint = projectScenePoint(scene, from.x, from.y);
+    const toPoint = projectScenePoint(scene, to.x, to.y);
+    linkGroup.appendChild(svgElement("line", {
+      x1: fromPoint.x,
+      y1: fromPoint.y,
+      x2: toPoint.x,
+      y2: toPoint.y,
+      stroke: from.color,
+      "stroke-width": 3,
+      "stroke-linecap": "round",
+      opacity: 0.75
+    }));
+  });
+  svg.appendChild(linkGroup);
+
+  const selectedId = state.modding.currentSceneSelectionId;
+  visibleNodes.forEach((node) => {
+    const point = projectScenePoint(scene, node.x, node.y);
+    const group = svgElement("g", { cursor: node.editable ? "grab" : "default" });
+    const outerRadius = node.id === selectedId ? 15 : 11;
+    const innerRadius = node.id === selectedId ? 10 : 8;
+
+    const halo = svgElement("circle", {
+      cx: point.x,
+      cy: point.y,
+      r: outerRadius,
+      fill: node.id === selectedId ? `${node.color}22` : "#081019",
+      stroke: node.id === selectedId ? "#ffffff" : "#29415c",
+      "stroke-width": node.id === selectedId ? 2.2 : 1.3
+    });
+
+    const body = svgElement("circle", {
+      cx: point.x,
+      cy: point.y,
+      r: innerRadius,
+      fill: node.color,
+      stroke: "#08111a",
+      "stroke-width": 1.5
+    });
+
+    group.append(halo, body);
+
+    if (node.badge && node.badge !== "•") {
+      const text = svgElement("text", {
+        x: point.x,
+        y: point.y + 3.5,
+        "text-anchor": "middle",
+        "font-size": node.badge.length > 2 ? 8.5 : 10.5,
+        "font-family": "Segoe UI, Arial, sans-serif",
+        "font-weight": 700,
+        fill: "#071018"
+      });
+      text.textContent = node.badge;
+      group.appendChild(text);
+    }
+
+    const title = svgElement("title");
+    title.textContent = `${selectedId === node.id ? "Выбрано" : "Точка"}: ${buildSceneFriendlyName(node)}\nX: ${formatSceneNumber(node.x)} | Y: ${formatSceneNumber(node.y)} | Z: ${formatSceneNumber(node.z)}`;
+    group.appendChild(title);
+
+    group.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      state.modding.currentSceneSelectionId = node.id;
+      if (node.editable) {
+        const world = scenePointerToWorld(svg, event.clientX, event.clientY, scene);
+        state.modding.currentSceneDrag = {
+          nodeId: node.id,
+          pointerId: event.pointerId,
+          offsetX: node.x - world.x,
+          offsetY: node.y - world.y,
+          view: {
+            bounds: { ...scene.bounds },
+            projection: { ...scene.projection }
+          }
+        };
+      }
+      renderSceneEditor();
+    });
+
+    svg.appendChild(group);
+
+    if (node.id === selectedId || visibleNodes.length <= 10) {
+      const label = svgElement("text", {
+        x: point.x + 16,
+        y: point.y - 16,
+        "font-size": 12,
+        "font-family": "Segoe UI, Arial, sans-serif",
+        "font-weight": node.id === selectedId ? 700 : 500,
+        fill: "#dcecff"
+      });
+      label.textContent = buildSceneFriendlyName(node);
+      svg.appendChild(label);
+    }
+  });
+}
+
+function renderSceneEditor() {
+  const panel = el("sceneEditorPanel");
+  const meta = el("sceneEditorMeta");
+  const hint = el("sceneEditorHint");
+  const empty = el("sceneViewportEmpty");
+  if (!panel || !meta || !hint || !empty) {
+    return;
+  }
+
+  const schema = state.modding.currentSchema;
+  if (!schema || !isMapSchema(schema)) {
+    state.modding.currentScene = null;
+    state.modding.currentSceneSelectionId = "";
+    state.modding.currentSceneDrag = null;
+    panel.hidden = true;
+    return;
+  }
+
+  const scene = buildSceneModel(schema);
+  state.modding.currentScene = scene;
+  if (!scene || !scene.nodes.length) {
+    state.modding.currentSceneSelectionId = "";
+    state.modding.currentSceneDrag = null;
+    panel.hidden = true;
+    return;
+  }
+
+  panel.hidden = false;
+  scene.visibleNodes = getVisibleSceneNodes(scene);
+  if (!scene.visibleNodes.some((node) => node.id === state.modding.currentSceneSelectionId)) {
+    state.modding.currentSceneSelectionId = scene.visibleNodes[0]?.id || "";
+  }
+
+  if (!scene.visibleNodes.length) {
+    scene.visibleLinks = [];
+    scene.bounds = computeSceneBounds([]);
+    scene.projection = computeSceneProjection(scene.bounds);
+    hint.textContent = "По этому фильтру сейчас нет видимых точек. Сними ограничение или попробуй другой поиск.";
+    meta.textContent = `Всего найдено поддерживаемых точек: ${scene.nodes.length}.`;
+    empty.hidden = false;
+    empty.textContent = "По текущему фильтру и поиску ничего не найдено. Попробуй показать все точки или выбрать другой тип.";
+    renderSceneViewport(scene);
+    renderSceneSelection(scene);
+    return;
+  }
+
+  const selectedNode = scene.nodes.find((node) => node.id === state.modding.currentSceneSelectionId) || null;
+  const visibleIds = new Set(scene.visibleNodes.map((node) => node.id));
+  scene.visibleLinks = scene.links.filter((link) => visibleIds.has(link.fromId) && visibleIds.has(link.toId));
+  scene.bounds = state.modding.currentSceneDrag?.view?.bounds || computeSceneFocusBounds(scene.visibleNodes, selectedNode);
+  scene.projection = state.modding.currentSceneDrag?.view?.projection || computeSceneProjection(scene.bounds);
+
+  const routeCount = scene.visibleLinks.length > 0
+    ? new Set(scene.visibleNodes.filter((node) => node.routeGroupKey).map((node) => node.routeGroupKey)).size
+    : 0;
+  hint.textContent = "Вид сверху. Используй фильтр и поиск, чтобы быстро найти нужную точку. Клик по списку справа автоматически приближает выбранную сущность.";
+  meta.textContent = routeCount > 0
+    ? `Показано ${scene.visibleNodes.length} точек из ${scene.nodes.length}. Маршрутов роботов в кадре: ${routeCount}.`
+    : `Показано ${scene.visibleNodes.length} точек из ${scene.nodes.length}.`;
+
+  empty.hidden = true;
+  renderSceneViewport(scene);
+  renderSceneSelection(scene);
+}
+
+function handleScenePointerMove(event) {
+  const drag = state.modding.currentSceneDrag;
+  const scene = state.modding.currentScene;
+  if (!drag || !scene) {
+    return;
+  }
+
+  const node = scene.nodes.find((entry) => entry.id === drag.nodeId);
+  const svg = el("sceneViewport");
+  if (!node || !svg) {
+    return;
+  }
+
+  const world = scenePointerToWorld(svg, event.clientX, event.clientY, scene);
+  const nextX = world.x + drag.offsetX;
+  const nextY = world.y + drag.offsetY;
+
+  if (node.fieldPaths.x) {
+    setCurrentFieldValue(node.fieldPaths.x, formatSceneFieldValue(nextX), { renderScene: false });
+  }
+
+  if (node.fieldPaths.y) {
+    setCurrentFieldValue(node.fieldPaths.y, formatSceneFieldValue(nextY), { renderScene: false });
+  }
+
+  renderSceneEditor();
+}
+
+function handleScenePointerUp() {
+  if (!state.modding.currentSceneDrag) {
+    return;
+  }
+
+  state.modding.currentSceneDrag = null;
+  renderSceneEditor();
 }
 
 function renderSchemaFields() {
@@ -2302,6 +3441,7 @@ async function loadSelectedAssetSchema() {
   renderSelectedAssetPreview();
 
   setSchemaMeta("Загрузка параметров...");
+  clearScenePanelContent();
   el("schemaWarnings").innerHTML = "";
   el("schemaSections").innerHTML = '<div class="schema-loading muted">Читаю безопасные настройки из игры. На больших ассетах это может занять несколько секунд.</div>';
   el("listTargetRows").innerHTML = '<div class="schema-loading muted">Собираю состав системы и связанные элементы...</div>';
@@ -2312,8 +3452,20 @@ async function loadSelectedAssetSchema() {
   state.modding.currentOriginalValues = new Map();
   state.modding.currentListEdits = [];
   state.modding.schemaFieldFilter = "";
+  state.modding.currentSceneFilterKind = "all";
+  state.modding.currentSceneSearch = "";
+  state.modding.currentSceneFocusMode = "all";
   if (el("schemaFieldFilter")) {
     el("schemaFieldFilter").value = "";
+  }
+  if (el("sceneTypeFilter")) {
+    el("sceneTypeFilter").value = "all";
+  }
+  if (el("sceneSearchInput")) {
+    el("sceneSearchInput").value = "";
+  }
+  if (el("sceneFocusMode")) {
+    el("sceneFocusMode").value = "all";
   }
 
   for (const field of schema.fields || []) {
@@ -2326,6 +3478,7 @@ async function loadSelectedAssetSchema() {
   setSchemaMeta(describeSchemaMeta(schema));
   renderSchemaFilterMeta();
 
+  renderSceneEditor();
   renderSchemaFields();
   renderListTargets();
   renderSelectedAssetPreview();
@@ -2451,6 +3604,7 @@ async function previewStagedAssetEdits(stagedItem) {
     throw new Error("Сначала выбери раздел и подготовь изменения.");
   }
 
+  clearScenePanelContent();
   const schema = await api("/api/modding/schema-preview", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2478,6 +3632,7 @@ async function previewStagedAssetEdits(stagedItem) {
   renderSchemaWarnings(schema.warnings || []);
   setSchemaMeta(describeSchemaMeta(schema));
   renderSchemaFilterMeta();
+  renderSceneEditor();
   renderSchemaFields();
   renderListTargets();
   renderSelectedAssetPreview();
@@ -2663,9 +3818,22 @@ function setupActions() {
   el("loadSchemaBtn").addEventListener("click", () => loadSelectedAssetSchema().catch(showError));
   el("schemaFieldFilter").addEventListener("input", () => {
     state.modding.schemaFieldFilter = el("schemaFieldFilter").value;
+    renderSceneEditor();
     renderSchemaFields();
     renderListTargets();
     renderSchemaFilterMeta();
+  });
+  el("sceneTypeFilter").addEventListener("change", () => {
+    state.modding.currentSceneFilterKind = el("sceneTypeFilter").value || "all";
+    renderSceneEditor();
+  });
+  el("sceneSearchInput").addEventListener("input", () => {
+    state.modding.currentSceneSearch = el("sceneSearchInput").value || "";
+    renderSceneEditor();
+  });
+  el("sceneFocusMode").addEventListener("change", () => {
+    state.modding.currentSceneFocusMode = el("sceneFocusMode").value || "all";
+    renderSceneEditor();
   });
   el("stageAssetBtn").addEventListener("click", () => {
     try {
@@ -2692,6 +3860,10 @@ function setupActions() {
     renderStagedEdits();
     updateModAssetMeta();
   });
+
+  window.addEventListener("pointermove", handleScenePointerMove);
+  window.addEventListener("pointerup", handleScenePointerUp);
+  window.addEventListener("pointercancel", handleScenePointerUp);
 
   el("buildBtn").addEventListener("click", () => buildMod().catch(showError));
 }

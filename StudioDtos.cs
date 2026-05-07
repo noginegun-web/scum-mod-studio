@@ -40,7 +40,10 @@ internal sealed record StudioStatusDto(
     string UnrealPakPath,
     List<StudioPresetDto> Presets,
     List<StudioFeatureDto> Features,
-    int PresetAssetCount);
+    int PresetAssetCount,
+    bool ScumFound,
+    bool UnrealPakFound,
+    List<string> Warnings);
 
 internal sealed record StudioResearchOwnerHintDto(
     string FilePath,

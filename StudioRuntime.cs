@@ -212,6 +212,7 @@ internal sealed class StudioRuntime
     private List<StudioModAssetDto>? _modAssetsCache;
     private List<StudioModCategoryDto>? _visibleModCategoriesCache;
     private List<StudioModAssetDto>? _visibleModAssetsCache;
+    private bool _modAssetsRefreshQueued;
     private List<StudioReferenceOptionDto>? _foreignSubstanceAttributeReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _foreignSubstanceReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _bodyEffectSideEffectReferenceOptionsCache;
@@ -356,15 +357,8 @@ internal sealed class StudioRuntime
         Directory.CreateDirectory(runtimePaths.TempRoot);
         Directory.CreateDirectory(runtimePaths.BuildsRoot);
 
-        var scum = ScumLocator.Locate()
-            ?? throw new InvalidOperationException("SCUM не найден автоматически. Убедись, что игра установлена.");
-
-        var unrealPakPath = UnrealPakLocator.Locate(appRoot);
-        if (string.IsNullOrWhiteSpace(unrealPakPath))
-        {
-            throw new InvalidOperationException(
-                "UnrealPak.exe не найден. Ожидается Engine\\Binaries\\Win64\\UnrealPak.exe внутри папки программы.");
-        }
+        var scum = ScumLocator.Locate() ?? CreateMissingScumInstallation();
+        var unrealPakPath = UnrealPakLocator.Locate(appRoot) ?? string.Empty;
 
         var presets = PresetCatalog.Load(appRoot);
         if (presets.Count == 0)
@@ -373,6 +367,17 @@ internal sealed class StudioRuntime
         }
 
         return new StudioRuntime(runtimePaths, scum, unrealPakPath, presets);
+    }
+
+    private static ScumInstallation CreateMissingScumInstallation()
+    {
+        return new ScumInstallation(
+            "SCUM не найдена",
+            string.Empty,
+            string.Empty,
+            null,
+            null,
+            IsAvailable: false);
     }
 
     private static string ResolveWorkspaceRoot(string appRoot)
@@ -419,6 +424,17 @@ internal sealed class StudioRuntime
 
     public StudioStatusDto GetStatus()
     {
+        var warnings = new List<string>();
+        if (!HasUsableScumInstallation())
+        {
+            warnings.Add("SCUM не найдена автоматически. Установи игру через Steam или укажи путь в переменной окружения SCUM_PATH.");
+        }
+
+        if (!HasUsableUnrealPak())
+        {
+            warnings.Add("UnrealPak.exe не найден. Сборка .pak будет недоступна, пока он не появится в Engine\\Binaries\\Win64 внутри папки программы.");
+        }
+
         return new StudioStatusDto(
             _scum.RootPath,
             _scum.PaksPath,
@@ -426,7 +442,20 @@ internal sealed class StudioRuntime
             _unrealPakPath,
             _presets.Select(x => new StudioPresetDto(x.Id, x.DisplayName, x.Description, x.EditableSurfaces)).ToList(),
             _features,
-            _presetFiles.Count);
+            _presetFiles.Count,
+            HasUsableScumInstallation(),
+            HasUsableUnrealPak(),
+            warnings);
+    }
+
+    private bool HasUsableScumInstallation()
+    {
+        return _scum.IsAvailable && Directory.Exists(_scum.PaksPath);
+    }
+
+    private bool HasUsableUnrealPak()
+    {
+        return !string.IsNullOrWhiteSpace(_unrealPakPath) && File.Exists(_unrealPakPath);
     }
 
     public StudioResearchModPatternDto InspectResearchModPattern(string assetPath, bool includeImportDiff, int maxItems)
@@ -4703,11 +4732,128 @@ internal sealed class StudioRuntime
 
     private List<StudioModAssetDto> BuildModAssets()
     {
+        if (!HasUsableScumInstallation() || !HasUsableUnrealPak())
+        {
+            return BuildPresetModAssets();
+        }
+
         if (TryLoadModAssetsCatalogCache(out var cachedAssets))
         {
             return cachedAssets;
         }
 
+        QueueModAssetsCatalogRefresh();
+        if (_pakIndexCache is not null)
+        {
+            return BuildFastGameModAssets(_pakIndexCache);
+        }
+
+        return BuildPresetModAssets();
+    }
+
+    private List<StudioModAssetDto> BuildFastGameModAssets(PakIndex pakIndex)
+    {
+        var result = new List<StudioModAssetDto>(12000);
+        foreach (var path in pakIndex.GetAllRelativePaths())
+        {
+            if (!IsModdableGameAsset(path))
+            {
+                continue;
+            }
+
+            var normalized = PathUtil.NormalizeRelative(path);
+            var extension = Path.GetExtension(normalized).ToLowerInvariant();
+            if (!IsUassetPackageExtension(extension)
+                && extension is not ".json"
+                and not ".ini"
+                and not ".csv"
+                and not ".txt")
+            {
+                continue;
+            }
+
+            var category = ClassifyModCategory(normalized);
+            if (!IsStudioCategoryEnabled(category.Id, normalized))
+            {
+                continue;
+            }
+
+            var descriptor = DescribeModAssetQuick(normalized, category.Id);
+            result.Add(new StudioModAssetDto(
+                $"game::{normalized.ToLowerInvariant()}",
+                normalized,
+                category.Id,
+                category.Name,
+                descriptor.DisplayName,
+                descriptor.Summary,
+                extension.TrimStart('.'),
+                IsUassetPackageExtension(extension) || extension is ".json"));
+        }
+
+        SortModAssets(result);
+        return result;
+    }
+
+    private static ModAssetDescriptor DescribeModAssetQuick(string relativePath, string categoryId)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        var cleanStem = LocalizeAssetStem(stem);
+
+        if (IsCraftingUiDataRegistryAsset(relativePath))
+        {
+            return new ModAssetDescriptor(
+                "Крафт: категории и порядок",
+                "Актуальный реестр меню крафта: названия и порядок категорий. Сами рецепты в новых версиях SCUM хранят категорию в CraftingMetadata.");
+        }
+
+        if (categoryId.Equals("crafting-recipes", StringComparison.OrdinalIgnoreCase))
+        {
+            var recipeName = stem.StartsWith("CR_", StringComparison.OrdinalIgnoreCase) ? stem[3..] : stem;
+            return new ModAssetDescriptor(
+                $"Рецепт: {LocalizeAssetStem(recipeName)}",
+                "Настройки рецепта: результат, ингредиенты, категория, время и награды крафта.");
+        }
+
+        if (categoryId.Equals("crafting-ingredients", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                $"Ингредиент: {cleanStem}",
+                "Группа или правило ингредиентов, которое может использоваться рецептами.");
+        }
+
+        if (categoryId.Equals("vehicles", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                $"Транспорт: {cleanStem}",
+                "Столкновения, урон по машине и последствия аварий для транспорта.");
+        }
+
+        if (categoryId.Equals("radiation", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                $"Радиация: {cleanStem}",
+                ResolveCategoryDescription(categoryId));
+        }
+
+        if (categoryId.Equals("npc-encounters", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                $"NPC: {cleanStem}",
+                ResolveCategoryDescription(categoryId));
+        }
+
+        if (categoryId.Equals("starter-kit", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                $"Стартовая вещь: {cleanStem}",
+                ResolveCategoryDescription(categoryId));
+        }
+
+        return new ModAssetDescriptor(cleanStem, ResolveCategoryDescription(categoryId));
+    }
+
+    private List<StudioModAssetDto> BuildFullModAssets()
+    {
         var pakIndex = GetOrLoadPakIndex();
         var result = new List<StudioModAssetDto>(30000);
         foreach (var path in pakIndex.GetAllRelativePaths())
@@ -4748,8 +4894,94 @@ internal sealed class StudioRuntime
         }
 
         AppendSyntheticItemSpawningRowAssets(result);
+        SortModAssets(result);
+        TrySaveModAssetsCatalogCache(result);
+        return result;
+    }
 
-        result.Sort((a, b) =>
+    private List<StudioModAssetDto> BuildPresetModAssets()
+    {
+        var result = new List<StudioModAssetDto>(_presetFiles.Count);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in _presetFiles)
+        {
+            var assetId = GetAssetId(file);
+            if (!seen.Add(assetId))
+            {
+                continue;
+            }
+
+            var normalized = ResolveKnownCurrentGameRelativePath(file.TargetRelativePath);
+            var extension = Path.GetExtension(normalized).ToLowerInvariant();
+            if (!IsUassetPackageExtension(extension)
+                && extension is not ".json"
+                and not ".ini"
+                and not ".csv"
+                and not ".txt")
+            {
+                continue;
+            }
+
+            var category = ClassifyModCategory(normalized);
+            if (!IsStudioCategoryEnabled(category.Id, normalized))
+            {
+                continue;
+            }
+
+            var descriptor = DescribeModAsset(normalized, category.Id);
+            result.Add(new StudioModAssetDto(
+                assetId,
+                normalized,
+                category.Id,
+                category.Name,
+                descriptor.DisplayName,
+                descriptor.Summary,
+                extension.TrimStart('.'),
+                IsUassetPackageExtension(extension) || extension is ".json"));
+        }
+
+        SortModAssets(result);
+        return result;
+    }
+
+    private void QueueModAssetsCatalogRefresh()
+    {
+        if (_modAssetsRefreshQueued)
+        {
+            return;
+        }
+
+        _modAssetsRefreshQueued = true;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var assets = BuildFullModAssets();
+                var visibleAssets = BuildVisibleModAssets(assets);
+                var categories = BuildModCategories(assets);
+                var visibleCategories = BuildModCategories(visibleAssets);
+
+                lock (_sync)
+                {
+                    _modAssetsCache = assets;
+                    _modCategoriesCache = categories;
+                    _visibleModAssetsCache = visibleAssets;
+                    _visibleModCategoriesCache = visibleCategories;
+                }
+            }
+            catch
+            {
+                lock (_sync)
+                {
+                    _modAssetsRefreshQueued = false;
+                }
+            }
+        });
+    }
+
+    private static void SortModAssets(List<StudioModAssetDto> assets)
+    {
+        assets.Sort((a, b) =>
         {
             var categoryCompare = string.Compare(a.CategoryName, b.CategoryName, StringComparison.OrdinalIgnoreCase);
             if (categoryCompare != 0)
@@ -4776,9 +5008,6 @@ internal sealed class StudioRuntime
 
             return string.Compare(a.RelativePath, b.RelativePath, StringComparison.OrdinalIgnoreCase);
         });
-
-        TrySaveModAssetsCatalogCache(result);
-        return result;
     }
 
     private bool TryLoadModAssetsCatalogCache(out List<StudioModAssetDto> assets)
@@ -6717,7 +6946,7 @@ internal sealed class StudioRuntime
         UAsset asset,
         List<string> warnings)
     {
-        if (!TryGetFirstNormalExport(asset, out var normalExport, out var exportIndex))
+        if (!TryGetCraftingRecipeExport(asset, out var normalExport, out var exportIndex))
         {
             warnings.Add("Не удалось открыть рецепт для анализа.");
             return new StudioModAssetSchemaDto(
@@ -6734,6 +6963,8 @@ internal sealed class StudioRuntime
 
         var fields = new List<StudioModFieldDto>(180);
         var listTargets = new List<StudioModListTargetDto>(8);
+
+        AppendCraftingRecipeMetadataFields(asset, fields);
 
         var product = FindTopLevelProperty<SoftObjectPropertyData>(normalExport, "Product", out _);
         if (product is not null)
@@ -7047,6 +7278,50 @@ internal sealed class StudioRuntime
             warnings);
     }
 
+    private static void AppendCraftingRecipeMetadataFields(UAsset asset, List<StudioModFieldDto> fields)
+    {
+        for (var exportIndex = 0; exportIndex < asset.Exports.Count; exportIndex++)
+        {
+            if (asset.Exports[exportIndex] is not NormalExport normalExport)
+            {
+                continue;
+            }
+
+            var categoryTag = FindTopLevelProperty<StructPropertyData>(
+                normalExport,
+                "CraftingCategoryTag",
+                out var tagPropertyIndex);
+            if (categoryTag is null)
+            {
+                continue;
+            }
+
+            var tagName = FindStructChildProperty<NamePropertyData>(categoryTag, "TagName", out var tagNameIndex);
+            if (tagName is null)
+            {
+                continue;
+            }
+
+            var currentValue = tagName.Value?.ToString() ?? string.Empty;
+            var isPlaceable = currentValue.Contains("BaseBuilding", StringComparison.OrdinalIgnoreCase);
+            fields.Add(new StudioModFieldDto(
+                $"e:{exportIndex}/p:{tagPropertyIndex}/p:{tagNameIndex}",
+                "Категория крафта",
+                "В новых версиях SCUM рецепт привязывается к меню крафта через CraftingMetadata рядом с рецептом. Меняй GameplayTag категории здесь, если рецепт должен перейти в другой раздел.",
+                "Категория",
+                "name",
+                "text",
+                currentValue,
+                true,
+                null,
+                null,
+                null,
+                null,
+                null,
+                ResolveCraftingUiCategoryLabel(currentValue, isPlaceable)));
+        }
+    }
+
     private StudioModAssetSchemaDto BuildCraftingUiDataSchema(
         string assetId,
         string normalizedRelativePath,
@@ -7070,11 +7345,15 @@ internal sealed class StudioRuntime
                 warnings);
         }
 
-        var fields = new List<StudioModFieldDto>(4);
+        var fields = new List<StudioModFieldDto>(8);
         var listTargets = new List<StudioModListTargetDto>(64);
 
+        var categoryNames = FindTopLevelProperty<MapPropertyData>(normalExport, "CategoryNames", out _);
         var itemCategories = FindTopLevelProperty<ArrayPropertyData>(normalExport, "ItemCategories", out var itemCategoriesIndex);
         var placeableCategories = FindTopLevelProperty<ArrayPropertyData>(normalExport, "PlaceableCategories", out var placeableCategoriesIndex);
+        var itemCategoryOrder = FindTopLevelProperty<ArrayPropertyData>(normalExport, "ItemCategoryOrder", out var itemCategoryOrderIndex);
+        var placeableCategoryOrder = FindTopLevelProperty<ArrayPropertyData>(normalExport, "PlaceableCategoryOrder", out var placeableCategoryOrderIndex);
+        var domainOrder = FindTopLevelProperty<ArrayPropertyData>(normalExport, "DomainOrder", out _);
 
         fields.Add(new StudioModFieldDto(
             "crafting-registry:item-categories",
@@ -7083,7 +7362,7 @@ internal sealed class StudioRuntime
             "Обзор",
             "int",
             "text",
-            ((itemCategories?.Value ?? []).Length).ToString(CultureInfo.InvariantCulture),
+            ((itemCategories?.Value ?? itemCategoryOrder?.Value ?? []).Length).ToString(CultureInfo.InvariantCulture),
             false,
             null,
             null,
@@ -7096,11 +7375,43 @@ internal sealed class StudioRuntime
             "Обзор",
             "int",
             "text",
-            ((placeableCategories?.Value ?? []).Length).ToString(CultureInfo.InvariantCulture),
+            ((placeableCategories?.Value ?? placeableCategoryOrder?.Value ?? []).Length).ToString(CultureInfo.InvariantCulture),
             false,
             null,
             null,
             null));
+
+        if (categoryNames is not null)
+        {
+            fields.Add(new StudioModFieldDto(
+                "crafting-registry:category-names",
+                "Локализованных названий категорий",
+                "Сколько GameplayTag категорий связано с текстовыми ключами названий.",
+                "Обзор",
+                "int",
+                "text",
+                categoryNames.Value.Count.ToString(CultureInfo.InvariantCulture),
+                false,
+                null,
+                null,
+                null));
+        }
+
+        if (domainOrder is not null)
+        {
+            fields.Add(new StudioModFieldDto(
+                "crafting-registry:domain-order",
+                "Доменов крафта",
+                "Сколько доменов меню крафта описано в текущем реестре.",
+                "Обзор",
+                "int",
+                "text",
+                (domainOrder.Value?.Length ?? 0).ToString(CultureInfo.InvariantCulture),
+                false,
+                null,
+                null,
+                null));
+        }
 
         if (itemCategories is not null)
         {
@@ -7126,7 +7437,31 @@ internal sealed class StudioRuntime
                 listTargets);
         }
 
-        if (listTargets.Count == 0)
+        if (itemCategoryOrder is not null)
+        {
+            AppendCraftingUiCategoryOrderTarget(
+                itemCategoryOrder,
+                itemCategoryOrderIndex,
+                exportIndex,
+                "Порядок категорий предметов",
+                "Какие категории предметного крафта и в каком порядке отображаются в меню. В новых версиях SCUM сами рецепты привязываются к категориям через CraftingMetadata в recipe-asset.",
+                isPlaceable: false,
+                listTargets);
+        }
+
+        if (placeableCategoryOrder is not null)
+        {
+            AppendCraftingUiCategoryOrderTarget(
+                placeableCategoryOrder,
+                placeableCategoryOrderIndex,
+                exportIndex,
+                "Порядок категорий строительства",
+                "Какие категории строительства и в каком порядке отображаются в меню. В новых версиях SCUM сами рецепты привязываются к категориям через CraftingMetadata в recipe-asset.",
+                isPlaceable: true,
+                listTargets);
+        }
+
+        if (listTargets.Count == 0 && (itemCategories is not null || placeableCategories is not null))
         {
             warnings.Add("В реестре крафта не найдены категории с массивами рецептов.");
         }
@@ -7141,6 +7476,38 @@ internal sealed class StudioRuntime
             fields,
             listTargets,
             warnings);
+    }
+
+    private static void AppendCraftingUiCategoryOrderTarget(
+        ArrayPropertyData categories,
+        int categoriesPropertyIndex,
+        int exportIndex,
+        string label,
+        string description,
+        bool isPlaceable,
+        List<StudioModListTargetDto> output)
+    {
+        var categoryValues = categories.Value ?? [];
+        var entryLabels = categoryValues
+            .OfType<StructPropertyData>()
+            .Select(value => ResolveCraftingUiCategoryLabel(ResolveGameplayTagStructValue(value), isPlaceable))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToList();
+
+        output.Add(new StudioModListTargetDto(
+            $"e:{exportIndex}/p:{categoriesPropertyIndex}",
+            label,
+            description,
+            "struct",
+            categoryValues.Length,
+            SupportsAddClone: categoryValues.Length > 0,
+            SupportsRemove: categoryValues.Length > 0,
+            SupportsClear: categoryValues.Length > 0,
+            SupportsAddEmpty: false,
+            SupportsAddReference: false,
+            ReferencePickerKind: null,
+            ReferencePickerPrompt: null,
+            EntryLabels: entryLabels));
     }
 
     private void AppendCraftingUiCategoryRecipeTargets(
@@ -7478,6 +7845,19 @@ internal sealed class StudioRuntime
         return path.Equals(CraftingUiDataRegistryRelativePath, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static string ResolveKnownCurrentGameRelativePath(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        return normalized switch
+        {
+            "scum/content/conz_files/characters/zombie2/hitdamagevsvehiclespeedinkph.uasset" =>
+                "scum/content/conz_files/characters/zombies2/data/hitdamagevsvehiclespeedinkph.uasset",
+            "scum/content/conz_files/characters/zombie2/hitdamagevsvehiclespeedinkph.uexp" =>
+                "scum/content/conz_files/characters/zombies2/data/hitdamagevsvehiclespeedinkph.uexp",
+            _ => normalized
+        };
+    }
+
     private static string ResolveCraftingRecipeReferenceClassName(string relativePath)
     {
         var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
@@ -7543,6 +7923,27 @@ internal sealed class StudioRuntime
         normalExport = null!;
         exportIndex = -1;
         return false;
+    }
+
+    private static bool TryGetCraftingRecipeExport(UAsset asset, out NormalExport normalExport, out int exportIndex)
+    {
+        for (var i = 0; i < asset.Exports.Count; i++)
+        {
+            if (asset.Exports[i] is not NormalExport candidate)
+            {
+                continue;
+            }
+
+            if (FindTopLevelProperty<SoftObjectPropertyData>(candidate, "Product", out _) is not null
+                || FindTopLevelProperty<ArrayPropertyData>(candidate, "Ingredients", out _) is not null)
+            {
+                normalExport = candidate;
+                exportIndex = i;
+                return true;
+            }
+        }
+
+        return TryGetFirstNormalExport(asset, out normalExport, out exportIndex);
     }
 
     private static TProperty? FindTopLevelProperty<TProperty>(
@@ -18535,7 +18936,7 @@ internal sealed class StudioRuntime
         {
             var readableSourcePath = PrepareIsolatedAssetReadSource(sourcePath);
             var asset = new UAsset(readableSourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
-            if (!TryGetFirstNormalExport(asset, out var normalExport, out _))
+            if (!TryGetCraftingRecipeExport(asset, out var normalExport, out _))
             {
                 return false;
             }
@@ -21427,7 +21828,10 @@ internal sealed class StudioRuntime
     {
         if (_presetFileById.TryGetValue(assetId, out var presetEntry))
         {
-            selection = new AssetSelection(assetId, presetEntry.TargetRelativePath, presetEntry.SourcePath);
+            selection = new AssetSelection(
+                assetId,
+                ResolveKnownCurrentGameRelativePath(presetEntry.TargetRelativePath),
+                presetEntry.SourcePath);
             return true;
         }
 
@@ -21439,7 +21843,7 @@ internal sealed class StudioRuntime
 
         if (TryParseGameAssetId(assetId, out var gameRelativePath))
         {
-            selection = new AssetSelection(assetId, gameRelativePath, null);
+            selection = new AssetSelection(assetId, ResolveKnownCurrentGameRelativePath(gameRelativePath), null);
             return true;
         }
 
@@ -22237,7 +22641,13 @@ internal sealed class StudioRuntime
 
     private bool TryResolveGameAssetSource(string targetRelativePath, out string sourcePath, List<string> warnings, bool includeCompanions = false)
     {
-        var normalized = PathUtil.NormalizeRelative(targetRelativePath).ToLowerInvariant();
+        var requestedNormalized = PathUtil.NormalizeRelative(targetRelativePath).ToLowerInvariant();
+        var normalized = ResolveKnownCurrentGameRelativePath(requestedNormalized);
+        if (!string.Equals(requestedNormalized, normalized, StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add($"Файл игры переехал: {requestedNormalized} -> {normalized}");
+        }
+
         if (_gameExtractedSourceByPath.TryGetValue(normalized, out var cached) && File.Exists(cached))
         {
             if (includeCompanions)
@@ -22246,6 +22656,7 @@ internal sealed class StudioRuntime
             }
 
             sourcePath = cached;
+            _gameExtractedSourceByPath[requestedNormalized] = sourcePath;
             return true;
         }
 
@@ -22289,6 +22700,7 @@ internal sealed class StudioRuntime
         }
 
         _gameExtractedSourceByPath[normalized] = sourcePath;
+        _gameExtractedSourceByPath[requestedNormalized] = sourcePath;
         return true;
     }
 
@@ -22785,7 +23197,7 @@ internal sealed class StudioRuntime
         var applied = 0;
 
         if (edits.Any(x => x.FieldPath?.StartsWith(RecipeFieldPrefix, StringComparison.OrdinalIgnoreCase) == true)
-            && TryGetFirstNormalExport(asset, out var recipeExport, out _))
+            && TryGetCraftingRecipeExport(asset, out var recipeExport, out _))
         {
             applied += ApplyCraftingRecipeEdits(asset, recipeExport, edits, warnings);
         }
@@ -27816,6 +28228,12 @@ internal sealed class StudioRuntime
         {
             if (_pakIndexCache is not null)
             {
+                return _pakIndexCache;
+            }
+
+            if (!HasUsableScumInstallation() || !HasUsableUnrealPak())
+            {
+                _pakIndexCache = new PakIndex(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
                 return _pakIndexCache;
             }
 

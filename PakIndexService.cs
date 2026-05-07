@@ -47,13 +47,7 @@ internal static class PakIndexService
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var currentStamps = pakFiles
-            .Select(path =>
-            {
-                var info = new FileInfo(path);
-                return new PakFileStamp(path, info.Length, info.LastWriteTimeUtc.Ticks);
-            })
-            .ToList();
+        var currentStamps = BuildPakFileStamps(pakFiles);
 
         var cached = TryLoadCache(cachePath);
         if (cached is not null && CacheMatches(cached, scum, currentStamps))
@@ -113,6 +107,17 @@ internal static class PakIndexService
         SaveCache(cachePath, toCache);
 
         return new PakIndex(files);
+    }
+
+    private static List<PakFileStamp> BuildPakFileStamps(List<string> pakFiles)
+    {
+        return pakFiles
+            .Select(path =>
+            {
+                var info = new FileInfo(path);
+                return new PakFileStamp(path, info.Length, info.LastWriteTimeUtc.Ticks);
+            })
+            .ToList();
     }
 
     private static string NormalizeMountPoint(string mountPoint)
