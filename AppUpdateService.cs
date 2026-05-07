@@ -60,10 +60,15 @@ internal sealed class AppUpdateService
         lock (_stateSync)
         {
             var manager = _manager;
-            var isInstalled = manager?.IsInstalled ?? false;
-            var pendingAsset = _pendingAsset ?? manager?.UpdatePendingRestart;
+            var isInstalled = IsManagerInstalled(manager);
+            var pendingAsset = _pendingAsset;
+            if (pendingAsset is null && isInstalled)
+            {
+                pendingAsset = TryGetPendingAsset(manager);
+            }
+
             var availableAsset = pendingAsset is null ? _availableAsset : null;
-            var currentVersion = manager?.CurrentVersion?.ToString();
+            var currentVersion = TryGetCurrentVersion(manager);
 
             var statusTitle = _statusTitle;
             var statusMessage = _statusMessage;
@@ -98,7 +103,7 @@ internal sealed class AppUpdateService
                 Enabled: _settings.Enabled,
                 Configured: !string.IsNullOrWhiteSpace(_settings.RepoUrl),
                 IsInstalled: isInstalled,
-                IsPortable: manager?.IsPortable ?? false,
+                IsPortable: IsManagerPortable(manager),
                 IsChecking: _isChecking,
                 IsDownloading: _isDownloading,
                 IsInstalling: _isInstalling,
@@ -163,7 +168,7 @@ internal sealed class AppUpdateService
             return Fail("Источник обновлений ещё не настроен.");
         }
 
-        if (!manager.IsInstalled)
+        if (!IsManagerInstalled(manager))
         {
             return Fail("Автообновление работает только у установленной версии программы, а не у обычного файла из папки сборки.");
         }
@@ -223,7 +228,7 @@ internal sealed class AppUpdateService
             return Fail("Источник обновлений ещё не настроен.");
         }
 
-        if (!manager.IsInstalled)
+        if (!IsManagerInstalled(manager))
         {
             return Fail("Скачивание обновлений работает только у установленной версии программы.");
         }
@@ -298,7 +303,7 @@ internal sealed class AppUpdateService
             return Fail("Источник обновлений ещё не настроен.");
         }
 
-        if (!manager.IsInstalled)
+        if (!IsManagerInstalled(manager))
         {
             return Fail("Установка обновлений работает только у установленной версии программы.");
         }
@@ -307,7 +312,7 @@ internal sealed class AppUpdateService
         try
         {
             RefreshPendingAsset();
-            var assetToApply = _pendingAsset ?? manager.UpdatePendingRestart;
+            var assetToApply = _pendingAsset ?? TryGetPendingAsset(manager);
             if (assetToApply is null)
             {
                 return Fail("Сначала нужно скачать новую версию.");
@@ -414,9 +419,84 @@ internal sealed class AppUpdateService
 
     private void RefreshPendingAsset()
     {
+        var manager = _manager;
+        VelopackAsset? pendingAsset = null;
+        if (IsManagerInstalled(manager))
+        {
+            pendingAsset = TryGetPendingAsset(manager);
+        }
+
         lock (_stateSync)
         {
-            _pendingAsset = _manager?.UpdatePendingRestart;
+            _pendingAsset = pendingAsset;
+        }
+    }
+
+    private static bool IsManagerInstalled(UpdateManager? manager)
+    {
+        if (manager is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return manager.IsInstalled;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsManagerPortable(UpdateManager? manager)
+    {
+        if (manager is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return manager.IsPortable;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string? TryGetCurrentVersion(UpdateManager? manager)
+    {
+        if (manager is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return manager.CurrentVersion?.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static VelopackAsset? TryGetPendingAsset(UpdateManager? manager)
+    {
+        if (manager is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return manager.UpdatePendingRestart;
+        }
+        catch
+        {
+            return null;
         }
     }
 

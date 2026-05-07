@@ -17,7 +17,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 8;
+    private const int ModAssetsCatalogCacheFormatVersion = 9;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -4874,26 +4874,57 @@ internal sealed class StudioRuntime
                 continue;
             }
 
-            var category = ClassifyModCategory(normalized);
-            if (!IsStudioCategoryEnabled(category.Id, normalized))
+            try
             {
-                continue;
-            }
+                var category = ClassifyModCategory(normalized);
+                if (!IsStudioCategoryEnabled(category.Id, normalized))
+                {
+                    continue;
+                }
 
-            var descriptor = DescribeModAsset(normalized, category.Id);
-            var supportsSafe = IsUassetPackageExtension(extension) || extension is ".json";
-            result.Add(new StudioModAssetDto(
-                $"game::{normalized.ToLowerInvariant()}",
-                normalized,
-                category.Id,
-                category.Name,
-                descriptor.DisplayName,
-                descriptor.Summary,
-                extension.TrimStart('.'),
-                supportsSafe));
+                var descriptor = DescribeModAsset(normalized, category.Id);
+                var supportsSafe = IsUassetPackageExtension(extension) || extension is ".json";
+                result.Add(new StudioModAssetDto(
+                    $"game::{normalized.ToLowerInvariant()}",
+                    normalized,
+                    category.Id,
+                    category.Name,
+                    descriptor.DisplayName,
+                    descriptor.Summary,
+                    extension.TrimStart('.'),
+                    supportsSafe));
+            }
+            catch
+            {
+                var category = ClassifyModCategory(normalized);
+                if (!IsStudioCategoryEnabled(category.Id, normalized))
+                {
+                    continue;
+                }
+
+                var descriptor = DescribeModAssetQuick(normalized, category.Id);
+                var supportsSafe = IsUassetPackageExtension(extension) || extension is ".json";
+                result.Add(new StudioModAssetDto(
+                    $"game::{normalized.ToLowerInvariant()}",
+                    normalized,
+                    category.Id,
+                    category.Name,
+                    descriptor.DisplayName,
+                    descriptor.Summary,
+                    extension.TrimStart('.'),
+                    supportsSafe));
+            }
         }
 
-        AppendSyntheticItemSpawningRowAssets(result);
+        try
+        {
+            AppendSyntheticItemSpawningRowAssets(result);
+        }
+        catch
+        {
+            // Full game catalog should survive individual synthetic table failures.
+        }
+
         SortModAssets(result);
         TrySaveModAssetsCatalogCache(result);
         return result;
@@ -7854,6 +7885,14 @@ internal sealed class StudioRuntime
                 "scum/content/conz_files/characters/zombies2/data/hitdamagevsvehiclespeedinkph.uasset",
             "scum/content/conz_files/characters/zombie2/hitdamagevsvehiclespeedinkph.uexp" =>
                 "scum/content/conz_files/characters/zombies2/data/hitdamagevsvehiclespeedinkph.uexp",
+            "scum/content/conz_files/encounters/encounterclasses/guardedzonedefenderencounters/abandonedbunker_dropshipsentryencounter.uasset" =>
+                "scum/content/conz_files/encounters/encounterclasses/abandonedbunkerencounters/abandonedbunker_dropshipsentryencounter.uasset",
+            "scum/content/conz_files/encounters/encounterclasses/guardedzonedefenderencounters/abandonedbunker_dropshipsentryencounter.uexp" =>
+                "scum/content/conz_files/encounters/encounterclasses/abandonedbunkerencounters/abandonedbunker_dropshipsentryencounter.uexp",
+            "scum/content/conz_files/blueprints/bodyeffects/conditions/radiation/radiationpresence.uasset" =>
+                "scum/content/conz_files/characters/prisoner/blueprints/bodyeffects/conditions/radiation/radiationpresence.uasset",
+            "scum/content/conz_files/blueprints/bodyeffects/conditions/radiation/radiationpresence.uexp" =>
+                "scum/content/conz_files/characters/prisoner/blueprints/bodyeffects/conditions/radiation/radiationpresence.uexp",
             _ => normalized
         };
     }

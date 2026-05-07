@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SCUM Студия модов</title>
+  <link rel="icon" type="image/png" href="/assets/app-icon.png">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -13,7 +14,13 @@
         <h1>SCUM Студия модов</h1>
         <div id="statusLine" class="muted">Проверка игры и данных...</div>
       </div>
-      <button id="updateCheckBtn" type="button" class="small-button">Проверить обновления</button>
+      <div class="top-actions">
+        <button id="supportAuthorBtn" type="button" class="support-button">
+          <img src="/assets/app-icon-128.png" alt="">
+          <span>Поддержать автора</span>
+        </button>
+        <button id="updateCheckBtn" type="button" class="small-button">Проверить обновления</button>
+      </div>
     </div>
     <div id="updateBanner" class="update-banner" hidden>
       <div class="update-banner-copy">
@@ -28,6 +35,31 @@
       </div>
     </div>
   </header>
+
+  <div id="supportModal" class="modal-backdrop" hidden>
+    <section class="support-modal" role="dialog" aria-modal="true" aria-labelledby="supportTitle">
+      <div class="support-modal-head">
+        <img src="/assets/app-icon-128.png" alt="">
+        <div>
+          <div id="supportTitle" class="support-title">Поддержать автора</div>
+          <div class="muted small">Спасибо за поддержку SCUM Mod Studio.</div>
+        </div>
+        <button id="supportCloseBtn" type="button" class="icon-close" aria-label="Закрыть">×</button>
+      </div>
+      <div class="support-card">
+        <span class="support-card-label">Сбербанк, номер карты</span>
+        <strong id="supportCardNumber">2202 2068 7570 5381</strong>
+        <div class="support-actions">
+          <button id="supportCopyCardBtn" type="button" class="primary">Скопировать карту</button>
+          <button id="supportOpenSberBtn" type="button">Открыть Сбер Онлайн</button>
+        </div>
+        <div id="supportCopyStatus" class="muted small"></div>
+      </div>
+      <p class="support-note small">
+        СБП-перевод физлицу работает по номеру телефона и банку получателя. По одному номеру карты корректную СБП-ссылку собрать нельзя, поэтому сейчас здесь безопасный перевод по карте.
+      </p>
+    </section>
+  </div>
 
   <main class="layout">
     <section class="panel">

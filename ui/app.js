@@ -35,6 +35,9 @@ let modAssetSearchDebounce = 0;
 const SCENE_VIEWBOX_WIDTH = 1000;
 const SCENE_VIEWBOX_HEIGHT = 620;
 const SCENE_VIEWBOX_PADDING = 72;
+const SUPPORT_CARD_NUMBER = "2202 2068 7570 5381";
+const SUPPORT_CARD_COMPACT = SUPPORT_CARD_NUMBER.replace(/\s+/g, "");
+const SBER_ONLINE_URL = "https://online.sberbank.ru/";
 
 function el(id) {
   return document.getElementById(id);
@@ -120,6 +123,54 @@ function setDefaultModName() {
   if (/^pakchunk99-scum-studio-\d{8}-\d{6}-windowsnoeditor$/i.test(input.value.trim())) {
     input.value = "";
   }
+}
+
+function setSupportStatus(text) {
+  const status = el("supportCopyStatus");
+  if (status) {
+    status.textContent = text || "";
+  }
+}
+
+function openSupportModal() {
+  const modal = el("supportModal");
+  if (!modal) {
+    return;
+  }
+
+  setSupportStatus("");
+  modal.hidden = false;
+}
+
+function closeSupportModal() {
+  const modal = el("supportModal");
+  if (!modal) {
+    return;
+  }
+
+  modal.hidden = true;
+}
+
+async function copySupportCard() {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(SUPPORT_CARD_COMPACT);
+  } else {
+    const input = document.createElement("input");
+    input.value = SUPPORT_CARD_COMPACT;
+    input.setAttribute("readonly", "readonly");
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+
+  setSupportStatus("Номер карты скопирован.");
+}
+
+function openSberOnline() {
+  window.open(SBER_ONLINE_URL, "_blank", "noopener,noreferrer");
 }
 
 function formatSourceMode(mode) {
@@ -3722,6 +3773,21 @@ function showError(err) {
 }
 
 function setupActions() {
+  el("supportAuthorBtn").addEventListener("click", openSupportModal);
+  el("supportCloseBtn").addEventListener("click", closeSupportModal);
+  el("supportModal").addEventListener("click", (event) => {
+    if (event.target === el("supportModal")) {
+      closeSupportModal();
+    }
+  });
+  el("supportCopyCardBtn").addEventListener("click", () => copySupportCard().catch(showError));
+  el("supportOpenSberBtn").addEventListener("click", openSberOnline);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeSupportModal();
+    }
+  });
+
   el("updateCheckBtn").addEventListener("click", async () => {
     try {
       const result = await runAppUpdateAction("/api/app-update/check");
