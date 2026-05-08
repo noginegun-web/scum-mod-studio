@@ -17,7 +17,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 12;
+    private const int ModAssetsCatalogCacheFormatVersion = 16;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -5228,11 +5228,6 @@ internal sealed class StudioRuntime
 
     private bool ShouldShowAssetInVisibleCatalog(StudioModAssetDto asset)
     {
-        if (asset.CategoryId.Equals("economy-trader", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
         if (asset.AssetId.StartsWith(DataTableRowAssetPrefix, StringComparison.OrdinalIgnoreCase))
         {
             return true;
@@ -5292,6 +5287,7 @@ internal sealed class StudioRuntime
         return categoryId.ToLowerInvariant() switch
         {
             "locks-base" => IsLikelyEditableLockOrBaseAsset(path, fileName),
+            "economy-trader" => IsLikelyEditableEconomyAsset(path, fileName),
             "foreign-substances" => path.Contains("/foreignsubstances/", StringComparison.Ordinal)
                 || path.Contains("/metabolism/", StringComparison.Ordinal),
             "npc-encounters" => IsLikelyEditableNpcEncounterAsset(path, fileName),
@@ -5310,8 +5306,7 @@ internal sealed class StudioRuntime
                 || path.Contains("/metabolism/", StringComparison.Ordinal),
             "radiation" => path.Contains("radiation", StringComparison.Ordinal),
             "plants-farming" => IsLikelyEditablePlantAsset(path, fileName),
-            "fishing-spawn" => path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal)
-                || path.Contains("/characters/animals2/fish/", StringComparison.Ordinal),
+            "fishing-spawn" => IsLikelyEditableFishingAsset(path, fileName),
             "starter-kit" => IsStarterSpawnEquipmentAsset(path),
             "vehicles" => path.Contains("hitdamagevsvehiclespeed", StringComparison.Ordinal)
                 || path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
@@ -5417,6 +5412,41 @@ internal sealed class StudioRuntime
                 || fileName.StartsWith("da_plantdisease_", StringComparison.OrdinalIgnoreCase));
     }
 
+    private static bool IsLikelyEditableEconomyAsset(string path, string fileName)
+    {
+        return path.Contains("/economy/", StringComparison.Ordinal)
+            && (fileName.Equals("bp_economymanager", StringComparison.OrdinalIgnoreCase)
+                || fileName.Equals("durabilityvspricemultipliercurve", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsLikelyEditableFishingAsset(string path, string fileName)
+    {
+        if (path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal)
+            || path.Contains("/characters/spawnerpresets/fishspawningpresets/", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (!path.Contains("/items/fishing/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (path.Contains("/items/fishing/attachmentsockets/", StringComparison.Ordinal)
+            || path.Contains("/items/fishing/rope/", StringComparison.Ordinal)
+            || fileName.StartsWith("bp_", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("ns_", StringComparison.OrdinalIgnoreCase)
+            || fileName.Contains("trophyactor", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return fileName.StartsWith("fishing", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("improvisedfishing", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("improvised_fishing", StringComparison.OrdinalIgnoreCase)
+            || fileName.Contains("boilies", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsStandaloneGameplayCurvePath(string path)
     {
         return path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal)
@@ -5429,6 +5459,7 @@ internal sealed class StudioRuntime
             || path.Contains("/basebuilding/energydamagecurves/", StringComparison.Ordinal)
             || path.Contains("/characters/mechanoids/sentry/curves/", StringComparison.Ordinal)
             || path.Contains("/characters/zombies2/data/observingcurve", StringComparison.Ordinal)
+            || path.Contains("/economy/durabilityvspricemultipliercurve", StringComparison.Ordinal)
             || path.Contains("/vehicles/", StringComparison.Ordinal);
     }
 
@@ -13416,9 +13447,52 @@ internal sealed class StudioRuntime
             ("water", "вода"),
             ("fishing line", "рыболовная леска"),
             ("fishing hook", "рыболовный крючок"),
+            ("fishing hook pack", "набор рыболовных крючков"),
             ("fishing rod", "удилище"),
             ("fishing floater", "поплавок"),
+            ("fishing floater pack", "набор поплавков"),
             ("fishing bait", "наживка"),
+            ("fishing area radius", "радиус зоны рыбалки"),
+            ("safe area radius", "радиус безопасной зоны"),
+            ("fish not biting area radius", "радиус зоны без поклёвки"),
+            ("minigame safe area radius", "радиус безопасной зоны мини-игры"),
+            ("short casting power", "сила короткого заброса"),
+            ("short casting angle", "угол короткого заброса"),
+            ("casting power", "сила заброса"),
+            ("casting angle", "угол заброса"),
+            ("base reeling speed", "обычная скорость подмотки"),
+            ("fast reeling speed", "быстрая скорость подмотки"),
+            ("reel handle acceleration", "ускорение ручки катушки"),
+            ("fast reel handle acceleration", "быстрое ускорение ручки катушки"),
+            ("reel friction", "трение катушки"),
+            ("fast reel friction", "трение катушки при быстрой подмотке"),
+            ("reel velocity threshold", "порог скорости катушки"),
+            ("reel velocity limit", "лимит скорости катушки"),
+            ("reel acceleration", "ускорение катушки"),
+            ("line break constant", "прочность лески на разрыв"),
+            ("reeling tension", "натяжение при подмотке"),
+            ("tension to hook threshold", "порог натяжения до подсечки"),
+            ("reel in tension threshold", "порог натяжения при подмотке"),
+            ("wire length", "длина лески"),
+            ("wire strength", "прочность лески"),
+            ("fish generic speed", "скорость рыбы"),
+            ("fish drain stamina", "расход выносливости рыбы"),
+            ("fish recovery time", "время восстановления рыбы"),
+            ("fish stamina drain time", "время расхода выносливости рыбы"),
+            ("random fish drain and recovery", "случайный расход и восстановление рыбы"),
+            ("use rod as root location", "использовать удилище как корневую точку"),
+            ("check if fish is hooked rate", "частота проверки подсечки"),
+            ("bait catching chance multiplier", "множитель шанса наживки"),
+            ("catching chance multiplier", "множитель шанса поклёвки"),
+            ("sink speed during fast reel", "скорость погружения при быстрой подмотке"),
+            ("sink speed", "скорость погружения"),
+            ("break segment index", "сегмент разрыва"),
+            ("distance for size increase", "дистанция увеличения размера"),
+            ("moving ripple threshold", "порог ряби при движении"),
+            ("max scale", "максимальный размер"),
+            ("visibility factor", "заметность лески"),
+            ("line piece", "отрезок лески"),
+            ("pack", "набор"),
             ("species data", "вид рыбы"),
             ("floater", "поплавок"),
             ("bait", "наживка"),
@@ -13829,6 +13903,11 @@ internal sealed class StudioRuntime
 
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
+
+        if (IsFishingGameplaySurface(relativePath))
+        {
+            return ShouldExposeFishingSafeField(relativePath, userLabel, valueType);
+        }
 
         if (IsVisualReferenceFieldCandidate(relativePath, userLabel, valueType))
         {
@@ -14319,6 +14398,122 @@ internal sealed class StudioRuntime
         return true;
     }
 
+    private static bool IsFishingGameplaySurface(string relativePath)
+    {
+        var path = relativePath.ToLowerInvariant();
+        return path.Contains("/items/fishing/", StringComparison.Ordinal)
+            || path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal)
+            || path.Contains("/characters/spawnerpresets/fishspawningpresets/", StringComparison.Ordinal);
+    }
+
+    private static bool ShouldExposeFishingSafeField(string relativePath, string userLabel, string valueType)
+    {
+        if (string.IsNullOrWhiteSpace(userLabel))
+        {
+            return false;
+        }
+
+        var path = relativePath.ToLowerInvariant();
+        var label = userLabel.ToLowerInvariant();
+
+        if (path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal))
+        {
+            return label.Contains("вид рыбы", StringComparison.Ordinal)
+                || label.Contains("вес появления", StringComparison.Ordinal);
+        }
+
+        if (path.Contains("/characters/spawnerpresets/fishspawningpresets/", StringComparison.Ordinal))
+        {
+            return label.Contains("шанс появления", StringComparison.Ordinal)
+                || label.Contains("spawn chance", StringComparison.Ordinal);
+        }
+
+        if (!path.Contains("/items/fishing/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var blockedTokens = new[]
+        {
+            "модель", "mesh", "material", "материал", "texture", "текстур", "icon", "икон",
+            "теги предмета", "теги подходящих предметов", "item tags", "owned item tags",
+            "корневые узлы", "все узлы", "root nodes", "all nodes", "instance components",
+            "primary actor tick", "primary component tick", "remote role", "replicate", "replicated",
+            "auto activate", "collision", "body instance", "trace complex", "bounds scale",
+            "relative rotation", "ответ array", "answer array"
+        };
+        if (blockedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        var allowedTokens = new[]
+        {
+            "fishing area radius",
+            "safe area radius",
+            "fish not biting area radius",
+            "minigame safe area radius",
+            "радиус зоны рыбалки",
+            "радиус безопасной зоны",
+            "радиус зоны без поклёвки",
+            "радиус зоны без поклевки",
+            "casting power",
+            "casting angle",
+            "заброс",
+            "base reeling speed",
+            "fast reeling speed",
+            "подмотк",
+            "reel handle acceleration",
+            "reel friction",
+            "reel velocity",
+            "reel acceleration",
+            "катушк",
+            "tension",
+            "натяж",
+            "line break",
+            "разрыв",
+            "wire strength",
+            "проволока strength",
+            "проволока length",
+            "прочность лески",
+            "длина лески",
+            "visibility factor",
+            "заметность лески",
+            "check if fish is hooked rate",
+            "частота проверки подсечки",
+            "fish generic speed",
+            "fish drain",
+            "fish recovery",
+            "fish выносливость",
+            "скорость рыбы",
+            "выносливости рыбы",
+            "восстановления рыбы",
+            "random fish drain and recovery",
+            "случайный расход и восстановление рыбы",
+            "use rod as root location",
+            "использовать удилище как корневую точку",
+            "catching шанс multiplier",
+            "catching chance multiplier",
+            "множитель шанса наживки",
+            "множитель шанса поклёвки",
+            "множитель шанса поклевки",
+            "sink speed",
+            "скорость погружения",
+            "break segment index",
+            "сегмент разрыва",
+            "distance for size increase",
+            "дистанция увеличения размера",
+            "moving ripple threshold",
+            "порог ряби",
+            "max scale",
+            "максимум scale",
+            "урон со временем",
+            "выбрасывать при входе в боевой режим"
+        };
+
+        return allowedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static bool IsVisualReferenceFieldCandidate(string relativePath, string userLabel, string valueType)
     {
         if (!IsReferenceValueType(valueType))
@@ -14368,6 +14563,11 @@ internal sealed class StudioRuntime
 
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
+        if (path.Contains("/items/fishing/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         if (path.Contains("/skills/", StringComparison.Ordinal)
             && (label.Contains("curve", StringComparison.Ordinal)
                 || label.Contains("кривая", StringComparison.Ordinal)))
@@ -14413,6 +14613,11 @@ internal sealed class StudioRuntime
         }
 
         if (path.Contains("/data/spawnequipment/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (path.Contains("/items/fishing/", StringComparison.Ordinal))
         {
             return false;
         }
@@ -14615,6 +14820,11 @@ internal sealed class StudioRuntime
             return false;
         }
 
+        if (relativePath.Contains("/items/fishing/", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         if (itemKind.Equals("reference", StringComparison.OrdinalIgnoreCase)
             || itemKind.Equals("reference-map", StringComparison.OrdinalIgnoreCase))
         {
@@ -14646,6 +14856,10 @@ internal sealed class StudioRuntime
     {
         var path = relativePath.ToLowerInvariant();
         var label = userLabel.ToLowerInvariant();
+        if (path.Contains("/items/fishing/", StringComparison.Ordinal))
+        {
+            return false;
+        }
 
         var blockedPathTokens = new[]
         {
@@ -15639,6 +15853,11 @@ internal sealed class StudioRuntime
     {
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
+        if (IsFishingGameplaySurface(relativePath))
+        {
+            return ResolveFishingFieldDescription(label, path);
+        }
+
         if (path.Contains("/fortifications/locks/", StringComparison.Ordinal)
             && (label.Contains("внешняя модель замка", StringComparison.Ordinal)
                 || label.Contains("внутренняя модель замка", StringComparison.Ordinal)))
@@ -17266,6 +17485,80 @@ internal sealed class StudioRuntime
         return "Игровая настройка этого раздела.";
     }
 
+    private static string ResolveFishingFieldDescription(string label, string path)
+    {
+        if (path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal))
+        {
+            if (label.Contains("вид рыбы", StringComparison.Ordinal))
+            {
+                return "Какой вид рыбы входит в этот пресет водоёма.";
+            }
+
+            if (label.Contains("вес появления", StringComparison.Ordinal))
+            {
+                return "Насколько часто этот вид выбирается внутри пресета. Чем выше вес, тем чаще рыба появляется.";
+            }
+        }
+
+        if (path.Contains("/characters/spawnerpresets/fishspawningpresets/", StringComparison.Ordinal))
+        {
+            return "Насколько часто этот водный пресет участвует в выборе появления рыбы.";
+        }
+
+        if (label.Contains("множитель шанса", StringComparison.Ordinal)
+            || label.Contains("catching шанс", StringComparison.Ordinal)
+            || label.Contains("покл", StringComparison.Ordinal))
+        {
+            return "Как сильно эта наживка повышает или снижает шанс поймать конкретный вид рыбы.";
+        }
+
+        if (label.Contains("заброс", StringComparison.Ordinal)
+            || label.Contains("casting", StringComparison.Ordinal))
+        {
+            return "Параметр заброса удилища: сила или угол, которые влияют на дальность и удобство рыбалки.";
+        }
+
+        if (label.Contains("катуш", StringComparison.Ordinal)
+            || label.Contains("reel", StringComparison.Ordinal)
+            || label.Contains("подмот", StringComparison.Ordinal))
+        {
+            return "Параметр катушки и подмотки лески: скорость, ускорение или сопротивление при вываживании.";
+        }
+
+        if (label.Contains("леск", StringComparison.Ordinal)
+            || label.Contains("натяж", StringComparison.Ordinal)
+            || label.Contains("tension", StringComparison.Ordinal)
+            || label.Contains("разрыв", StringComparison.Ordinal))
+        {
+            return "Прочность и натяжение лески. Слишком большие значения могут сделать рыбалку слишком лёгкой, слишком маленькие - ломать снасть слишком часто.";
+        }
+
+        if (label.Contains("рыб", StringComparison.Ordinal)
+            || label.Contains("fish", StringComparison.Ordinal))
+        {
+            return "Параметр поведения рыбы во время вываживания: скорость, восстановление или расход выносливости.";
+        }
+
+        if (label.Contains("поплав", StringComparison.Ordinal)
+            || label.Contains("погруж", StringComparison.Ordinal)
+            || label.Contains("ряб", StringComparison.Ordinal))
+        {
+            return "Параметр поплавка: как он ведёт себя на воде и при подмотке.";
+        }
+
+        if (label.Contains("урон со временем", StringComparison.Ordinal))
+        {
+            return "Скорость износа предмета со временем или при использовании.";
+        }
+
+        if (label.Contains("боевой режим", StringComparison.Ordinal))
+        {
+            return "Если включено, предмет автоматически сбрасывается при переходе персонажа в боевой режим.";
+        }
+
+        return "Игровая настройка рыболовной системы.";
+    }
+
     private static string ResolveReferenceInfoDescription(string relativePath, string userLabel)
     {
         var label = userLabel.ToLowerInvariant();
@@ -17708,6 +18001,50 @@ internal sealed class StudioRuntime
         if (label.Contains("положение точки кривой", StringComparison.Ordinal))
         {
             return (null, null);
+        }
+
+        if (IsFishingGameplaySurface(relativePath))
+        {
+            if (label.Contains("шанс", StringComparison.Ordinal)
+                || label.Contains("chance", StringComparison.Ordinal)
+                || label.Contains("probability", StringComparison.Ordinal))
+            {
+                return ("0", "10");
+            }
+
+            if (label.Contains("вес появления", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+
+            if (label.Contains("угол", StringComparison.Ordinal)
+                || label.Contains("angle", StringComparison.Ordinal))
+            {
+                return ("0", "180");
+            }
+
+            if (label.Contains("скорост", StringComparison.Ordinal)
+                || label.Contains("velocity", StringComparison.Ordinal)
+                || label.Contains("speed", StringComparison.Ordinal))
+            {
+                return ("0", "3000");
+            }
+
+            if (label.Contains("радиус", StringComparison.Ordinal)
+                || label.Contains("дистанц", StringComparison.Ordinal)
+                || label.Contains("distance", StringComparison.Ordinal)
+                || label.Contains("radius", StringComparison.Ordinal))
+            {
+                return ("0", "10000");
+            }
+
+            if (label.Contains("прочность", StringComparison.Ordinal)
+                || label.Contains("натяж", StringComparison.Ordinal)
+                || label.Contains("tension", StringComparison.Ordinal)
+                || label.Contains("strength", StringComparison.Ordinal))
+            {
+                return ("0", "10000");
+            }
         }
 
         if (label.Contains("значение точки кривой", StringComparison.Ordinal))
@@ -19876,6 +20213,8 @@ internal sealed class StudioRuntime
             ("fishinglinepiece", "fishing line piece"),
             ("fishinghookpack", "fishing hook pack"),
             ("fishingfloaterpack", "fishing floater pack"),
+            ("fishinghook", "fishing hook"),
+            ("fishingline", "fishing line"),
             ("craftstoneknife", "craft stone knife"),
             ("craftcourierbackpack", "craft courier backpack"),
             ("craftbowandarrows", "craft bow and arrows"),
@@ -20039,7 +20378,7 @@ internal sealed class StudioRuntime
         descriptor = null!;
         var stem = Path.GetFileNameWithoutExtension(relativePath);
         var lowerStem = stem.ToLowerInvariant();
-        var cleanStem = LocalizeAssetStem(stem);
+        var cleanStem = FormatFishingItemDisplayName(stem);
         var path = relativePath.ToLowerInvariant();
 
         if (stem.StartsWith("SpeciesPreset_", StringComparison.OrdinalIgnoreCase))
@@ -20069,7 +20408,7 @@ internal sealed class StudioRuntime
         if (lowerStem.Contains("fishingbait", StringComparison.Ordinal))
         {
             descriptor = new ModAssetDescriptor(
-                $"Наживка: {cleanStem.Replace("Fishingbait", string.Empty, StringComparison.OrdinalIgnoreCase).Trim()}".Trim(),
+                PrefixFishingDescriptorName("Наживка", cleanStem),
                 "Параметры рыболовной наживки и её игровая роль в рыбалке.");
             return true;
         }
@@ -20077,7 +20416,7 @@ internal sealed class StudioRuntime
         if (lowerStem.Contains("fishinghook", StringComparison.Ordinal))
         {
             descriptor = new ModAssetDescriptor(
-                $"Крючок: {cleanStem}",
+                PrefixFishingDescriptorName("Крючок", cleanStem),
                 "Параметры рыболовного крючка и связанных снастей.");
             return true;
         }
@@ -20085,7 +20424,7 @@ internal sealed class StudioRuntime
         if (lowerStem.Contains("fishingline", StringComparison.Ordinal))
         {
             descriptor = new ModAssetDescriptor(
-                $"Леска: {cleanStem}",
+                PrefixFishingDescriptorName("Леска", cleanStem),
                 "Параметры лески и её прочности в рыболовной системе.");
             return true;
         }
@@ -20093,7 +20432,7 @@ internal sealed class StudioRuntime
         if (lowerStem.Contains("fishingreel", StringComparison.Ordinal))
         {
             descriptor = new ModAssetDescriptor(
-                $"Катушка: {cleanStem}",
+                PrefixFishingDescriptorName("Катушка", cleanStem),
                 "Параметры катушки, натяжения лески и связанных рыболовных снастей.");
             return true;
         }
@@ -20101,7 +20440,7 @@ internal sealed class StudioRuntime
         if (lowerStem.Contains("fishingrod", StringComparison.Ordinal))
         {
             descriptor = new ModAssetDescriptor(
-                $"Удилище: {cleanStem}",
+                PrefixFishingDescriptorName("Удилище", cleanStem),
                 "Параметры удилища, снастей и связанных креплений.");
             return true;
         }
@@ -20109,7 +20448,7 @@ internal sealed class StudioRuntime
         if (lowerStem.Contains("boilies", StringComparison.Ordinal))
         {
             descriptor = new ModAssetDescriptor(
-                $"Наживка: {cleanStem}",
+                PrefixFishingDescriptorName("Наживка", cleanStem),
                 "Параметры готовой рыболовной наживки и её привлекательности для рыбы.");
             return true;
         }
@@ -20117,7 +20456,7 @@ internal sealed class StudioRuntime
         if (lowerStem.Contains("floater", StringComparison.Ordinal))
         {
             descriptor = new ModAssetDescriptor(
-                $"Поплавок: {cleanStem}",
+                PrefixFishingDescriptorName("Поплавок", cleanStem),
                 "Параметры поплавка и связанных рыболовных снастей.");
             return true;
         }
@@ -20139,6 +20478,81 @@ internal sealed class StudioRuntime
         }
 
         return false;
+    }
+
+    private static string FormatFishingItemDisplayName(string stem)
+    {
+        var compact = Regex.Replace(stem.Trim().ToLowerInvariant(), @"[\s_-]+", string.Empty, RegexOptions.CultureInvariant);
+
+        if (TryFormatNumberedFishingName(compact, @"^fishinghookpack(?<suffix>\d*)$", "Набор рыболовных крючков", out var numberedLabel)
+            || TryFormatNumberedFishingName(compact, @"^fishinghook(?<suffix>\d*)$", "Рыболовный крючок", out numberedLabel)
+            || TryFormatNumberedFishingName(compact, @"^fishingfloaterpack(?<suffix>\d*)$", "Набор поплавков", out numberedLabel)
+            || TryFormatNumberedFishingName(compact, @"^fishingfloater(?<suffix>\d*)$", "Поплавок", out numberedLabel)
+            || TryFormatNumberedFishingName(compact, @"^fishinglinepiece(?<suffix>\d*)$", "Отрезок рыболовной лески", out numberedLabel)
+            || TryFormatNumberedFishingName(compact, @"^fishingline(?<suffix>\d*)$", "Рыболовная леска", out numberedLabel)
+            || TryFormatNumberedFishingName(compact, @"^fishingrod(?<suffix>[a-z]|\d*)$", "Удилище", out numberedLabel)
+            || TryFormatNumberedFishingName(compact, @"^fishingbaitboiliesprm(?<suffix>\d*)$", "Бойлы PRM", out numberedLabel))
+        {
+            return numberedLabel;
+        }
+
+        var knownFishingNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["improvisedfishinghook"] = "Самодельный рыболовный крючок",
+            ["improvisedfishingfloater"] = "Самодельный поплавок",
+            ["improvisedfishingreel"] = "Самодельная рыболовная катушка",
+            ["improvisedfishingrod"] = "Самодельное удилище",
+            ["improvisedfishingline"] = "Самодельная рыболовная леска",
+            ["premiumboiliespack"] = "Премиальные бойлы"
+        };
+        if (knownFishingNames.TryGetValue(compact, out var knownName))
+        {
+            return knownName;
+        }
+
+        return CapitalizeFirst(
+            NormalizeLocalizedLabel(
+                LocalizeCommonGameplayTerms(
+                    LocalizeCompactGameplayName(stem))));
+    }
+
+    private static bool TryFormatNumberedFishingName(string compactStem, string pattern, string baseName, out string label)
+    {
+        var match = Regex.Match(compactStem, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            label = string.Empty;
+            return false;
+        }
+
+        var suffix = match.Groups["suffix"].Value;
+        label = string.IsNullOrWhiteSpace(suffix)
+            ? baseName
+            : $"{baseName} {suffix.ToUpperInvariant()}";
+        return true;
+    }
+
+    private static string PrefixFishingDescriptorName(string prefix, string cleanStem)
+    {
+        if (string.IsNullOrWhiteSpace(cleanStem))
+        {
+            return prefix;
+        }
+
+        var cleanKey = cleanStem.ToLowerInvariant();
+        var prefixKey = prefix.ToLowerInvariant();
+        if (cleanStem.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            || cleanStem.Contains(prefix, StringComparison.OrdinalIgnoreCase)
+            || (prefixKey.Equals("крючок", StringComparison.Ordinal) && cleanKey.Contains("крючк", StringComparison.Ordinal))
+            || (prefixKey.Equals("леска", StringComparison.Ordinal) && cleanKey.Contains("леск", StringComparison.Ordinal))
+            || (prefixKey.Equals("катушка", StringComparison.Ordinal) && cleanKey.Contains("катушк", StringComparison.Ordinal))
+            || (prefixKey.Equals("удилище", StringComparison.Ordinal) && cleanKey.Contains("удилищ", StringComparison.Ordinal))
+            || (prefixKey.Equals("поплавок", StringComparison.Ordinal) && cleanKey.Contains("поплав", StringComparison.Ordinal)))
+        {
+            return cleanStem;
+        }
+
+        return $"{prefix}: {cleanStem}";
     }
 
     private static bool TryDescribeRegularItemSpawnerPresetAsset(string relativePath, out ModAssetDescriptor descriptor)
