@@ -17,7 +17,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 16;
+    private const int ModAssetsCatalogCacheFormatVersion = 18;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -4866,6 +4866,50 @@ internal sealed class StudioRuntime
                 "Группа или правило ингредиентов, которое может использоваться рецептами.");
         }
 
+        if (categoryId.Equals("cooking", StringComparison.OrdinalIgnoreCase))
+        {
+            if (relativePath.Contains("/cooking/recipes/", StringComparison.OrdinalIgnoreCase))
+            {
+                var recipeName = stem.StartsWith("cook_dish_", StringComparison.OrdinalIgnoreCase)
+                    ? stem["cook_dish_".Length..]
+                    : stem.StartsWith("cook_drink_", StringComparison.OrdinalIgnoreCase)
+                        ? stem["cook_drink_".Length..]
+                        : stem.StartsWith("cook_", StringComparison.OrdinalIgnoreCase)
+                            ? stem["cook_".Length..]
+                            : stem;
+                return new ModAssetDescriptor(
+                    $"Блюдо: {LocalizeAssetStem(recipeName)}",
+                    "Ингредиенты, расход и параметры рецепта готовки.");
+            }
+
+            if (relativePath.Contains("/cooking/data/curves/", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ModAssetDescriptor(
+                    $"Кривая готовки: {cleanStem}",
+                    "Точки кривой качества, массы или времени приготовления.");
+            }
+
+            return new ModAssetDescriptor(
+                $"Готовка: {cleanStem}",
+                ResolveCategoryDescription(categoryId));
+        }
+
+        if (categoryId.Equals("hunting", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                relativePath.Contains("/hunting/biomedata/", StringComparison.OrdinalIgnoreCase)
+                    ? $"Охотничий биом: {cleanStem}"
+                    : $"Охотничий след: {cleanStem}",
+                ResolveCategoryDescription(categoryId));
+        }
+
+        if (categoryId.Equals("weather", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                $"Кривая погоды: {cleanStem}",
+                ResolveCategoryDescription(categoryId));
+        }
+
         if (categoryId.Equals("vehicles", StringComparison.OrdinalIgnoreCase))
         {
             return new ModAssetDescriptor(
@@ -5307,6 +5351,9 @@ internal sealed class StudioRuntime
             "radiation" => path.Contains("radiation", StringComparison.Ordinal),
             "plants-farming" => IsLikelyEditablePlantAsset(path, fileName),
             "fishing-spawn" => IsLikelyEditableFishingAsset(path, fileName),
+            "cooking" => IsLikelyEditableCookingAsset(path, fileName),
+            "hunting" => IsLikelyEditableHuntingAsset(path, fileName),
+            "weather" => IsLikelyEditableWeatherAsset(path, fileName),
             "starter-kit" => IsStarterSpawnEquipmentAsset(path),
             "vehicles" => path.Contains("hitdamagevsvehiclespeed", StringComparison.Ordinal)
                 || path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
@@ -5447,10 +5494,64 @@ internal sealed class StudioRuntime
             || fileName.Contains("boilies", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsLikelyEditableCookingAsset(string path, string fileName)
+    {
+        if (!path.Contains("/cooking/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (path.Contains("/cooking/data/cookingutilityuidata/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return fileName.Equals("cookingcommondata", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("cookingreciperegistry", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("/cooking/data/curves/", StringComparison.Ordinal)
+            || (path.Contains("/cooking/recipes/", StringComparison.Ordinal)
+                && fileName.StartsWith("cook_", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsLikelyEditableHuntingAsset(string path, string fileName)
+    {
+        if (!path.Contains("/hunting/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (path.Contains("/hunting/clues/clue_meshes/", StringComparison.Ordinal)
+            || fileName.StartsWith("m_", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("mi_", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("sm_", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("t_", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return (path.Contains("/hunting/biomedata/", StringComparison.Ordinal)
+                && fileName.StartsWith("bd_", StringComparison.OrdinalIgnoreCase))
+            || (path.Contains("/hunting/clues/", StringComparison.Ordinal)
+                && (fileName.Equals("bp_huntingclue", StringComparison.OrdinalIgnoreCase)
+                    || fileName.Equals("bp_huntingclue_chicken", StringComparison.OrdinalIgnoreCase)
+                    || fileName.Equals("bp_huntingclue_rabbit", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static bool IsLikelyEditableWeatherAsset(string path, string fileName)
+    {
+        return path.Contains("/weather/curves/", StringComparison.Ordinal)
+            && !fileName.Contains("atlas", StringComparison.OrdinalIgnoreCase)
+            && !fileName.StartsWith("m_", StringComparison.OrdinalIgnoreCase)
+            && !fileName.StartsWith("mi_", StringComparison.OrdinalIgnoreCase)
+            && !fileName.StartsWith("sm_", StringComparison.OrdinalIgnoreCase)
+            && !fileName.StartsWith("t_", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsStandaloneGameplayCurvePath(string path)
     {
         return path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal)
             || path.Contains("/cooking/data/curves/", StringComparison.Ordinal)
+            || path.Contains("/weather/curves/", StringComparison.Ordinal)
             || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
             || path.Contains("/data/batteryeffectscurves/", StringComparison.Ordinal)
             || path.Contains("/curves/falling/", StringComparison.Ordinal)
@@ -11074,6 +11175,11 @@ internal sealed class StudioRuntime
             return "Кривая приготовления / точки кривой";
         }
 
+        if (path.Contains("/weather/curves/", StringComparison.Ordinal))
+        {
+            return "Кривая погоды / точки кривой";
+        }
+
         if (path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal))
         {
             return "Кривая отказов оружия / точки кривой";
@@ -12192,6 +12298,75 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (path.Contains("/cooking/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("base experience gain per recipe", "базовый опыт за рецепт", StringComparison.OrdinalIgnoreCase)
+                .Replace("experience gain per recipe cook time in minutes", "опыт за время готовки (мин)", StringComparison.OrdinalIgnoreCase)
+                .Replace("experience gain per recipe cook temperature in degrees", "опыт за температуру готовки", StringComparison.OrdinalIgnoreCase)
+                .Replace("cooking recipe registry", "реестр блюд", StringComparison.OrdinalIgnoreCase)
+                .Replace("cooking recipes", "блюда", StringComparison.OrdinalIgnoreCase)
+                .Replace("recipe entries", "блюда", StringComparison.OrdinalIgnoreCase)
+                .Replace("main ingredients", "основные ингредиенты", StringComparison.OrdinalIgnoreCase)
+                .Replace("main ingredient", "основной ингредиент", StringComparison.OrdinalIgnoreCase)
+                .Replace("possible ingredients", "варианты ингредиента", StringComparison.OrdinalIgnoreCase)
+                .Replace("possible ingredient", "вариант ингредиента", StringComparison.OrdinalIgnoreCase)
+                .Replace("возможный предмет", "вариант ингредиента", StringComparison.OrdinalIgnoreCase)
+                .Replace("consume whole item", "тратить предмет целиком", StringComparison.OrdinalIgnoreCase)
+                .Replace("usage", "расход", StringComparison.OrdinalIgnoreCase)
+                .Replace("liters", "литры", StringComparison.OrdinalIgnoreCase)
+                .Replace("nutrition contribution", "вклад в питательность", StringComparison.OrdinalIgnoreCase)
+                .Replace("cook quality", "качество готовки", StringComparison.OrdinalIgnoreCase)
+                .Replace("cook amount", "количество готовки", StringComparison.OrdinalIgnoreCase)
+                .Replace("cook time error", "ошибка времени готовки", StringComparison.OrdinalIgnoreCase)
+                .Replace("peak temperature", "пиковая температура", StringComparison.OrdinalIgnoreCase)
+                .Replace("food mass reduction", "потеря массы еды", StringComparison.OrdinalIgnoreCase)
+                .Replace("enabled", "включено", StringComparison.OrdinalIgnoreCase);
+
+            label = Regex.Replace(
+                label,
+                @"(?:main\s+)?ингредиенты?\s+(\d+)",
+                "ингредиент $1",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            label = Regex.Replace(
+                label,
+                @"варианты ингредиента\s+(\d+)",
+                "вариант ингредиента $1",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        if (path.Contains("/hunting/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("next clue distance min", "дистанция до следующего следа (минимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("next clue distance max", "дистанция до следующего следа (максимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("num clues min", "количество следов (минимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("num clues max", "количество следов (максимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("pack size min", "размер группы животных (минимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("pack size max", "размер группы животных (максимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("herd size min", "размер группы животных (минимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("herd size max", "размер группы животных (максимум)", StringComparison.OrdinalIgnoreCase)
+                .Replace("next clue max half angle deg", "угол разброса следующего следа", StringComparison.OrdinalIgnoreCase)
+                .Replace("spawn weight", "вес появления", StringComparison.OrdinalIgnoreCase)
+                .Replace("hearing distance", "дистанция слышимости", StringComparison.OrdinalIgnoreCase)
+                .Replace("minimum apparent distance", "минимальная дистанция видимости", StringComparison.OrdinalIgnoreCase)
+                .Replace("min apparent distance", "минимальная дистанция видимости", StringComparison.OrdinalIgnoreCase)
+                .Replace("fade time", "время исчезновения", StringComparison.OrdinalIgnoreCase)
+                .Replace("lifetime after fade out", "жизнь после исчезновения", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (path.Contains("/weather/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("wind intensity", "сила ветра", StringComparison.OrdinalIgnoreCase)
+                .Replace("fog density", "плотность тумана", StringComparison.OrdinalIgnoreCase)
+                .Replace("sun intensity", "сила солнца", StringComparison.OrdinalIgnoreCase)
+                .Replace("sun height", "высота солнца", StringComparison.OrdinalIgnoreCase)
+                .Replace("cloud coverage", "облачность", StringComparison.OrdinalIgnoreCase)
+                .Replace("surface wetness", "влажность поверхности", StringComparison.OrdinalIgnoreCase)
+                .Replace("evaporation", "испарение", StringComparison.OrdinalIgnoreCase);
+        }
+
         if ((path.Contains("/items/", StringComparison.OrdinalIgnoreCase)
              || path.Contains("/vehicles/", StringComparison.OrdinalIgnoreCase)
              || path.Contains("/fortifications/", StringComparison.OrdinalIgnoreCase)
@@ -13213,6 +13388,41 @@ internal sealed class StudioRuntime
             ("gas station", "заправка"),
             ("airfield", "аэродром"),
             ("possible ingredient", "возможный предмет"),
+            ("base experience gain per recipe", "базовый опыт за рецепт"),
+            ("experience gain per recipe cook time in minutes", "опыт за время готовки (мин)"),
+            ("experience gain per recipe cook temperature in degrees", "опыт за температуру готовки"),
+            ("main ingredients", "основные ингредиенты"),
+            ("main ingredient", "основной ингредиент"),
+            ("possible ingredients", "варианты ингредиента"),
+            ("consume whole item", "тратить предмет целиком"),
+            ("nutrition contribution", "вклад в питательность"),
+            ("cook quality", "качество готовки"),
+            ("cook amount", "количество готовки"),
+            ("cook time error", "ошибка времени готовки"),
+            ("peak temperature", "пиковая температура"),
+            ("food mass reduction", "потеря массы еды"),
+            ("next clue distance min", "дистанция до следующего следа (минимум)"),
+            ("next clue distance max", "дистанция до следующего следа (максимум)"),
+            ("num clues min", "количество следов (минимум)"),
+            ("num clues max", "количество следов (максимум)"),
+            ("pack size min", "размер группы животных (минимум)"),
+            ("pack size max", "размер группы животных (максимум)"),
+            ("herd size min", "размер группы животных (минимум)"),
+            ("herd size max", "размер группы животных (максимум)"),
+            ("next clue max half angle deg", "угол разброса следующего следа"),
+            ("spawn weight", "вес появления"),
+            ("hearing distance", "дистанция слышимости"),
+            ("minimum apparent distance", "минимальная дистанция видимости"),
+            ("min apparent distance", "минимальная дистанция видимости"),
+            ("fade time", "время исчезновения"),
+            ("lifetime after fade out", "жизнь после исчезновения"),
+            ("wind intensity", "сила ветра"),
+            ("fog density", "плотность тумана"),
+            ("sun intensity", "сила солнца"),
+            ("sun height", "высота солнца"),
+            ("cloud coverage", "облачность"),
+            ("surface wetness", "влажность поверхности"),
+            ("evaporation", "испарение"),
             ("character classes", "классы персонажей"),
             ("possible characters", "персонажи для события"),
             ("selection weight", "вес выбора"),
@@ -13909,6 +14119,21 @@ internal sealed class StudioRuntime
             return ShouldExposeFishingSafeField(relativePath, userLabel, valueType);
         }
 
+        if (IsCookingGameplaySurface(relativePath))
+        {
+            return ShouldExposeCookingSafeField(relativePath, userLabel, valueType);
+        }
+
+        if (IsHuntingGameplaySurface(relativePath))
+        {
+            return ShouldExposeHuntingSafeField(relativePath, userLabel, valueType);
+        }
+
+        if (IsWeatherGameplaySurface(relativePath))
+        {
+            return ShouldExposeWeatherSafeField(relativePath, userLabel, valueType);
+        }
+
         if (IsVisualReferenceFieldCandidate(relativePath, userLabel, valueType))
         {
             return true;
@@ -14514,6 +14739,194 @@ internal sealed class StudioRuntime
         return allowedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static bool IsCookingGameplaySurface(string relativePath)
+    {
+        var path = relativePath.ToLowerInvariant();
+        return path.Contains("/cooking/data/cookingcommondata.uasset", StringComparison.Ordinal)
+            || path.Contains("/cooking/data/cookingreciperegistry.uasset", StringComparison.Ordinal)
+            || path.Contains("/cooking/data/curves/", StringComparison.Ordinal)
+            || path.Contains("/cooking/recipes/", StringComparison.Ordinal);
+    }
+
+    private static bool ShouldExposeCookingSafeField(string relativePath, string userLabel, string valueType)
+    {
+        if (string.IsNullOrWhiteSpace(userLabel))
+        {
+            return false;
+        }
+
+        var path = relativePath.ToLowerInvariant();
+        var label = userLabel.ToLowerInvariant();
+
+        var blockedTokens = new[]
+        {
+            "mesh", "модель", "material", "материал", "texture", "текстур", "icon", "икон",
+            "widget", "brush", "sound", "audio", "animation", "анимац", "montage",
+            "ui data", "данные интерфейса", "asset id", "primary asset", "asset bundle",
+            "relative location", "relative rotation", "relative scale", "transform",
+            "component", "collision", "socket", "сокет", "replicate", "net cull",
+            "root nodes", "all nodes", "query token", "bytecode"
+        };
+        if (blockedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (path.Contains("/cooking/data/cookingreciperegistry.uasset", StringComparison.Ordinal))
+        {
+            return label.Contains("включено", StringComparison.Ordinal)
+                || label.Contains("enabled", StringComparison.Ordinal);
+        }
+
+        if (path.Contains("/cooking/data/curves/", StringComparison.Ordinal))
+        {
+            return label.Contains("точки кривой", StringComparison.Ordinal)
+                || label.Contains("положение точки кривой", StringComparison.Ordinal)
+                || label.Contains("значение точки кривой", StringComparison.Ordinal)
+                || label.Contains("когда начинается эта ступень", StringComparison.Ordinal)
+                || label.Contains("насколько сильно действует эта ступень", StringComparison.Ordinal);
+        }
+
+        if (path.Contains("/cooking/data/cookingcommondata.uasset", StringComparison.Ordinal))
+        {
+            var allowedCommonTokens = new[]
+            {
+                "базовый опыт за рецепт",
+                "опыт за время готовки",
+                "опыт за температуру готовки",
+                "experience gain",
+                "base experience"
+            };
+
+            return allowedCommonTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (path.Contains("/cooking/recipes/", StringComparison.Ordinal))
+        {
+            var allowedRecipeTokens = new[]
+            {
+                "что создаётся", "product", "результат", "блюдо",
+                "ингредиент", "вариант ингредиента", "основной ингредиент", "возможный предмет",
+                "подходящий предмет", "предмет ингредиента", "item class",
+                "тратить предмет целиком", "consume whole item",
+                "расход за крафт", "расход", "usage", "литры", "liter",
+                "вклад в питательность", "питательност", "nutrition",
+                "качество готовки", "готовность еды", "cook quality", "cook level",
+                "время готовки", "cook time", "температура", "temperature",
+                "опыт за готовку", "experience", "очки славы", "fame"
+            };
+
+            if (valueType is "string" or "text" or "name" or "enum")
+            {
+                var allowedStringTokens = new[]
+                {
+                    "тип", "type", "катег", "category", "качество готовки", "готовность еды",
+                    "ингредиент", "вариант ингредиента", "предмет", "результат",
+                    "тратить предмет целиком", "включено"
+                };
+                return allowedStringTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+            }
+
+            return allowedRecipeTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return false;
+    }
+
+    private static bool IsHuntingGameplaySurface(string relativePath)
+    {
+        var path = relativePath.ToLowerInvariant();
+        if (!path.Contains("/hunting/", StringComparison.Ordinal)
+            || path.Contains("/hunting/clues/clue_meshes/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var fileName = Path.GetFileNameWithoutExtension(path);
+        return path.Contains("/hunting/biomedata/", StringComparison.Ordinal)
+            || (path.Contains("/hunting/clues/", StringComparison.Ordinal)
+                && fileName.StartsWith("bp_huntingclue", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ShouldExposeHuntingSafeField(string relativePath, string userLabel, string valueType)
+    {
+        if (string.IsNullOrWhiteSpace(userLabel))
+        {
+            return false;
+        }
+
+        var path = relativePath.ToLowerInvariant();
+        var label = userLabel.ToLowerInvariant();
+
+        var blockedTokens = new[]
+        {
+            "mesh", "модель", "material", "материал", "texture", "текстур", "icon", "икон",
+            "decal", "декал", "visual", "визуал", "static mesh", "skeletal",
+            "relative location", "relative rotation", "relative scale", "scale 3 d",
+            "translation", "rotation", "transform", "component", "collision", "socket", "сокет",
+            "primary actor tick", "tick", "replicate", "replicated", "net cull", "net update",
+            "draw distance", "cull distance", "asset user data", "root component", "mobility",
+            "first clue visuals", "clue visuals"
+        };
+        if (blockedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (path.Contains("/hunting/biomedata/", StringComparison.Ordinal))
+        {
+            var allowedBiomeTokens = new[]
+            {
+                "дистанция до следующего следа",
+                "количество следов",
+                "размер группы животных",
+                "угол разброса следующего следа",
+                "вес появления",
+                "next clue",
+                "num clues",
+                "pack size",
+                "herd size",
+                "spawn weight"
+            };
+
+            return allowedBiomeTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (path.Contains("/hunting/clues/", StringComparison.Ordinal))
+        {
+            var allowedClueTokens = new[]
+            {
+                "дистанция слышимости",
+                "минимальная дистанция видимости",
+                "время исчезновения",
+                "жизнь после исчезновения",
+                "hearing distance",
+                "apparent distance",
+                "fade time",
+                "lifetime after fade out"
+            };
+
+            return allowedClueTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return false;
+    }
+
+    private static bool IsWeatherGameplaySurface(string relativePath)
+    {
+        return relativePath.Contains("/weather/curves/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldExposeWeatherSafeField(string relativePath, string userLabel, string valueType)
+    {
+        var label = userLabel.ToLowerInvariant();
+        return label.Contains("точки кривой", StringComparison.Ordinal)
+            || label.Contains("положение точки кривой", StringComparison.Ordinal)
+            || label.Contains("значение точки кривой", StringComparison.Ordinal)
+            || label.Contains("когда начинается эта ступень", StringComparison.Ordinal)
+            || label.Contains("насколько сильно действует эта ступень", StringComparison.Ordinal);
+    }
+
     private static bool IsVisualReferenceFieldCandidate(string relativePath, string userLabel, string valueType)
     {
         if (!IsReferenceValueType(valueType))
@@ -14594,6 +15007,21 @@ internal sealed class StudioRuntime
     {
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
+
+        if (IsCookingGameplaySurface(relativePath))
+        {
+            return ShouldExposeCookingListTarget(relativePath, userLabel);
+        }
+
+        if (IsHuntingGameplaySurface(relativePath))
+        {
+            return false;
+        }
+
+        if (IsWeatherGameplaySurface(relativePath))
+        {
+            return IsStandaloneGameplayCurvePointsSurface(relativePath, userLabel);
+        }
 
         var blockedTokens = new[]
         {
@@ -14808,6 +15236,48 @@ internal sealed class StudioRuntime
         return false;
     }
 
+    private static bool ShouldExposeCookingListTarget(string relativePath, string userLabel)
+    {
+        var label = userLabel.ToLowerInvariant();
+        var path = relativePath.ToLowerInvariant();
+
+        if (path.Contains("/cooking/data/curves/", StringComparison.Ordinal))
+        {
+            return IsStandaloneGameplayCurvePointsSurface(relativePath, userLabel);
+        }
+
+        if (!path.Contains("/cooking/recipes/", StringComparison.Ordinal)
+            && !path.Contains("/cooking/data/cookingreciperegistry.uasset", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var blockedTokens = new[]
+        {
+            "mesh", "material", "texture", "icon", "widget", "audio", "sound",
+            "visual", "transform", "component", "root nodes", "all nodes",
+            "asset user data", "primary asset"
+        };
+        if (blockedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (path.Contains("/cooking/data/cookingreciperegistry.uasset", StringComparison.Ordinal))
+        {
+            return label.Contains("блюда", StringComparison.Ordinal)
+                || label.Contains("recipe", StringComparison.Ordinal);
+        }
+
+        var allowedTokens = new[]
+        {
+            "ингредиент", "варианты ингредиента", "вариант ингредиента",
+            "possible ingredient", "main ingredient", "ingredients",
+            "подходящие предметы", "allowed items", "allowed types"
+        };
+        return allowedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static bool ShouldExposeGenericContainerTarget(
         string relativePath,
         string userLabel,
@@ -14958,6 +15428,7 @@ internal sealed class StudioRuntime
         var path = relativePath.ToLowerInvariant();
         return path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal)
             || path.Contains("/cooking/data/curves/", StringComparison.Ordinal)
+            || path.Contains("/weather/curves/", StringComparison.Ordinal)
             || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
             || path.Contains("/data/batteryeffectscurves/", StringComparison.Ordinal)
             || path.Contains("/curves/falling/", StringComparison.Ordinal)
@@ -15057,6 +15528,67 @@ internal sealed class StudioRuntime
             && (IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label)))
         {
             return "Внешний вид";
+        }
+
+        if (IsCookingGameplaySurface(relativePath))
+        {
+            if (path.Contains("/cooking/data/curves/", StringComparison.Ordinal))
+            {
+                return "Кривые качества";
+            }
+
+            if (label.Contains("базовый опыт", StringComparison.Ordinal)
+                || label.Contains("опыт за", StringComparison.Ordinal)
+                || label.Contains("experience", StringComparison.Ordinal))
+            {
+                return "Опыт";
+            }
+
+            if (label.Contains("ингредиент", StringComparison.Ordinal)
+                || label.Contains("предмет", StringComparison.Ordinal)
+                || label.Contains("литры", StringComparison.Ordinal)
+                || label.Contains("расход", StringComparison.Ordinal))
+            {
+                return "Ингредиенты";
+            }
+
+            if (label.Contains("качество", StringComparison.Ordinal)
+                || label.Contains("готовност", StringComparison.Ordinal)
+                || label.Contains("температур", StringComparison.Ordinal)
+                || label.Contains("время", StringComparison.Ordinal)
+                || label.Contains("питательност", StringComparison.Ordinal))
+            {
+                return "Приготовление";
+            }
+
+            if (label.Contains("включено", StringComparison.Ordinal))
+            {
+                return "Реестр блюд";
+            }
+
+            return "Блюдо";
+        }
+
+        if (IsHuntingGameplaySurface(relativePath))
+        {
+            if (path.Contains("/hunting/biomedata/", StringComparison.Ordinal))
+            {
+                if (label.Contains("дистанц", StringComparison.Ordinal)
+                    || label.Contains("след", StringComparison.Ordinal)
+                    || label.Contains("угол", StringComparison.Ordinal))
+                {
+                    return "Следы";
+                }
+
+                return "Появление животных";
+            }
+
+            return "Охотничья подсказка";
+        }
+
+        if (IsWeatherGameplaySurface(relativePath))
+        {
+            return "Кривые погоды";
         }
 
         if (IsWorldEventManagerAsset(relativePath)
@@ -15856,6 +16388,21 @@ internal sealed class StudioRuntime
         if (IsFishingGameplaySurface(relativePath))
         {
             return ResolveFishingFieldDescription(label, path);
+        }
+
+        if (IsCookingGameplaySurface(relativePath))
+        {
+            return ResolveCookingFieldDescription(label, path);
+        }
+
+        if (IsHuntingGameplaySurface(relativePath))
+        {
+            return ResolveHuntingFieldDescription(label, path);
+        }
+
+        if (IsWeatherGameplaySurface(relativePath))
+        {
+            return ResolveWeatherFieldDescription(label, path);
         }
 
         if (path.Contains("/fortifications/locks/", StringComparison.Ordinal)
@@ -17559,6 +18106,147 @@ internal sealed class StudioRuntime
         return "Игровая настройка рыболовной системы.";
     }
 
+    private static string ResolveCookingFieldDescription(string label, string path)
+    {
+        if (path.Contains("/cooking/data/cookingcommondata.uasset", StringComparison.Ordinal))
+        {
+            if (label.Contains("базовый опыт", StringComparison.Ordinal))
+            {
+                return "Сколько опыта кулинарии выдаётся за сам факт приготовления рецепта.";
+            }
+
+            if (label.Contains("время готовки", StringComparison.Ordinal))
+            {
+                return "Дополнительный опыт за длительность приготовления. Чем выше значение, тем сильнее время рецепта влияет на награду навыка.";
+            }
+
+            if (label.Contains("температур", StringComparison.Ordinal))
+            {
+                return "Дополнительный опыт за температурную часть готовки. Меняй осторожно, чтобы прокачка кулинарии не стала слишком быстрой.";
+            }
+        }
+
+        if (path.Contains("/cooking/data/cookingreciperegistry.uasset", StringComparison.Ordinal))
+        {
+            return "Включает или отключает блюдо в игровом реестре готовки.";
+        }
+
+        if (path.Contains("/cooking/data/curves/", StringComparison.Ordinal))
+        {
+            if (label.Contains("положение точки кривой", StringComparison.Ordinal)
+                || label.Contains("когда начинается эта ступень", StringComparison.Ordinal))
+            {
+                return "Входное значение кривой: количество, ошибка времени, температура или другой параметр готовки.";
+            }
+
+            return "Выходное значение кривой: как сильно меняется качество, масса или итог приготовления в этой точке.";
+        }
+
+        if (label.Contains("что создаётся", StringComparison.Ordinal)
+            || label.Contains("результат", StringComparison.Ordinal)
+            || label.Contains("product", StringComparison.Ordinal))
+        {
+            return "Какой предмет или блюдо игрок получает после успешного приготовления.";
+        }
+
+        if (label.Contains("ингредиент", StringComparison.Ordinal)
+            || label.Contains("подходящий предмет", StringComparison.Ordinal)
+            || label.Contains("вариант", StringComparison.Ordinal))
+        {
+            return "Какие продукты или группы продуктов подходят для этого слота рецепта.";
+        }
+
+        if (label.Contains("тратить предмет целиком", StringComparison.Ordinal))
+        {
+            return "Если включено, ингредиент расходуется полностью, а не частично по ресурсу или объёму.";
+        }
+
+        if (label.Contains("литры", StringComparison.Ordinal)
+            || label.Contains("расход", StringComparison.Ordinal))
+        {
+            return "Сколько ингредиента тратится при приготовлении этого блюда.";
+        }
+
+        if (label.Contains("питательност", StringComparison.Ordinal))
+        {
+            return "Насколько этот ингредиент влияет на питательность итогового блюда.";
+        }
+
+        if (label.Contains("качество", StringComparison.Ordinal)
+            || label.Contains("готовност", StringComparison.Ordinal)
+            || label.Contains("температур", StringComparison.Ordinal)
+            || label.Contains("время", StringComparison.Ordinal))
+        {
+            return "Параметр приготовления, который влияет на готовность, качество или итоговую ценность блюда.";
+        }
+
+        return "Безопасная настройка системы готовки.";
+    }
+
+    private static string ResolveHuntingFieldDescription(string label, string path)
+    {
+        if (path.Contains("/hunting/biomedata/", StringComparison.Ordinal))
+        {
+            if (label.Contains("дистанция до следующего следа", StringComparison.Ordinal))
+            {
+                return "На какой дистанции от текущей подсказки игра может разместить следующий след животного.";
+            }
+
+            if (label.Contains("количество следов", StringComparison.Ordinal))
+            {
+                return "Сколько подсказок игрок должен последовательно найти перед выходом на животное.";
+            }
+
+            if (label.Contains("размер группы животных", StringComparison.Ordinal))
+            {
+                return "Минимальный и максимальный размер группы животных для этого охотничьего биома.";
+            }
+
+            if (label.Contains("угол разброса", StringComparison.Ordinal))
+            {
+                return "Насколько широко следующий след может отклоняться от направления текущей цепочки.";
+            }
+
+            if (label.Contains("вес появления", StringComparison.Ordinal))
+            {
+                return "Насколько часто этот вариант выбирается среди охотничьих биомов. Чем выше вес, тем вероятнее появление.";
+            }
+        }
+
+        if (label.Contains("дистанция слышимости", StringComparison.Ordinal))
+        {
+            return "С какой дистанции игрок может услышать подсказку охоты.";
+        }
+
+        if (label.Contains("минимальная дистанция видимости", StringComparison.Ordinal))
+        {
+            return "Минимальная дистанция, на которой подсказка становится заметной игроку.";
+        }
+
+        if (label.Contains("время исчезновения", StringComparison.Ordinal))
+        {
+            return "Сколько времени занимает затухание охотничьей подсказки.";
+        }
+
+        if (label.Contains("жизнь после исчезновения", StringComparison.Ordinal))
+        {
+            return "Сколько подсказка ещё живёт в мире после визуального исчезновения.";
+        }
+
+        return "Безопасная настройка охотничьих следов и подсказок.";
+    }
+
+    private static string ResolveWeatherFieldDescription(string label, string path)
+    {
+        if (label.Contains("положение точки кривой", StringComparison.Ordinal)
+            || label.Contains("когда начинается эта ступень", StringComparison.Ordinal))
+        {
+            return "Входное значение погодной кривой: время, высота солнца, облачность или другая переменная симуляции.";
+        }
+
+        return "Выходное значение погодной кривой: сила ветра, плотность тумана, влажность, освещение или другой погодный эффект.";
+    }
+
     private static string ResolveReferenceInfoDescription(string relativePath, string userLabel)
     {
         var label = userLabel.ToLowerInvariant();
@@ -17661,6 +18349,19 @@ internal sealed class StudioRuntime
         if (TryResolveVisualReferencePicker(valueType, label, currentValue, out var visualPickerKind, out var visualPickerPrompt))
         {
             return (visualPickerKind, visualPickerPrompt);
+        }
+
+        if (path.Contains("/cooking/recipes/", StringComparison.Ordinal)
+            && (label.Contains("ингредиент", StringComparison.Ordinal)
+                || label.Contains("подходящий предмет", StringComparison.Ordinal)
+                || label.Contains("вариант ингредиента", StringComparison.Ordinal)
+                || label.Contains("что создаётся", StringComparison.Ordinal)
+                || label.Contains("результат", StringComparison.Ordinal)
+                || label.Contains("product", StringComparison.Ordinal)))
+        {
+            return (
+                "item-asset",
+                "Найди игровой предмет или блюдо, которое должно использоваться в этом рецепте.");
         }
 
         if (IsMapGameplayAsset(relativePath)
@@ -18045,6 +18746,86 @@ internal sealed class StudioRuntime
             {
                 return ("0", "10000");
             }
+        }
+
+        if (IsCookingGameplaySurface(relativePath))
+        {
+            if (label.Contains("опыт", StringComparison.Ordinal)
+                || label.Contains("experience", StringComparison.Ordinal))
+            {
+                return ("0", "10000");
+            }
+
+            if (label.Contains("шанс", StringComparison.Ordinal)
+                || label.Contains("chance", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+
+            if (label.Contains("качество", StringComparison.Ordinal)
+                || label.Contains("quality", StringComparison.Ordinal)
+                || label.Contains("питательност", StringComparison.Ordinal))
+            {
+                return ("0", "1");
+            }
+
+            if (label.Contains("время", StringComparison.Ordinal)
+                || label.Contains("time", StringComparison.Ordinal))
+            {
+                return ("0", "1440");
+            }
+
+            if (label.Contains("температур", StringComparison.Ordinal)
+                || label.Contains("temperature", StringComparison.Ordinal))
+            {
+                return ("0", "1000");
+            }
+
+            if (label.Contains("литры", StringComparison.Ordinal)
+                || label.Contains("расход", StringComparison.Ordinal)
+                || label.Contains("usage", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+        }
+
+        if (IsHuntingGameplaySurface(relativePath))
+        {
+            if (label.Contains("вес появления", StringComparison.Ordinal))
+            {
+                return ("0", "100");
+            }
+
+            if (label.Contains("количество следов", StringComparison.Ordinal)
+                || label.Contains("размер группы", StringComparison.Ordinal))
+            {
+                return ("0", "50");
+            }
+
+            if (label.Contains("угол", StringComparison.Ordinal)
+                || label.Contains("angle", StringComparison.Ordinal))
+            {
+                return ("0", "180");
+            }
+
+            if (label.Contains("дистанц", StringComparison.Ordinal)
+                || label.Contains("distance", StringComparison.Ordinal))
+            {
+                return ("0", "100000");
+            }
+
+            if (label.Contains("время", StringComparison.Ordinal)
+                || label.Contains("жизнь", StringComparison.Ordinal)
+                || label.Contains("time", StringComparison.Ordinal)
+                || label.Contains("lifetime", StringComparison.Ordinal))
+            {
+                return ("0", "3600");
+            }
+        }
+
+        if (IsWeatherGameplaySurface(relativePath))
+        {
+            return (null, null);
         }
 
         if (label.Contains("значение точки кривой", StringComparison.Ordinal))
@@ -18485,6 +19266,11 @@ internal sealed class StudioRuntime
                 return "Ключевые точки кулинарной кривой. Они задают, как меняется качество, масса или другой результат приготовления по мере нагрева и времени.";
             }
 
+            if (path.Contains("/weather/curves/", StringComparison.Ordinal))
+            {
+                return "Ключевые точки погодной кривой. Они задают, как меняется ветер, туман, влажность, облачность или освещение при разных условиях симуляции.";
+            }
+
             if (path.Contains("/minigames/lockpicking/", StringComparison.Ordinal))
             {
                 return "Ключевые точки кривой взлома. Добавляй новую точку, чтобы менять затухание, приближение или другой эффект мини-игры по этапам.";
@@ -18530,6 +19316,18 @@ internal sealed class StudioRuntime
             {
                 return "Ключевые точки кривой транспорта. Они задают, как меняется урон или эффект при росте скорости и силы столкновения.";
             }
+        }
+
+        if (path.Contains("/cooking/recipes/", StringComparison.Ordinal)
+            && (label.Contains("ингредиент", StringComparison.Ordinal)
+                || label.Contains("вариант ингредиента", StringComparison.Ordinal)))
+        {
+            return "Список ингредиентов или вариантов ингредиента для блюда. Можно расширять рецепт, убирать лишние варианты и подбирать совместимые игровые предметы.";
+        }
+
+        if (path.Contains("/cooking/data/cookingreciperegistry.uasset", StringComparison.Ordinal))
+        {
+            return "Общий реестр блюд системы готовки. Используй его для включения, отключения или проверки состава списка рецептов.";
         }
 
         if (IsVehicleSpawnPresetListSurface(relativePath, userLabel))
@@ -18846,6 +19644,19 @@ internal sealed class StudioRuntime
                     "vehicle-spawn-preset",
                     "Найди пресет транспорта для этой точки спавна на карте.");
             }
+        }
+
+        if (relativePath.Contains("/cooking/recipes/", StringComparison.OrdinalIgnoreCase)
+            && (label.Contains("ингредиент", StringComparison.Ordinal)
+                || label.Contains("вариант ингредиента", StringComparison.Ordinal)
+                || label.Contains("подходящие предметы", StringComparison.Ordinal))
+            && (values.Length == 0
+                || values.All(value => value is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)))
+        {
+            return (
+                true,
+                "item-asset",
+                "Найди продукт, предмет или готовое блюдо, которое должно подходить для этого слота рецепта.");
         }
 
         if (IsCargoDropMajorSpawnerOptionsSurface(relativePath, userLabel)
@@ -19255,6 +20066,84 @@ internal sealed class StudioRuntime
             return new ModAssetDescriptor(
                 $"Ингредиент: {LocalizeAssetStem(baseName)}",
                 "Группы и правила использования ингредиента в рецептах.");
+        }
+
+        if (categoryId.Equals("cooking", StringComparison.OrdinalIgnoreCase))
+        {
+            if (lowerStem.Equals("cookingcommondata", StringComparison.Ordinal))
+            {
+                return new ModAssetDescriptor(
+                    "Готовка: общие правила опыта",
+                    "Базовый опыт кулинарии и множители награды за время и температуру приготовления.");
+            }
+
+            if (lowerStem.Equals("cookingreciperegistry", StringComparison.Ordinal))
+            {
+                return new ModAssetDescriptor(
+                    "Готовка: реестр блюд",
+                    "Список блюд системы готовки и флаги включения рецептов.");
+            }
+
+            if (relativePath.Contains("/cooking/data/curves/", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ModAssetDescriptor(
+                    $"Кривая готовки: {cleanStem}",
+                    "Точки кривой качества, массы или ошибки приготовления.");
+            }
+
+            if (relativePath.Contains("/cooking/recipes/", StringComparison.OrdinalIgnoreCase))
+            {
+                var recipeName = lowerStem.StartsWith("cook_dish_", StringComparison.Ordinal)
+                    ? stem["cook_dish_".Length..]
+                    : lowerStem.StartsWith("cook_drink_", StringComparison.Ordinal)
+                        ? stem["cook_drink_".Length..]
+                        : lowerStem.StartsWith("cook_", StringComparison.Ordinal)
+                            ? stem["cook_".Length..]
+                            : stem;
+                return new ModAssetDescriptor(
+                    $"Блюдо: {LocalizeAssetStem(recipeName)}",
+                    "Ингредиенты, расход, качество и безопасные параметры рецепта готовки.");
+            }
+
+            return new ModAssetDescriptor(
+                $"Готовка: {cleanStem}",
+                "Безопасные параметры кулинарной системы.");
+        }
+
+        if (categoryId.Equals("hunting", StringComparison.OrdinalIgnoreCase))
+        {
+            if (relativePath.Contains("/hunting/biomedata/", StringComparison.OrdinalIgnoreCase))
+            {
+                var biomeName = lowerStem.StartsWith("bd_", StringComparison.Ordinal)
+                    ? stem[3..]
+                    : stem;
+                return new ModAssetDescriptor(
+                    $"Охотничий биом: {LocalizeAssetStem(biomeName)}",
+                    "Дистанции следов, количество подсказок, размер группы животных и вес появления.");
+            }
+
+            if (relativePath.Contains("/hunting/clues/", StringComparison.OrdinalIgnoreCase))
+            {
+                var clueName = lowerStem.StartsWith("bp_huntingclue_", StringComparison.Ordinal)
+                    ? stem["bp_huntingclue_".Length..]
+                    : lowerStem.Equals("bp_huntingclue", StringComparison.Ordinal)
+                        ? "общий след"
+                        : stem;
+                return new ModAssetDescriptor(
+                    $"Охотничий след: {LocalizeAssetStem(clueName)}",
+                    "Дистанции слышимости и видимости, время исчезновения и срок жизни подсказки.");
+            }
+
+            return new ModAssetDescriptor(
+                $"Охота: {cleanStem}",
+                "Безопасные параметры охоты и следов животных.");
+        }
+
+        if (categoryId.Equals("weather", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModAssetDescriptor(
+                $"Кривая погоды: {cleanStem}",
+                "Точки кривой погодной симуляции: ветер, туман, облачность, влажность или освещение.");
         }
 
         if (categoryId.Equals("body-effects", StringComparison.OrdinalIgnoreCase))
@@ -21953,6 +22842,9 @@ internal sealed class StudioRuntime
 
         if (categoryId is "crafting-recipes"
             or "crafting-ingredients"
+            or "cooking"
+            or "hunting"
+            or "weather"
             or "starter-kit"
             or "foreign-substances"
             or "quests"
@@ -28995,6 +29887,21 @@ internal sealed class StudioRuntime
             return new ModCategory("crafting-ingredients", "Крафт: ингредиенты", ResolveCategoryDescription("crafting-ingredients"));
         }
 
+        if (path.Contains("/cooking/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModCategory("cooking", "Кулинария и готовка", ResolveCategoryDescription("cooking"));
+        }
+
+        if (path.Contains("/hunting/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModCategory("hunting", "Охота и следы", ResolveCategoryDescription("hunting"));
+        }
+
+        if (path.Contains("/weather/curves/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModCategory("weather", "Погода и небо", ResolveCategoryDescription("weather"));
+        }
+
         if (path.Contains("/data/spawnequipment/", StringComparison.OrdinalIgnoreCase))
         {
             return new ModCategory("starter-kit", "Стартовый набор", ResolveCategoryDescription("starter-kit"));
@@ -29114,6 +30021,9 @@ internal sealed class StudioRuntime
         {
             "crafting-recipes" => "Изменение состава/настроек рецептов и времени крафта.",
             "crafting-ingredients" => "Изменение требований ингредиентов и групп замен.",
+            "cooking" => "Блюда, ингредиенты, качество приготовления и кривые готовки.",
+            "hunting" => "Биомы охоты, следы животных, дистанции подсказок и частота появления.",
+            "weather" => "Кривые погоды: ветер, облачность, влажность, туман и освещение.",
             "starter-kit" => "Параметры стартовой экипировки игрока.",
             "foreign-substances" => "Стимуляторы, токсины, скорость всасывания и выведения веществ.",
             "economy-trader" => "Торговые таблицы, цены и параметры экономики.",
