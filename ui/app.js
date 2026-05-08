@@ -1629,10 +1629,10 @@ function updateModAssetMeta() {
   const stagedAssets = state.modding.stagedByAssetId.size;
   const filteredNote =
     state.modding.showOnlyEditable && visibleAssets.length !== pageAssets
-      ? ` После фильтра: ${visibleAssets.length}. Часть технических или пока пустых систем скрыта.`
+      ? ` Проверенных систем на этой странице: ${visibleAssets.length}.`
       : "";
   el("modAssetMeta").textContent =
-    `Всего систем: ${state.modding.total}. Сейчас видно: ${pageAssets}.${filteredNote} Уже в моде: ${stagedAssets}.`;
+    `Проверенных систем: ${state.modding.total}. На странице: ${pageAssets}.${filteredNote} Уже в моде: ${stagedAssets}.`;
 }
 
 function selectedAssetFromCurrentPage() {
@@ -1683,8 +1683,8 @@ function renderSelectedAssetPreview() {
   const note = document.createElement("div");
   note.className = "selected-asset-note";
   note.textContent = asset.supportsSafeEdits
-    ? "Ниже откроются готовые настройки этой системы. Пользователю не нужно знать названия ассетов и пути."
-    : "У этой системы может не быть прямых числовых полей. Тогда основной сценарий ниже: добавить нужные игровые элементы или поменять их состав.";
+    ? "Проверенная редактируемая поверхность текущей сборки SCUM."
+    : "Техническая поверхность без подтверждённых безопасных настроек.";
 
   const actions = document.createElement("div");
   actions.className = "selected-asset-actions";
@@ -1716,7 +1716,7 @@ function renderModAssetRows() {
     const empty = document.createElement("div");
     empty.className = "asset-list-empty muted";
     empty.textContent = state.modding.showOnlyEditable
-      ? "На этой странице нет систем с безопасными настройками. Сними фильтр или открой другой раздел."
+      ? "На этой странице нет проверенных систем."
       : "По текущему фильтру игровые системы не найдены.";
     host.appendChild(empty);
     renderSelectedAssetPreview();
@@ -3018,10 +3018,6 @@ function renderSchemaFields() {
   const readonlyFields = fields.filter((field) => field.editable === false);
 
   if (editableFields.length > 0) {
-    const note = document.createElement("div");
-    note.className = "schema-note";
-    note.textContent = "Открывай только тот блок, который хочешь поменять. Остальные секции можно не трогать.";
-    host.appendChild(note);
     appendFieldSections(host, editableFields);
   }
 
@@ -3110,38 +3106,6 @@ function renderListTargets() {
     renderCurrentListOps();
     renderSchemaFilterMeta();
     return;
-  }
-
-  if (listTargets.length > 0) {
-    const note = document.createElement("div");
-    note.className = "schema-note";
-    note.textContent = "Открывай только тот список, который хочешь расширить, сократить или пересобрать.";
-    host.appendChild(note);
-  }
-
-  if (schemaActionableTargets(schema).length > 0) {
-    const guide = document.createElement("div");
-    guide.className = "list-target-guide";
-
-    const title = document.createElement("div");
-    title.className = "list-target-guide-title";
-    title.textContent = "Как добавить новое";
-
-    const steps = document.createElement("div");
-    steps.className = "list-target-guide-steps";
-    [
-      "1. Открой нужный список ниже.",
-      "2. Нажми «Показать варианты» или введи игровое слово для поиска.",
-      "3. Кликни по найденному варианту, затем нажми кнопку «Показать результат и открыть новые настройки»."
-    ].forEach((line) => {
-      const item = document.createElement("div");
-      item.className = "list-target-guide-step";
-      item.textContent = line;
-      steps.appendChild(item);
-    });
-
-    guide.append(title, steps);
-    host.appendChild(guide);
   }
 
   listTargets.forEach((target, index) => {

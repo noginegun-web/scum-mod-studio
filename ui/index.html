@@ -63,30 +63,7 @@
 
   <main class="layout">
     <section class="panel">
-      <h2>1) Найди, что хочешь изменить</h2>
-      <p class="muted small">Сначала выбери раздел, потом систему в списке слева. Справа сразу будет видно, что именно меняет выбранная система и можно ли её безопасно настроить.</p>
-
-      <details class="quick-help">
-        <summary class="quick-help-title">Как пользоваться, если нужно</summary>
-        <div class="quick-help-grid">
-          <div class="quick-help-step">
-            <strong>1. Выбери раздел</strong>
-            <span>Например: крафт, эффекты персонажа, NPC, стартовые вещи.</span>
-          </div>
-          <div class="quick-help-step">
-            <strong>2. Найди систему</strong>
-            <span>Выбери в списке болезнь, рецепт, предмет, событие или другую игровую систему. Нужные настройки ниже откроются автоматически.</span>
-          </div>
-          <div class="quick-help-step">
-            <strong>3. Поменяй параметры</strong>
-            <span>Если система пустая, сначала открой блок состава ниже, выбери готовый вариант и затем нажми кнопку открытия результата. Технические поля скрыты.</span>
-          </div>
-          <div class="quick-help-step">
-            <strong>4. Сохрани и собери</strong>
-            <span>Добавь изменения в мод и выпусти один готовый <code>.pak</code>.</span>
-          </div>
-        </div>
-      </details>
+      <h2>1) Игровые системы</h2>
 
       <div class="toolbar">
         <select id="modCategorySelect"></select>
@@ -97,13 +74,7 @@
           <option value="120">120 на страницу</option>
           <option value="200">200 на страницу</option>
         </select>
-        <label class="inline-check">
-          <input id="modOnlyEditableCheck" type="checkbox">
-          Только системы с безопасными настройками
-        </label>
-      </div>
-      <div id="modAssetSearchHint" class="search-hint small muted">
-        Ищи по игровому смыслу: верёвка, охрана, квест, семена, катана, рыба.
+        <input id="modOnlyEditableCheck" type="checkbox" checked hidden>
       </div>
 
       <div id="modCategoryChips" class="category-chip-row"></div>

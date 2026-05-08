@@ -4,6 +4,7 @@ builds/
 .vs/
 runtime-err.log
 runtime-out.log
+.codex-audit/
 *.user
 *.suo
 Releases/

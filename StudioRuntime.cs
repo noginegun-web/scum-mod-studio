@@ -17,7 +17,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 9;
+    private const int ModAssetsCatalogCacheFormatVersion = 12;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -42,6 +42,51 @@ internal sealed class StudioRuntime
     private const string SyntheticRecipeAllowedTypesTargetPrefix = "synthetic:recipe-allowed-types:";
     private const string SyntheticWorldEventManagerEventTypesTargetPath = "synthetic:worldevent-manager-event-types";
     private const string QuestManagerAssetId = "game::scum/content/conz_files/quests/questmangerdata.uasset";
+
+    private static readonly string[] KnownUnstableCatalogAssetSuffixes =
+    [
+        "scum/content/conz_files/quests/questcommondata.uasset",
+        "scum/content/conz_files/quests/questdata/armorer/t3/kill/t3_ar_kill_razorpuppetd1.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_base_modular_hatch_floor_metal.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_base_modular_ramp_cement.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_base_modular_stairs_l_shaped_mirrored_twig.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_base_wall_upgr_3_200.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_base_wall_upgr_4_200.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_base_wall_upgr_25.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_bed_improvised_upgrade.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/asiandecordlc/cr_cabinet_large_asian.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_door_double_upgr2.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_sign_04.uasset",
+        "scum/content/conz_files/items/crafting/recipes/placeables/cr_wooden_platform.uasset",
+        "scum/content/conz_files/items/crafting/recipes/items/cr_improvised_bulletproof_armor.uasset",
+        "scum/content/conz_files/items/crafting/recipes/items/cr_improvised_motorcycle_wheel.uasset",
+        "scum/content/conz_files/items/crafting/recipes/items/cr_twd_daredevil_helmet_01_twitchdrops.uasset",
+        "scum/content/conz_files/items/crafting/recipes/items/cr_wooden_club_wire.uasset",
+        "scum/content/conz_files/maps/the_island/b_3_refinery_base_01.umap",
+        "scum/content/conz_files/maps/the_island/b_3_refinery_base_03.umap",
+        "scum/content/conz_files/maps/the_island/tv_base_c_1.umap",
+        "scum/content/conz_files/maps/the_island/tv_base_d_0.umap",
+        "scum/content/conz_files/maps/the_island/tv_base_z_0.umap",
+        "scum/content/conz_files/maps/the_island/tv_base_z_2.umap",
+        "scum/content/conz_files/gameresources/food/solids/cookeddishes/bp_dish_fishpaprikash.uasset",
+        "scum/content/conz_files/gameresources/food/solids/cannedspaghetti.uasset",
+        "scum/content/conz_files/gameresources/food/solids/opuntia.uasset",
+        "scum/content/conz_files/gameresources/food/solids/orange.uasset",
+        "scum/content/conz_files/gameresources/food/solids/broccoli.uasset",
+        "scum/content/conz_files/items/ammunition/ammunition_class/bp_weaponbullet_9x39mm_crafted.uasset",
+        "scum/content/conz_files/items/ammunition/ammunition_class/bp_sentryhighprecisionbullet_client.uasset",
+        "scum/content/conz_files/items/ammunition/ammunition_class/bp_weaponbullet_shotgunshell_crafted.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/buildings/church/examine_bible_stand.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/special_packages/cargo_drops/examine_aks_74u_addons_cargodrop.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/farming/examine_apricot.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/character/armednpcs/examine_scavenger_03_v02_radiation.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/character/armednpcs/examine_scavenger_03_v08.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/buildings/warehouse/residential/examine_green_crate_big.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/special_packages/killbox/examine_kar98_killbox_pack.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/special_packages/vault/examine_mk18_vault_pack.uasset",
+        "scum/content/conz_files/items/spawnerpresets2/special_packages/world_weapons.uasset",
+        "scum/content/conz_files/characters/prisoner/blueprints/bodyeffects/conditions/fooddisgust.uasset"
+    ];
 
     private static readonly StarterSpawnFlagSpec[] StarterSpawnFlags =
     [
@@ -4787,7 +4832,7 @@ internal sealed class StudioRuntime
                 descriptor.DisplayName,
                 descriptor.Summary,
                 extension.TrimStart('.'),
-                IsUassetPackageExtension(extension) || extension is ".json"));
+                IsLikelySafeEditableCatalogAsset(normalized, category.Id, extension)));
         }
 
         SortModAssets(result);
@@ -4883,7 +4928,7 @@ internal sealed class StudioRuntime
                 }
 
                 var descriptor = DescribeModAsset(normalized, category.Id);
-                var supportsSafe = IsUassetPackageExtension(extension) || extension is ".json";
+                var supportsSafe = IsLikelySafeEditableCatalogAsset(normalized, category.Id, extension);
                 result.Add(new StudioModAssetDto(
                     $"game::{normalized.ToLowerInvariant()}",
                     normalized,
@@ -4903,7 +4948,7 @@ internal sealed class StudioRuntime
                 }
 
                 var descriptor = DescribeModAssetQuick(normalized, category.Id);
-                var supportsSafe = IsUassetPackageExtension(extension) || extension is ".json";
+                var supportsSafe = IsLikelySafeEditableCatalogAsset(normalized, category.Id, extension);
                 result.Add(new StudioModAssetDto(
                     $"game::{normalized.ToLowerInvariant()}",
                     normalized,
@@ -4968,7 +5013,7 @@ internal sealed class StudioRuntime
                 descriptor.DisplayName,
                 descriptor.Summary,
                 extension.TrimStart('.'),
-                IsUassetPackageExtension(extension) || extension is ".json"));
+                IsLikelySafeEditableCatalogAsset(normalized, category.Id, extension)));
         }
 
         SortModAssets(result);
@@ -5199,7 +5244,192 @@ internal sealed class StudioRuntime
             return false;
         }
 
-        return true;
+        return asset.SupportsSafeEdits;
+    }
+
+    private static bool IsLikelySafeEditableCatalogAsset(string relativePath, string categoryId, string extension)
+    {
+        if (extension.Equals(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!IsUassetPackageExtension(extension))
+        {
+            return false;
+        }
+
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var fileName = Path.GetFileNameWithoutExtension(path);
+        if (string.IsNullOrWhiteSpace(fileName)
+            || IsAlwaysHiddenCatalogLane(path)
+            || IsKnownUnstableCatalogAsset(path))
+        {
+            return false;
+        }
+
+        if (fileName.StartsWith("ia_", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (IsCraftingUiDataRegistryAsset(path)
+            || IsCraftingRecipeAsset(path)
+            || IsStarterSpawnEquipmentAsset(path)
+            || IsWorldEventManagerAsset(path)
+            || IsCargoDropContainerAsset(path)
+            || IsCargoDropWorldEventAsset(path)
+            || IsCargoDropPackagePresetAsset(path)
+            || IsAdvancedItemSpawnerPresetAsset(path)
+            || IsRegularItemSpawnerPresetAsset(path)
+            || IsVehicleSpawnGroupAsset(path)
+            || IsGameEventMarkerAsset(path)
+            || IsGameEventCoreAsset(path))
+        {
+            return true;
+        }
+
+        return categoryId.ToLowerInvariant() switch
+        {
+            "locks-base" => IsLikelyEditableLockOrBaseAsset(path, fileName),
+            "foreign-substances" => path.Contains("/foreignsubstances/", StringComparison.Ordinal)
+                || path.Contains("/metabolism/", StringComparison.Ordinal),
+            "npc-encounters" => IsLikelyEditableNpcEncounterAsset(path, fileName),
+            "quests" => path.Contains("/quests/", StringComparison.Ordinal),
+            "crafting-recipes" => IsCraftingRecipeAsset(path),
+            "crafting-ingredients" => path.Contains("/items/crafting/", StringComparison.Ordinal),
+            "map-locations" => IsLikelyEditableMapAsset(path, fileName),
+            "item-spawning" => path.Contains("/data/tables/items/spawning/", StringComparison.Ordinal)
+                || path.Contains("/items/spawnerpresets/", StringComparison.Ordinal)
+                || path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
+                || path.Contains("/worldevents/cargodrop/", StringComparison.Ordinal),
+            "skills-progression" => path.Contains("/skills/", StringComparison.Ordinal)
+                || IsStandaloneGameplayCurvePath(path),
+            "weapons-items" => IsLikelyEditableWeaponOrItemAsset(path, fileName),
+            "body-effects" => path.Contains("/bodyeffects/", StringComparison.Ordinal)
+                || path.Contains("/metabolism/", StringComparison.Ordinal),
+            "radiation" => path.Contains("radiation", StringComparison.Ordinal),
+            "plants-farming" => IsLikelyEditablePlantAsset(path, fileName),
+            "fishing-spawn" => path.Contains("/characters/spawnerpresets/fishspeciespresets/", StringComparison.Ordinal)
+                || path.Contains("/characters/animals2/fish/", StringComparison.Ordinal),
+            "starter-kit" => IsStarterSpawnEquipmentAsset(path),
+            "vehicles" => path.Contains("hitdamagevsvehiclespeed", StringComparison.Ordinal)
+                || path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
+                || path.Contains("/vehicles/", StringComparison.Ordinal),
+            _ => false
+        };
+    }
+
+    private static bool IsLikelyEditableLockOrBaseAsset(string path, string fileName)
+    {
+        if (path.Contains("/minigames/lockpicking/", StringComparison.Ordinal)
+            && (fileName.StartsWith("ia_", StringComparison.OrdinalIgnoreCase)
+                || fileName.StartsWith("inputaction", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        return path.Contains("/minigames/lockpicking/", StringComparison.Ordinal)
+            || path.Contains("/fortifications/locks/", StringComparison.Ordinal)
+            || path.Contains("/basebuilding/", StringComparison.Ordinal)
+            || path.Contains("/items/basebuilding/", StringComparison.Ordinal);
+    }
+
+    private static bool IsKnownUnstableCatalogAsset(string path)
+    {
+        return KnownUnstableCatalogAssetSuffixes.Any(suffix => path.EndsWith(suffix, StringComparison.Ordinal));
+    }
+
+    private static bool IsLikelyEditableNpcEncounterAsset(string path, string fileName)
+    {
+        if (fileName.Contains("_lpc", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith("_child", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return path.Contains("/encounters/character_presets/npcs/", StringComparison.Ordinal)
+            || path.Contains("/encounters/encounterclasses/", StringComparison.Ordinal)
+            || path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal)
+            || path.Contains("/worldevents/", StringComparison.Ordinal)
+            || (path.Contains("/gameevents/", StringComparison.Ordinal)
+                && !path.Contains("/ui/gameevents/", StringComparison.Ordinal))
+            || (path.Contains("/npcs/", StringComparison.Ordinal)
+                && (path.Contains("spawn", StringComparison.Ordinal)
+                    || path.Contains("config", StringComparison.Ordinal)
+                    || path.Contains("table", StringComparison.Ordinal)
+                    || path.Contains("zone", StringComparison.Ordinal)
+                    || path.Contains("difficulty", StringComparison.Ordinal)));
+    }
+
+    private static bool IsLikelyEditableMapAsset(string path, string fileName)
+    {
+        if (!IsMapGameplayAsset(path))
+        {
+            return false;
+        }
+
+        if (fileName.Contains("_outpost_bosshouse", StringComparison.OrdinalIgnoreCase)
+            && !fileName.Contains("_ext_", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var editableTokens = new[]
+        {
+            "trader", "outpost", "sentry", "mech", "vehicle", "spawn", "spawner", "npc",
+            "quest", "encounter", "patrol", "guard", "guarded", "bunker", "poi", "zone",
+            "cargo", "drop", "killbox", "event", "base", "parking"
+        };
+
+        return editableTokens.Any(token => path.Contains(token, StringComparison.Ordinal)
+            || fileName.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsLikelyEditableWeaponOrItemAsset(string path, string fileName)
+    {
+        if (fileName.StartsWith("ia_", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return path.Contains("/items/weapons/ranged_weapons/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/weapon_clips/", StringComparison.Ordinal)
+            || path.Contains("/items/ammunition/", StringComparison.Ordinal)
+            || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
+            || path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal)
+            || path.Contains("/items/equipment/active_items/", StringComparison.Ordinal)
+            || path.Contains("/items/spawnerpresets/examine_data_presets/", StringComparison.Ordinal)
+            || path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
+            || path.Contains("/gameresources/food/", StringComparison.Ordinal);
+    }
+
+    private static bool IsLikelyEditablePlantAsset(string path, string fileName)
+    {
+        return path.Contains("/foliage/farming/", StringComparison.Ordinal)
+            && (fileName.Equals("da_plantspecieslist", StringComparison.OrdinalIgnoreCase)
+                || fileName.StartsWith("da_plantspecies_", StringComparison.OrdinalIgnoreCase)
+                || fileName.StartsWith("da_plantpest_", StringComparison.OrdinalIgnoreCase)
+                || fileName.StartsWith("da_plantdisease_", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsStandaloneGameplayCurvePath(string path)
+    {
+        return path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal)
+            || path.Contains("/cooking/data/curves/", StringComparison.Ordinal)
+            || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
+            || path.Contains("/data/batteryeffectscurves/", StringComparison.Ordinal)
+            || path.Contains("/curves/falling/", StringComparison.Ordinal)
+            || path.Contains("/curves/landing/", StringComparison.Ordinal)
+            || path.Contains("/minigames/lockpicking/", StringComparison.Ordinal)
+            || path.Contains("/basebuilding/energydamagecurves/", StringComparison.Ordinal)
+            || path.Contains("/characters/mechanoids/sentry/curves/", StringComparison.Ordinal)
+            || path.Contains("/characters/zombies2/data/observingcurve", StringComparison.Ordinal)
+            || path.Contains("/vehicles/", StringComparison.Ordinal);
     }
 
     private static bool IsAlwaysHiddenCatalogLane(string relativePath)
