@@ -319,6 +319,8 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _advancedItemSpawnerSubpresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _vehicleSpawnPresetReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _vehicleClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _vehicleAttachmentClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualStaticMeshObjectReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualStaticMeshSoftReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualSkeletalMeshObjectReferenceOptionsCache;
@@ -879,6 +881,10 @@ internal sealed class StudioRuntime
                     _advancedItemSpawnerSubpresetReferenceOptionsCache ??= BuildAdvancedItemSpawnerSubpresetReferenceOptions(),
                 "vehicle-spawn-preset" or "vehicle-preset" =>
                     _vehicleSpawnPresetReferenceOptionsCache ??= BuildVehicleSpawnPresetReferenceOptions(),
+                "vehicle-class" =>
+                    _vehicleClassReferenceOptionsCache ??= BuildVehicleClassReferenceOptions(),
+                "vehicle-attachment-class" =>
+                    _vehicleAttachmentClassReferenceOptionsCache ??= BuildVehicleAttachmentClassReferenceOptions(),
                 "visual-static-mesh-object" =>
                     _visualStaticMeshObjectReferenceOptionsCache ??= BuildVisualStaticMeshObjectReferenceOptions(),
                 "visual-static-mesh-asset" =>
@@ -2331,6 +2337,20 @@ internal sealed class StudioRuntime
             assetInfo => $"Пресет транспорта: {ResolveVehicleSpawnPresetOptionDisplayName(assetInfo.RelativePath)}");
     }
 
+    private List<StudioReferenceOptionDto> BuildVehicleClassReferenceOptions()
+    {
+        return BuildBlueprintReferenceOptions(
+            IsVehicleClassAssetCandidate,
+            assetInfo => PrefixReferenceOptionLabel("Класс транспорта", ResolveVehicleClassDisplayName(assetInfo.RelativePath)));
+    }
+
+    private List<StudioReferenceOptionDto> BuildVehicleAttachmentClassReferenceOptions()
+    {
+        return BuildBlueprintReferenceOptions(
+            IsVehicleAttachmentClassAssetCandidate,
+            assetInfo => PrefixReferenceOptionLabel("Деталь транспорта", ResolveVehicleClassDisplayName(assetInfo.RelativePath)));
+    }
+
     private List<StudioReferenceOptionDto> BuildVisualStaticMeshObjectReferenceOptions()
     {
         return MergeCustomVisualReferenceOptions(
@@ -3093,6 +3113,37 @@ internal sealed class StudioRuntime
         return stem.StartsWith("sm_", StringComparison.OrdinalIgnoreCase)
                || (path.Contains("/meshes/", StringComparison.Ordinal) && !stem.StartsWith("sk_", StringComparison.OrdinalIgnoreCase))
                || (path.Contains("/models/", StringComparison.Ordinal) && stem.StartsWith("sm_", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsVehicleClassAssetCandidate(string relativePath)
+    {
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+            || !path.Contains("/vehicles/", StringComparison.Ordinal)
+            || path.Contains("/spawningpresets/", StringComparison.Ordinal)
+            || path.Contains("/attachments/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(path);
+        return stem.StartsWith("bpc_", StringComparison.OrdinalIgnoreCase)
+               || stem.StartsWith("bp_vehicle", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsVehicleAttachmentClassAssetCandidate(string relativePath)
+    {
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+            || !path.Contains("/vehicles/", StringComparison.Ordinal)
+            || !path.Contains("/attachments/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(path);
+        return stem.StartsWith("bpc_", StringComparison.OrdinalIgnoreCase)
+               || stem.StartsWith("bp_", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsVisualSkeletalMeshAssetCandidate(string relativePath)
@@ -14162,6 +14213,13 @@ internal sealed class StudioRuntime
                 .Replace("max duration", "максимальная длительность", StringComparison.OrdinalIgnoreCase);
         }
 
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("vehicle class", "класс транспорта", StringComparison.OrdinalIgnoreCase)
+                .Replace("attachment class", "класс детали транспорта", StringComparison.OrdinalIgnoreCase);
+        }
+
         if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase)
             && path.Contains("radiation", StringComparison.OrdinalIgnoreCase))
         {
@@ -14443,6 +14501,8 @@ internal sealed class StudioRuntime
             label = ReplaceSemanticLabelPart(label, "item location", "зоны появления");
             label = ReplaceSemanticLabelPart(label, "add impulse on hit", "физический толчок при попадании");
             label = ReplaceSemanticLabelPart(label, "projectile data", "данные пули");
+            label = ReplaceSemanticLabelPart(label, "weight", "вес пули");
+            label = ReplaceSemanticLabelPart(label, "ballistic coefficient", "баллистический коэффициент");
             label = ReplaceSemanticLabelPart(label, "muzzle velocity", "скорость пули");
             label = ReplaceSemanticLabelPart(label, "initial damage in game event", "базовый урон в игровом событии");
             label = ReplaceSemanticLabelPart(label, "initial damage", "базовый урон");
@@ -14565,6 +14625,9 @@ internal sealed class StudioRuntime
                 .Replace("ammo count", "патронов в пачке", StringComparison.OrdinalIgnoreCase)
                 .Replace("данные пули class", "класс пули", StringComparison.OrdinalIgnoreCase)
                 .Replace("projectile class", "класс пули", StringComparison.OrdinalIgnoreCase)
+                .Replace("данные пули / weight", "данные пули / вес пули", StringComparison.OrdinalIgnoreCase)
+                .Replace("weight", "вес пули", StringComparison.OrdinalIgnoreCase)
+                .Replace("ballistic coefficient", "баллистический коэффициент", StringComparison.OrdinalIgnoreCase)
                 .Replace("armor piercing factor", "бронепробиваемость", StringComparison.OrdinalIgnoreCase)
                 .Replace("базовый уровень урон в игровом событии", "базовый урон в игровом событии", StringComparison.OrdinalIgnoreCase)
                 .Replace("базовый уровень урон", "базовый урон", StringComparison.OrdinalIgnoreCase);
@@ -15051,6 +15114,7 @@ internal sealed class StudioRuntime
             ("short casting angle", "угол короткого заброса"),
             ("casting power", "сила заброса"),
             ("casting angle", "угол заброса"),
+            ("fishing bounds angle", "угол рабочей зоны рыбалки"),
             ("base reeling speed", "обычная скорость подмотки"),
             ("fast reeling speed", "быстрая скорость подмотки"),
             ("reel handle acceleration", "ускорение ручки катушки"),
@@ -15080,6 +15144,7 @@ internal sealed class StudioRuntime
             ("break segment index", "сегмент разрыва"),
             ("distance for size increase", "дистанция увеличения размера"),
             ("moving ripple threshold", "порог ряби при движении"),
+            ("simulated weight during fast reeling", "вес поплавка при быстрой подмотке"),
             ("max scale", "максимальный размер"),
             ("visibility factor", "заметность лески"),
             ("line piece", "отрезок лески"),
@@ -15528,26 +15593,6 @@ internal sealed class StudioRuntime
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
 
-        if (IsFishingGameplaySurface(relativePath))
-        {
-            return ShouldExposeFishingSafeField(relativePath, userLabel, valueType);
-        }
-
-        if (IsCookingGameplaySurface(relativePath))
-        {
-            return ShouldExposeCookingSafeField(relativePath, userLabel, valueType);
-        }
-
-        if (IsHuntingGameplaySurface(relativePath))
-        {
-            return ShouldExposeHuntingSafeField(relativePath, userLabel, valueType);
-        }
-
-        if (IsWeatherGameplaySurface(relativePath))
-        {
-            return ShouldExposeWeatherSafeField(relativePath, userLabel, valueType);
-        }
-
         if (IsVisualReferenceFieldCandidate(relativePath, userLabel, valueType))
         {
             return true;
@@ -15585,6 +15630,32 @@ internal sealed class StudioRuntime
         if (hardBlockedTechnicalTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
         {
             return false;
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && (IsCommonItemSafeFieldLabel(label) || IsFuelPoweredItemSafeFieldLabel(label)))
+        {
+            return true;
+        }
+
+        if (IsFishingGameplaySurface(relativePath))
+        {
+            return ShouldExposeFishingSafeField(relativePath, userLabel, valueType);
+        }
+
+        if (IsCookingGameplaySurface(relativePath))
+        {
+            return ShouldExposeCookingSafeField(relativePath, userLabel, valueType);
+        }
+
+        if (IsHuntingGameplaySurface(relativePath))
+        {
+            return ShouldExposeHuntingSafeField(relativePath, userLabel, valueType);
+        }
+
+        if (IsWeatherGameplaySurface(relativePath))
+        {
+            return ShouldExposeWeatherSafeField(relativePath, userLabel, valueType);
         }
 
         if (IsMapGameplayAsset(relativePath))
@@ -15719,7 +15790,7 @@ internal sealed class StudioRuntime
             var allowedPlantTokens = new[]
             {
                 "название растения", "название вредителя", "название болезни",
-                "пакет семян",
+                "пакет семян", "вредители", "болезни",
                 "лучшая температура для семян", "лучшая температура роста",
                 "сколько часов длится одна стадия роста", "финальная стадия роста",
                 "сколько живёт финальная стадия", "когда финальная стадия начинает портиться",
@@ -15747,7 +15818,8 @@ internal sealed class StudioRuntime
         {
             var allowedItemSelectionTokens = new[]
             {
-                "главный предмет", "название набора", "номер команды события"
+                "главный предмет", "дополнительные предметы", "крепления",
+                "название набора", "номер команды события"
             };
 
             return allowedItemSelectionTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
@@ -15821,6 +15893,11 @@ internal sealed class StudioRuntime
 
         if (IsGameEventMarkerAsset(relativePath))
         {
+            if (IsGameEventLoadoutListLabel(userLabel))
+            {
+                return true;
+            }
+
             var allowedGameEventTokens = new[]
             {
                 "минимум участников", "максимум участников", "participant", "participants", "огонь по своим", "плата за вход",
@@ -15866,7 +15943,8 @@ internal sealed class StudioRuntime
                 "множитель по типу цели", "пробитие", "бронепробиваемость",
                 "длина трассера", "шум от попадания",
                 "фиксированный шаг расчёта", "шаг расчёта",
-                "физический толчок при попадании"
+                "физический толчок при попадании",
+                "вес пули", "ballistic coefficient", "баллистический коэффициент"
             };
 
             return allowedBulletClassTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
@@ -15880,7 +15958,8 @@ internal sealed class StudioRuntime
                 "зоны появления", "урон со временем", "разрешена перекраска"
             };
 
-            return allowedAmmunitionTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+            return IsCommonItemSafeFieldLabel(label)
+                || allowedAmmunitionTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
         if (path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
@@ -15929,6 +16008,20 @@ internal sealed class StudioRuntime
             return IsCommonItemSafeFieldLabel(label)
                 || IsFuelPoweredItemSafeFieldLabel(label)
                 || allowedWeaponTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal))
+        {
+            var allowedVehiclePresetTokens = new[]
+            {
+                "класс транспорта", "vehicle class",
+                "класс детали транспорта", "attachment class",
+                "шанс появления", "состояние транспорта при появлении",
+                "топливо при появлении", "заряд аккумулятора при появлении",
+                "влияет на работоспособность транспорта"
+            };
+
+            return allowedVehiclePresetTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
         if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal))
@@ -15996,7 +16089,8 @@ internal sealed class StudioRuntime
                 "нужно держать рядом", "оставшихся использований", "запускать шаг автоматически",
                 "засчитывать похожие предметы рядом", "засчитывать похожие предметы по классу",
                 "подходящие предметы", "награда", "варианты награды", "опыт навыков", "условия по тегам", " / квесты",
-                "подсказка условия", "автоописание условия"
+                "подсказка условия", "автоописание условия",
+                "что открыть после завершения", "tasks to unlock when completed"
             };
 
             return allowedQuestTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
@@ -16121,6 +16215,7 @@ internal sealed class StudioRuntime
             "радиус зоны без поклевки",
             "casting power",
             "casting angle",
+            "fishing bounds angle",
             "заброс",
             "base reeling speed",
             "fast reeling speed",
@@ -16167,6 +16262,7 @@ internal sealed class StudioRuntime
             "дистанция увеличения размера",
             "moving ripple threshold",
             "порог ряби",
+            "simulated weight during fast reeling",
             "max scale",
             "максимум scale",
             "урон со временем",
@@ -16389,19 +16485,28 @@ internal sealed class StudioRuntime
             return false;
         }
 
-        var supportedPath = path.Contains("/items/", StringComparison.Ordinal)
-                            || path.Contains("/vehicles/", StringComparison.Ordinal)
-                            || path.Contains("/fortifications/", StringComparison.Ordinal)
-                            || path.Contains("/basebuilding/", StringComparison.Ordinal)
-                            || path.Contains("/worldevents/", StringComparison.Ordinal)
-                            || path.Contains("/gameevents/", StringComparison.Ordinal)
-                            || path.Contains("/characters/", StringComparison.Ordinal);
+        var supportedPath = IsVisualReferenceSurfacePath(relativePath);
         if (!supportedPath || path.Contains("/ui/", StringComparison.Ordinal))
         {
             return false;
         }
 
         return IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label);
+    }
+
+    private static bool IsVisualReferenceSurfacePath(string relativePath)
+    {
+        var path = relativePath.ToLowerInvariant();
+        return path.Contains("/items/", StringComparison.Ordinal)
+               || path.Contains("/vehicles/", StringComparison.Ordinal)
+               || path.Contains("/fortifications/", StringComparison.Ordinal)
+               || path.Contains("/basebuilding/", StringComparison.Ordinal)
+               || path.Contains("/worldevents/", StringComparison.Ordinal)
+               || path.Contains("/gameevents/", StringComparison.Ordinal)
+               || path.Contains("/characters/", StringComparison.Ordinal)
+               || path.Contains("/foliage/farming/", StringComparison.Ordinal)
+               || path.Contains("/minigames/lockpicking/", StringComparison.Ordinal)
+               || path.Contains("/cooking/", StringComparison.Ordinal);
     }
 
     private static bool ShouldExposeReferenceInfoField(string relativePath, string userLabel)
@@ -16484,7 +16589,7 @@ internal sealed class StudioRuntime
 
         if (path.Contains("/items/fishing/", StringComparison.Ordinal))
         {
-            return false;
+            return IsFishingBaitChanceListSurface(relativePath, userLabel);
         }
 
         if (IsMapGameplayAsset(relativePath))
@@ -16713,6 +16818,24 @@ internal sealed class StudioRuntime
             "подходящие предметы", "allowed items", "allowed types"
         };
         return allowedTokens.Any(token => label.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsFishingBaitChanceListSurface(string relativePath, string userLabel)
+    {
+        if (string.IsNullOrWhiteSpace(userLabel)
+            || !relativePath.Contains("/items/fishing/", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var label = userLabel.ToLowerInvariant();
+        var normalized = NormalizeAssetKey(userLabel);
+        return label.Contains("множитель шанса наживки", StringComparison.Ordinal)
+            || label.Contains("множитель шанса покл", StringComparison.Ordinal)
+            || label.Contains("catching chance multiplier", StringComparison.Ordinal)
+            || label.Contains("catching шанс multiplier", StringComparison.Ordinal)
+            || normalized.Contains("catchingchancemultiplier", StringComparison.Ordinal)
+            || normalized.Contains("baitchancemultiplier", StringComparison.Ordinal);
     }
 
     private static bool ShouldExposeGenericContainerTarget(
@@ -16955,13 +17078,21 @@ internal sealed class StudioRuntime
             return "Локация";
         }
 
-        if ((path.Contains("/items/", StringComparison.Ordinal)
-             || path.Contains("/vehicles/", StringComparison.Ordinal)
-             || path.Contains("/fortifications/", StringComparison.Ordinal)
-             || path.Contains("/basebuilding/", StringComparison.Ordinal)
-             || path.Contains("/worldevents/", StringComparison.Ordinal)
-             || path.Contains("/gameevents/", StringComparison.Ordinal)
-             || path.Contains("/characters/", StringComparison.Ordinal))
+        if (path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal))
+        {
+            if (label.Contains("главный предмет", StringComparison.Ordinal)
+                || label.Contains("дополнительные предметы", StringComparison.Ordinal)
+                || label.Contains("крепления", StringComparison.Ordinal)
+                || label.Contains("номер команды события", StringComparison.Ordinal))
+            {
+                return "Снаряжение события";
+            }
+
+            return "Набор события";
+        }
+
+        if (!path.Contains("/ui/", StringComparison.Ordinal)
+            && IsVisualReferenceSurfacePath(relativePath)
             && (IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label)))
         {
             return "Внешний вид";
@@ -17037,6 +17168,11 @@ internal sealed class StudioRuntime
 
         if (IsGameEventMarkerAsset(relativePath))
         {
+            if (IsGameEventLoadoutListLabel(userLabel))
+            {
+                return "Снаряжение события";
+            }
+
             if (label.Contains("название события", StringComparison.Ordinal)
                 || label.Contains("описание события", StringComparison.Ordinal)
                 || label.Contains("подсказка режима", StringComparison.Ordinal)
@@ -17114,9 +17250,12 @@ internal sealed class StudioRuntime
                 || label.Contains("фиксированный шаг расчёта", StringComparison.Ordinal)
                 || label.Contains("шаг расчёта", StringComparison.Ordinal)
                 || label.Contains("длина трассера", StringComparison.Ordinal)
-                || label.Contains("шум от попадания", StringComparison.Ordinal))
+                || label.Contains("шум от попадания", StringComparison.Ordinal)
+                || label.Contains("вес пули", StringComparison.Ordinal)
+                || label.Contains("баллистический коэффициент", StringComparison.Ordinal)
+                || label.Contains("ballistic coefficient", StringComparison.Ordinal))
             {
-                return "Данные пули";
+                return "Баллистика";
             }
 
             if (label.Contains("базовый урон", StringComparison.Ordinal)
@@ -17492,6 +17631,29 @@ internal sealed class StudioRuntime
             return "Правила появления";
         }
 
+        if (path.Contains("/quests/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (label.Contains("что открыть после завершения", StringComparison.Ordinal)
+                || label.Contains("tasks to unlock", StringComparison.Ordinal))
+            {
+                return "Цепочка квестов";
+            }
+
+            if (label.Contains("награда", StringComparison.Ordinal)
+                || label.Contains("опыт навыков", StringComparison.Ordinal)
+                || label.Contains("денежная награда", StringComparison.Ordinal))
+            {
+                return "Награды";
+            }
+
+            if (label.Contains("подходящие предметы", StringComparison.Ordinal)
+                || label.Contains("нужно держать рядом", StringComparison.Ordinal)
+                || label.Contains("условия", StringComparison.Ordinal))
+            {
+                return "Условия квеста";
+            }
+        }
+
         if (path.Contains("/ui/gameevents/itemselection/", StringComparison.OrdinalIgnoreCase))
         {
             if (label.Contains("главный предмет", StringComparison.Ordinal))
@@ -17795,6 +17957,13 @@ internal sealed class StudioRuntime
             return "Радиационный транспорт";
         }
 
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && (label.Contains("класс транспорта", StringComparison.Ordinal)
+                || label.Contains("класс детали транспорта", StringComparison.Ordinal)))
+        {
+            return "Состав транспорта";
+        }
+
         if (label.Contains("опасное для жизни", StringComparison.Ordinal)
             || label.Contains("диапазон тяжести", StringComparison.Ordinal)
             || label.Contains("нижняя граница", StringComparison.Ordinal)
@@ -17856,6 +18025,23 @@ internal sealed class StudioRuntime
     {
         var label = userLabel.ToLowerInvariant();
         var path = relativePath.ToLowerInvariant();
+        if (!path.Contains("/ui/", StringComparison.Ordinal)
+            && IsVisualReferenceSurfacePath(relativePath)
+            && (IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label)))
+        {
+            if (IsVisualModelLabel(label))
+            {
+                return "Определяет 3D-модель объекта в мире. Замена позволяет подменить внешний вид предмета или объекта без изменения его игровой логики.";
+            }
+
+            if (IsVisualMaterialLabel(label))
+            {
+                return "Определяет материал поверхности: окраску, отражение и общий стиль. Используй совместимые материалы, чтобы избежать визуальных артефактов.";
+            }
+
+            return "Определяет текстуру или иконку для инвентаря/интерфейса. Замена меняет отображение предмета, но не его характеристики.";
+        }
+
         if (IsFishingGameplaySurface(relativePath))
         {
             return ResolveFishingFieldDescription(label, path);
@@ -17883,32 +18069,22 @@ internal sealed class StudioRuntime
             return "Какая модель используется у внешней и внутренней части замка в мини-игре. Ставь только совместимые модели замка, чтобы не сломать визуал и анимацию.";
         }
 
-        if ((path.Contains("/items/", StringComparison.Ordinal)
-             || path.Contains("/vehicles/", StringComparison.Ordinal)
-             || path.Contains("/fortifications/", StringComparison.Ordinal)
-             || path.Contains("/basebuilding/", StringComparison.Ordinal)
-             || path.Contains("/worldevents/", StringComparison.Ordinal)
-             || path.Contains("/gameevents/", StringComparison.Ordinal)
-             || path.Contains("/characters/", StringComparison.Ordinal))
-            && (IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label)))
-        {
-            if (IsVisualModelLabel(label))
-            {
-                return "Определяет 3D-модель объекта в мире. Замена позволяет подменить внешний вид предмета или объекта без изменения его игровой логики.";
-            }
-
-            if (IsVisualMaterialLabel(label))
-            {
-                return "Определяет материал поверхности: окраску, отражение и общий стиль. Используй совместимые материалы, чтобы избежать визуальных артефактов.";
-            }
-
-            return "Определяет текстуру или иконку для инвентаря/интерфейса. Замена меняет отображение предмета, но не его характеристики.";
-        }
-
         if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
             && label.Contains("доступные варианты транспорта", StringComparison.Ordinal))
         {
             return "Какие пресеты транспорта входят в эту группу спавна. Замена меняет, какие машины, лодки или самолёты игра сможет выбрать для этой группы.";
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && label.Contains("класс транспорта", StringComparison.Ordinal))
+        {
+            return "Какой базовый blueprint транспорта создаёт этот пресет. Меняй только на совместимый класс машины, лодки или самолёта.";
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && label.Contains("класс детали транспорта", StringComparison.Ordinal))
+        {
+            return "Какая деталь или узел транспорта входит в этот пресет. Используй совместимые attachment-классы этой же линейки транспорта.";
         }
 
         if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
@@ -18023,6 +18199,31 @@ internal sealed class StudioRuntime
 
         if (IsGameEventMarkerAsset(relativePath))
         {
+            if (IsGameEventLoadoutListLabel(userLabel))
+            {
+                if (label.Contains("основное оружие", StringComparison.Ordinal))
+                {
+                    return "Готовый набор основного оружия, который игрок сможет выбрать перед стартом события.";
+                }
+
+                if (label.Contains("пистолет", StringComparison.Ordinal))
+                {
+                    return "Готовый набор пистолета или второго слота, который игрок сможет выбрать в событии.";
+                }
+
+                if (label.Contains("ближний бой", StringComparison.Ordinal))
+                {
+                    return "Готовый набор ближнего боя для третьего слота выбора в событии.";
+                }
+
+                if (label.Contains("одежда", StringComparison.Ordinal))
+                {
+                    return "Комплект одежды или формы, который игрок сможет выбрать для этого события.";
+                }
+
+                return "Готовый набор снаряжения, который событие выдаёт участникам.";
+            }
+
             if (label.Contains("минимум участников", StringComparison.Ordinal)
                 || label.Contains("максимум участников", StringComparison.Ordinal))
             {
@@ -18510,10 +18711,32 @@ internal sealed class StudioRuntime
             return "Как эта болезнь будет называться в фермерских уведомлениях и подсказках.";
         }
 
+        if (IsPlantPestListSurface(relativePath, userLabel))
+        {
+            return "Какие вредители могут поражать это растение. Можно заменить конкретного вредителя или добавить новые варианты в список.";
+        }
+
+        if (IsPlantDiseaseListSurface(relativePath, userLabel))
+        {
+            return "Какие болезни могут поражать это растение. Можно заменить конкретную болезнь или добавить новые варианты в список.";
+        }
+
         if (label.Contains("главный предмет", StringComparison.Ordinal)
             && relativePath.Contains("/ui/gameevents/itemselection/", StringComparison.OrdinalIgnoreCase))
         {
             return "Какой главный предмет игрок получит при выборе этого набора в игровом событии.";
+        }
+
+        if (label.Contains("дополнительные предметы", StringComparison.Ordinal)
+            && relativePath.Contains("/ui/gameevents/itemselection/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Какие дополнительные вещи игрок получает вместе с набором события: расходники, метательное оружие, патроны или другое снаряжение.";
+        }
+
+        if (label.Contains("крепления", StringComparison.Ordinal)
+            && relativePath.Contains("/ui/gameevents/itemselection/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Какие прицелы, планки и другие совместимые крепления выдаются вместе с главным оружием набора.";
         }
 
         if (label.Contains("название набора", StringComparison.Ordinal)
@@ -19104,6 +19327,13 @@ internal sealed class StudioRuntime
             return "Какие навыки получают дополнительный опыт после завершения этого квеста.";
         }
 
+        if (relativePath.Contains("/quests/", StringComparison.OrdinalIgnoreCase)
+            && (label.Contains("что открыть после завершения", StringComparison.Ordinal)
+                || label.Contains("tasks to unlock", StringComparison.Ordinal)))
+        {
+            return "Какие следующие задачи или квестовые шаги становятся доступны после выполнения этого задания.";
+        }
+
         if (label.Contains("тип воздействия", StringComparison.Ordinal))
         {
             return "Показывает, считается вещество полезным, вредным или нейтральным.";
@@ -19348,6 +19578,16 @@ internal sealed class StudioRuntime
             return "Какой класс пули использует этот боеприпас. Меняй только на совместимый тип (например AP, трассер или дробь нужного калибра), чтобы избежать ошибок в поведении оружия.";
         }
 
+        if (label.Contains("вес пули", StringComparison.Ordinal))
+        {
+            return "Масса пули в баллистических расчётах. Меняй вместе со скоростью и уроном, чтобы не получить слишком резкую или слабую траекторию.";
+        }
+
+        if (label.Contains("баллистический коэффициент", StringComparison.Ordinal))
+        {
+            return "Коэффициент сохранения скорости пули в полёте. Более высокие значения обычно дают меньшую потерю скорости и более стабильную траекторию.";
+        }
+
         if (label.Contains("патронов в магазине", StringComparison.Ordinal))
         {
             return "Максимум патронов, которые вмещает оружие.";
@@ -19588,6 +19828,12 @@ internal sealed class StudioRuntime
             || label.Contains("casting", StringComparison.Ordinal))
         {
             return "Параметр заброса удилища: сила или угол, которые влияют на дальность и удобство рыбалки.";
+        }
+
+        if (label.Contains("рабочей зоны рыбалки", StringComparison.Ordinal)
+            || label.Contains("fishing bounds angle", StringComparison.Ordinal))
+        {
+            return "Угол рабочей зоны мини-игры рыбалки. Меняет допустимый сектор, в котором удерживать снасть проще или сложнее.";
         }
 
         if (label.Contains("катуш", StringComparison.Ordinal)
@@ -19892,6 +20138,22 @@ internal sealed class StudioRuntime
                 "Найди пресет транспорта, который эта группа сможет выбирать при спавне.");
         }
 
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && label.Contains("класс транспорта", StringComparison.Ordinal))
+        {
+            return (
+                "vehicle-class",
+                "Найди blueprint класса транспорта, который этот пресет должен создавать.");
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.Ordinal)
+            && label.Contains("класс детали транспорта", StringComparison.Ordinal))
+        {
+            return (
+                "vehicle-attachment-class",
+                "Найди совместимую деталь или узел транспорта для этого пресета.");
+        }
+
         if (path.Contains("/cooking/recipes/", StringComparison.Ordinal)
             && (label.Contains("ингредиент", StringComparison.Ordinal)
                 || label.Contains("подходящий предмет", StringComparison.Ordinal)
@@ -19990,6 +20252,15 @@ internal sealed class StudioRuntime
                 "Найди квест, который должен входить в этот набор, и выбери его из списка.");
         }
 
+        if (path.Contains("/quests/", StringComparison.Ordinal)
+            && (label.Contains("что открыть после завершения", StringComparison.Ordinal)
+                || label.Contains("tasks to unlock", StringComparison.Ordinal)))
+        {
+            return (
+                "quest-asset",
+                "Найди квест или задачу, которая должна открыться после выполнения текущего задания.");
+        }
+
         if (IsGameEventMarkerAsset(relativePath)
             && (label.Contains("класс события", StringComparison.Ordinal)
                 || label.Contains("game event class", StringComparison.Ordinal)))
@@ -20051,12 +20322,84 @@ internal sealed class StudioRuntime
                 "Найди главный предмет, который игрок должен получать при выборе этого набора события.");
         }
 
+        if (path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal)
+            && (label.Contains("дополнительные предметы", StringComparison.Ordinal)
+                || label.Contains("крепления", StringComparison.Ordinal)))
+        {
+            return (
+                "item-asset",
+                label.Contains("крепления", StringComparison.Ordinal)
+                    ? "Найди крепление, которое должно выдаваться вместе с главным оружием набора."
+                    : "Найди дополнительный предмет, который должен выдаваться вместе с набором события.");
+        }
+
+        if (IsGameEventMarkerAsset(relativePath) && IsGameEventLoadoutListLabel(userLabel))
+        {
+            if (label.Contains("основное оружие", StringComparison.Ordinal))
+            {
+                return (
+                    "gameevent-primary-loadout",
+                    "Найди набор основного оружия, который игрок сможет выбрать в этом событии.");
+            }
+
+            if (label.Contains("пистолет", StringComparison.Ordinal))
+            {
+                return (
+                    "gameevent-secondary-loadout",
+                    "Найди набор пистолета, который игрок сможет выбрать как второй слот.");
+            }
+
+            if (label.Contains("ближний бой", StringComparison.Ordinal))
+            {
+                return (
+                    "gameevent-tertiary-loadout",
+                    "Найди набор ближнего боя, который игрок сможет выбрать как третий слот.");
+            }
+
+            if (label.Contains("одежда", StringComparison.Ordinal))
+            {
+                return (
+                    "gameevent-outfit-loadout",
+                    "Найди комплект одежды, который игрок сможет выбрать для события.");
+            }
+
+            if (label.Contains("обязательный набор", StringComparison.Ordinal))
+            {
+                return (
+                    "gameevent-mandatory-loadout",
+                    "Найди обязательный набор снаряжения, который событие выдаёт всем участникам.");
+            }
+
+            if (label.Contains("дополнительное снаряжение", StringComparison.Ordinal))
+            {
+                return (
+                    "gameevent-support-loadout",
+                    "Найди дополнительный набор снаряжения, который событие выдаёт участникам.");
+            }
+        }
+
         if (path.Contains("/foliage/farming/", StringComparison.Ordinal)
             && label.Contains("пакет семян", StringComparison.Ordinal))
         {
             return (
                 "item-asset",
                 "Найди пакет семян, который должен использоваться для посадки этой культуры.");
+        }
+
+        if (path.Contains("/foliage/farming/", StringComparison.Ordinal)
+            && IsPlantPestListSurface(relativePath, userLabel))
+        {
+            return (
+                "plant-pest-asset",
+                "Найди вредителя, который должен уметь поражать это растение.");
+        }
+
+        if (path.Contains("/foliage/farming/", StringComparison.Ordinal)
+            && IsPlantDiseaseListSurface(relativePath, userLabel))
+        {
+            return (
+                "plant-disease-asset",
+                "Найди болезнь, которую это растение должно уметь подхватывать.");
         }
 
         if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
@@ -20511,6 +20854,16 @@ internal sealed class StudioRuntime
             {
                 return ("0", "20");
             }
+
+            if (label.Contains("вес пули", StringComparison.Ordinal))
+            {
+                return ("0", "1000");
+            }
+
+            if (label.Contains("баллистический коэффициент", StringComparison.Ordinal))
+            {
+                return ("0", "5");
+            }
         }
 
         if (relativePath.Contains("/data/tables/items/spawning/", StringComparison.OrdinalIgnoreCase))
@@ -20953,6 +21306,11 @@ internal sealed class StudioRuntime
         if (label.Contains("виды рыбы", StringComparison.Ordinal))
         {
             return "Какие виды рыбы водятся в этом пресете водоёма и с каким весом они выбираются при спавне.";
+        }
+
+        if (IsFishingBaitChanceListSurface(relativePath, userLabel))
+        {
+            return "Для каких видов рыбы эта наживка меняет шанс поклёвки. Можно добавить вид рыбы и указать его множитель.";
         }
 
         if (IsExamineDataPresetItemListSurface(relativePath, userLabel))
@@ -21550,6 +21908,16 @@ internal sealed class StudioRuntime
                 true,
                 "skill-asset",
                 "Найди навык, который должен получать опыт за этот квест, и нажми добавить.");
+        }
+
+        if (IsFishingBaitChanceListSurface(relativePath, userLabel)
+            && supportsReferenceKey
+            && supportsNumericValue)
+        {
+            return (
+                true,
+                "fish-species-asset",
+                "Найди вид рыбы, для которого нужно задать множитель шанса этой наживки.");
         }
 
         if (relativePath.Contains("/quests/", StringComparison.OrdinalIgnoreCase)
@@ -23337,6 +23705,22 @@ internal sealed class StudioRuntime
             "kingletmariner" => "Kinglet Mariner",
             _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(match.Groups["name"].Value)))
         };
+    }
+
+    private static string ResolveVehicleClassDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        var clean = stem;
+        foreach (var prefix in new[] { "BPC_", "BP_", "Vehicle_" })
+        {
+            if (clean.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                clean = clean[prefix.Length..];
+                break;
+            }
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(clean)));
     }
 
     private static bool TryDescribeRadiationAsset(string relativePath, out ModAssetDescriptor descriptor)
