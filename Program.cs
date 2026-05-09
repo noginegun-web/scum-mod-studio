@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
@@ -12,6 +13,11 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        if (TryRunFieldDiscovery(args, out var discoveryExitCode))
+        {
+            return discoveryExitCode;
+        }
+
         try
         {
             VelopackApp
@@ -32,6 +38,7 @@ internal static class Program
     private static async Task<int> MainCoreAsync(string[] args)
     {
         var openBrowser = !args.Any(x => x.Equals("--no-browser", StringComparison.OrdinalIgnoreCase));
+        var diagnosticsEnabled = IsDiagnosticsEnabled(args);
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             Args = args,
@@ -106,6 +113,12 @@ internal static class Program
         });
         app.MapGet("/api/research/mod-pattern", (string assetPath, bool? includeImportDiff, int? maxItems) =>
             Results.Ok(studio.InspectResearchModPattern(assetPath, includeImportDiff ?? true, maxItems ?? 12)));
+        if (diagnosticsEnabled)
+        {
+            app.MapGet("/api/dev/field-candidates", (string assetId, int? limit, bool? hiddenOnly) =>
+                Results.Ok(studio.GetFieldDiscoveryReport(assetId, limit ?? 600, hiddenOnly ?? false)));
+        }
+
         app.MapGet("/api/catalog", () => Results.Ok(studio.GetItemCatalog()));
         app.MapGet("/api/catalog/search", async (string? term, int? limit) =>
             Results.Ok(await studio.SearchItemCatalogAsync(term, limit ?? 160)));
@@ -176,5 +189,114 @@ internal static class Program
         {
             // ignore
         }
+    }
+
+    private static bool IsDiagnosticsEnabled(string[] args)
+    {
+        if (args.Any(x => x.Equals("--diagnostics", StringComparison.OrdinalIgnoreCase)
+            || x.Equals("--dev-diagnostics", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        var value = Environment.GetEnvironmentVariable("SCUM_STUDIO_DIAGNOSTICS")
+                    ?? Environment.GetEnvironmentVariable("SCUM_STUDIO_DEV_DIAGNOSTICS");
+        return value is not null
+            && (value.Equals("1", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("true", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("yes", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool TryRunFieldDiscovery(string[] args, out int exitCode)
+    {
+        exitCode = 0;
+        if (!TryGetOptionValue(args, "--field-discovery", out var assetId)
+            && !TryGetOptionValue(args, "--discover-fields", out assetId))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(assetId))
+        {
+            Console.Error.WriteLine("Для --field-discovery нужен assetId, например game::scum/content/...");
+            exitCode = 2;
+            return true;
+        }
+
+        var limit = 600;
+        if (TryGetOptionValue(args, "--limit", out var limitText)
+            && int.TryParse(limitText, out var parsedLimit))
+        {
+            limit = parsedLimit;
+        }
+
+        var hiddenOnly = HasFlag(args, "--hidden-only");
+        try
+        {
+            var studio = StudioRuntime.Create();
+            var report = studio.GetFieldDiscoveryReport(assetId, limit, hiddenOnly);
+            var json = JsonSerializer.Serialize(
+                report,
+                new JsonSerializerOptions
+                {
+                    WriteIndented = true
+                });
+
+            if (TryGetOptionValue(args, "--output", out var outputPath)
+                && !string.IsNullOrWhiteSpace(outputPath))
+            {
+                var directory = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                File.WriteAllText(outputPath, json);
+            }
+            else
+            {
+                Console.WriteLine(json);
+            }
+
+            exitCode = report.Warnings.Any(warning => warning.Contains("Не удалось", StringComparison.OrdinalIgnoreCase))
+                ? 2
+                : 0;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("Ошибка диагностики полей:");
+            Console.Error.WriteLine(ex.Message);
+            exitCode = 2;
+            return true;
+        }
+    }
+
+    private static bool TryGetOptionValue(string[] args, string optionName, out string? value)
+    {
+        value = null;
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg.Equals(optionName, StringComparison.OrdinalIgnoreCase))
+            {
+                value = i + 1 < args.Length ? args[i + 1] : null;
+                return true;
+            }
+
+            var prefix = optionName + "=";
+            if (arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = arg[prefix.Length..];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasFlag(string[] args, string flagName)
+    {
+        return args.Any(arg => arg.Equals(flagName, StringComparison.OrdinalIgnoreCase));
     }
 }

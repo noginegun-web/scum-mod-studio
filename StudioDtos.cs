@@ -188,6 +188,52 @@ internal sealed record StudioModAssetSchemaDto(
     List<StudioModListTargetDto> ListTargets,
     List<string> Warnings);
 
+internal sealed record StudioFieldDiscoveryCandidateDto(
+    string FieldPath,
+    string SourceLabel,
+    string Label,
+    string ValueType,
+    string CurrentValue,
+    string CurrentDisplayValue,
+    bool Exposed,
+    string Visibility,
+    string Section,
+    string Description,
+    string EditorKind,
+    string? ReferencePickerKind);
+
+internal sealed record StudioListDiscoveryCandidateDto(
+    string TargetPath,
+    string SourceLabel,
+    string Label,
+    string ItemKind,
+    int ItemCount,
+    bool Exposed,
+    string Visibility,
+    bool SupportsAddClone,
+    bool SupportsRemove,
+    bool SupportsClear,
+    bool SupportsAddEmpty,
+    bool SupportsAddReference,
+    string? ReferencePickerKind);
+
+internal sealed record StudioFieldDiscoveryReportDto(
+    string AssetId,
+    string RelativePath,
+    string CategoryId,
+    string CategoryName,
+    string SourceKind,
+    string AssetFormat,
+    int RawFieldCandidateCount,
+    int ExposedFieldCandidateCount,
+    int HiddenFieldCandidateCount,
+    int RawListCandidateCount,
+    int ExposedListCandidateCount,
+    int HiddenListCandidateCount,
+    List<StudioFieldDiscoveryCandidateDto> Fields,
+    List<StudioListDiscoveryCandidateDto> Lists,
+    List<string> Warnings);
+
 internal sealed record StudioFieldEditDto(
     string FieldPath,
     string Value);

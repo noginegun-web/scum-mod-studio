@@ -5322,6 +5322,110 @@ internal sealed class StudioRuntime
         return BuildSchemaFromPreparedSource(assetId, normalized, category, sourceMode, sourcePath, selection, warnings);
     }
 
+    public StudioFieldDiscoveryReportDto GetFieldDiscoveryReport(string assetId, int limit, bool hiddenOnly)
+    {
+        var warnings = new List<string>();
+        limit = Math.Clamp(limit, 1, 3000);
+        if (!TryBuildSelectionFromAssetId(assetId, out var selection))
+        {
+            return new StudioFieldDiscoveryReportDto(
+                assetId,
+                string.Empty,
+                "unknown",
+                "Unknown",
+                "unknown",
+                "unknown",
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [],
+                [],
+                ["Ассет не найден."]);
+        }
+
+        var normalized = PathUtil.NormalizeRelative(selection.TargetRelativePath);
+        var category = ClassifyModCategory(normalized);
+        var extension = Path.GetExtension(normalized).ToLowerInvariant();
+        var sourceMode = ResolveSourceMode(null, selection.PresetSourcePath is not null);
+        var sourcePath = ResolveAssetSourcePath(selection, sourceMode, warnings, includeCompanions: true);
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return new StudioFieldDiscoveryReportDto(
+                assetId,
+                normalized,
+                category.Id,
+                category.Name,
+                sourceMode,
+                extension.TrimStart('.'),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [],
+                [],
+                warnings.Count > 0 ? warnings : ["Не удалось подготовить исходный файл ассета для диагностики."]);
+        }
+
+        if (!IsUassetPackageExtension(extension))
+        {
+            warnings.Add("Диагностика сырых полей сейчас поддерживает только .uasset/.umap.");
+            return new StudioFieldDiscoveryReportDto(
+                assetId,
+                normalized,
+                category.Id,
+                category.Name,
+                sourceMode,
+                extension.TrimStart('.'),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [],
+                [],
+                warnings);
+        }
+
+        try
+        {
+            return BuildUassetFieldDiscoveryReport(
+                assetId,
+                normalized,
+                category,
+                sourceMode,
+                sourcePath,
+                limit,
+                hiddenOnly,
+                warnings);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Не удалось разобрать поля ассета: {ex.Message}");
+            return new StudioFieldDiscoveryReportDto(
+                assetId,
+                normalized,
+                category.Id,
+                category.Name,
+                sourceMode,
+                extension.TrimStart('.'),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [],
+                [],
+                warnings);
+        }
+    }
+
     public StudioModAssetSchemaDto PreviewModdingAssetSchema(StudioSchemaPreviewRequestDto request)
     {
         var warnings = new List<string>();
@@ -6993,6 +7097,564 @@ internal sealed class StudioRuntime
             prettyFields.Take(800).ToList(),
             prettyListTargets.Take(200).ToList(),
             warnings);
+    }
+
+    private StudioFieldDiscoveryReportDto BuildUassetFieldDiscoveryReport(
+        string assetId,
+        string normalizedRelativePath,
+        ModCategory category,
+        string sourceMode,
+        string sourcePath,
+        int limit,
+        bool hiddenOnly,
+        List<string> warnings)
+    {
+        var fields = new List<StudioFieldDiscoveryCandidateDto>(1024);
+        var lists = new List<StudioListDiscoveryCandidateDto>(256);
+        var readableSourcePath = PrepareIsolatedAssetReadSource(sourcePath);
+        var asset = new UAsset(readableSourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+        var isMapAsset = IsMapGameplayAsset(normalizedRelativePath);
+
+        void CollectExports(bool strictMapExportFilter)
+        {
+            for (var exportIndex = 0; exportIndex < asset.Exports.Count; exportIndex++)
+            {
+                if (asset.Exports[exportIndex] is not NormalExport normalExport)
+                {
+                    continue;
+                }
+
+                if (isMapAsset
+                    && strictMapExportFilter
+                    && !ShouldInspectMapExport(asset, normalExport, exportIndex))
+                {
+                    continue;
+                }
+
+                var exportName = ResolveExportLabel(asset, normalExport, normalizedRelativePath, exportIndex);
+                if (normalExport.Data.Count == 0)
+                {
+                    continue;
+                }
+
+                for (var i = 0; i < normalExport.Data.Count; i++)
+                {
+                    var rootProperty = normalExport.Data[i];
+                    var rootName = GetReadablePropertyName(rootProperty, i);
+                    if (isMapAsset && !ShouldIncludeMapRootProperty(rootProperty, rootName))
+                    {
+                        continue;
+                    }
+
+                    CollectUassetFieldDiscovery(
+                        asset,
+                        rootProperty,
+                        $"e:{exportIndex}/p:{i}",
+                        $"{exportName}.{rootName}",
+                        normalizedRelativePath,
+                        fields,
+                        lists,
+                        depth: 0);
+                }
+            }
+        }
+
+        CollectExports(strictMapExportFilter: true);
+        if (isMapAsset && fields.Count == 0 && lists.Count == 0)
+        {
+            CollectExports(strictMapExportFilter: false);
+        }
+
+        if (fields.Count == 0 && lists.Count == 0)
+        {
+            warnings.Add("В диагностике не найдено редактируемых скалярных полей или контейнеров.");
+        }
+
+        var visibleFields = hiddenOnly
+            ? fields.Where(field => !field.Exposed).Take(limit).ToList()
+            : fields.Take(limit).ToList();
+        var visibleLists = hiddenOnly
+            ? lists.Where(list => !list.Exposed).Take(limit).ToList()
+            : lists.Take(limit).ToList();
+        var exposedFieldCount = fields.Count(field => field.Exposed);
+        var exposedListCount = lists.Count(list => list.Exposed);
+
+        return new StudioFieldDiscoveryReportDto(
+            assetId,
+            normalizedRelativePath,
+            category.Id,
+            category.Name,
+            sourceMode,
+            Path.GetExtension(normalizedRelativePath).TrimStart('.'),
+            fields.Count,
+            exposedFieldCount,
+            fields.Count - exposedFieldCount,
+            lists.Count,
+            exposedListCount,
+            lists.Count - exposedListCount,
+            visibleFields,
+            visibleLists,
+            warnings);
+    }
+
+    private static void CollectUassetFieldDiscovery(
+        UAsset asset,
+        PropertyData property,
+        string fieldPath,
+        string label,
+        string relativePath,
+        List<StudioFieldDiscoveryCandidateDto> fields,
+        List<StudioListDiscoveryCandidateDto> lists,
+        int depth)
+    {
+        if (depth > 8)
+        {
+            return;
+        }
+
+        if (property is VectorPropertyData vectorProperty)
+        {
+            AddVectorComponentDiscoveryCandidates(fields, relativePath, fieldPath, label, vectorProperty.Value);
+            return;
+        }
+
+        if (property is RotatorPropertyData rotatorProperty)
+        {
+            AddRotatorComponentDiscoveryCandidates(fields, relativePath, fieldPath, label, rotatorProperty.Value);
+            return;
+        }
+
+        if (property is RichCurveKeyPropertyData richCurveKey)
+        {
+            AddRichCurveKeyDiscoveryCandidates(fields, relativePath, fieldPath, label, richCurveKey);
+            return;
+        }
+
+        if (property is StructPropertyData structProperty)
+        {
+            for (var i = 0; i < structProperty.Value.Count; i++)
+            {
+                var child = structProperty.Value[i];
+                var childName = GetReadablePropertyName(child, i);
+                CollectUassetFieldDiscovery(
+                    asset,
+                    child,
+                    $"{fieldPath}/p:{i}",
+                    $"{label}.{childName}",
+                    relativePath,
+                    fields,
+                    lists,
+                    depth + 1);
+            }
+
+            return;
+        }
+
+        if (property is ArrayPropertyData arrayProperty && property is not SetPropertyData)
+        {
+            var values = arrayProperty.Value ?? [];
+            var isCurvePointArray = IsCurvePointArray(arrayProperty, values);
+            var listLabel = isCurvePointArray
+                ? ResolveCurvePointListLabel(relativePath)
+                : NormalizeListTargetLabel(relativePath, ToUserFieldLabel(relativePath, label));
+            var arrayType = arrayProperty.ArrayType?.ToString() ?? string.Empty;
+            var arrayItemKind = values.Length > 0
+                ? ResolveUassetArrayItemKind(values)
+                : arrayType.Equals("ObjectProperty", StringComparison.OrdinalIgnoreCase)
+                  || arrayType.Equals("ClassProperty", StringComparison.OrdinalIgnoreCase)
+                  || arrayType.Equals("SoftObjectProperty", StringComparison.OrdinalIgnoreCase)
+                  || arrayType.Equals("SoftObjectPathProperty", StringComparison.OrdinalIgnoreCase)
+                    ? "reference"
+                    : arrayType.Equals("StructProperty", StringComparison.OrdinalIgnoreCase)
+                        ? "struct"
+                        : "unknown";
+            var exposed = isCurvePointArray
+                          || ShouldExposeListTarget(relativePath, listLabel)
+                          || (!IsMapGameplayAsset(relativePath)
+                              && ShouldExposeGenericContainerTarget(relativePath, listLabel, arrayItemKind));
+            var picker = ResolveListTargetReferencePicker(relativePath, listLabel, values);
+            AddListDiscoveryCandidate(
+                lists,
+                fieldPath,
+                label,
+                listLabel,
+                arrayItemKind,
+                values.Length,
+                exposed,
+                SupportsAddClone: values.Length > 0 && !picker.SupportsAddReference,
+                SupportsRemove: values.Length > 0,
+                SupportsClear: values.Length > 0,
+                SupportsAddEmpty: !picker.SupportsAddReference && CanSafelyAddEmptyArrayItem(arrayProperty),
+                SupportsAddReference: picker.SupportsAddReference,
+                picker.ReferencePickerKind);
+
+            for (var i = 0; i < values.Length; i++)
+            {
+                CollectUassetFieldDiscovery(
+                    asset,
+                    values[i],
+                    $"{fieldPath}/a:{i}",
+                    $"{label}[{i}]",
+                    relativePath,
+                    fields,
+                    lists,
+                    depth + 1);
+            }
+
+            return;
+        }
+
+        if (property is SetPropertyData setProperty)
+        {
+            var values = setProperty.Value ?? [];
+            var listLabel = NormalizeListTargetLabel(relativePath, ToUserFieldLabel(relativePath, label));
+            var setItemKind = ResolveUassetSetItemKind(setProperty);
+            var exposed = ShouldExposeListTarget(relativePath, listLabel)
+                          || (!IsMapGameplayAsset(relativePath)
+                              && ShouldExposeGenericContainerTarget(relativePath, listLabel, setItemKind));
+            var picker = ResolveListTargetReferencePicker(relativePath, listLabel, values);
+            AddListDiscoveryCandidate(
+                lists,
+                fieldPath,
+                label,
+                listLabel,
+                setItemKind,
+                values.Length,
+                exposed,
+                SupportsAddClone: false,
+                SupportsRemove: values.Length > 0,
+                SupportsClear: values.Length > 0,
+                SupportsAddEmpty: false,
+                SupportsAddReference: picker.SupportsAddReference,
+                picker.ReferencePickerKind);
+
+            for (var i = 0; i < values.Length; i++)
+            {
+                CollectUassetFieldDiscovery(
+                    asset,
+                    values[i],
+                    $"{fieldPath}/s:{i}",
+                    $"{label}[{i}]",
+                    relativePath,
+                    fields,
+                    lists,
+                    depth + 1);
+            }
+
+            return;
+        }
+
+        if (property is MapPropertyData mapProperty)
+        {
+            var mapEntries = mapProperty.Value ?? new TMap<PropertyData, PropertyData>();
+            var listLabel = NormalizeListTargetLabel(relativePath, ToUserFieldLabel(relativePath, label));
+            var mapItemKind = ResolveUassetMapItemKind(mapProperty);
+            var exposed = ShouldExposeListTarget(relativePath, listLabel)
+                          || (!IsMapGameplayAsset(relativePath)
+                              && ShouldExposeGenericContainerTarget(
+                                  relativePath,
+                                  listLabel,
+                                  mapItemKind,
+                                  mapProperty.KeyType?.ToString(),
+                                  mapProperty.ValueType?.ToString()));
+            var picker = ResolveMapTargetReferencePicker(relativePath, listLabel, mapProperty);
+            AddListDiscoveryCandidate(
+                lists,
+                fieldPath,
+                label,
+                listLabel,
+                mapItemKind,
+                mapEntries.Count,
+                exposed,
+                SupportsAddClone: false,
+                SupportsRemove: mapEntries.Count > 0,
+                SupportsClear: mapEntries.Count > 0,
+                SupportsAddEmpty: false,
+                SupportsAddReference: picker.SupportsAddReference,
+                picker.ReferencePickerKind);
+
+            var mapIndex = 0;
+            foreach (var entry in mapEntries)
+            {
+                var entryLabel = ResolveMapEntryLabel(asset, relativePath, label, entry.Key, mapIndex);
+                var entryValueLabel = ResolveMapEntryValueLabel(relativePath, label, entryLabel, entry.Value);
+                CollectUassetFieldDiscovery(
+                    asset,
+                    entry.Value,
+                    $"{fieldPath}/m:{mapIndex}:v",
+                    entryValueLabel,
+                    relativePath,
+                    fields,
+                    lists,
+                    depth + 1);
+                mapIndex++;
+            }
+
+            return;
+        }
+
+        if (TryDescribeEditableProperty(asset, property, out var valueType, out var currentValue, out var currentDisplayValue))
+        {
+            AddFieldDiscoveryCandidate(
+                fields,
+                relativePath,
+                fieldPath,
+                label,
+                valueType,
+                currentValue,
+                currentDisplayValue);
+        }
+    }
+
+    private static void AddVectorComponentDiscoveryCandidates(
+        List<StudioFieldDiscoveryCandidateDto> output,
+        string relativePath,
+        string fieldPath,
+        string label,
+        FVector vector)
+    {
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}{VectorComponentFieldTokenPrefix}x",
+            $"{label}.X",
+            "double",
+            vector.X.ToString(CultureInfo.InvariantCulture),
+            vector.X.ToString(CultureInfo.InvariantCulture));
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}{VectorComponentFieldTokenPrefix}y",
+            $"{label}.Y",
+            "double",
+            vector.Y.ToString(CultureInfo.InvariantCulture),
+            vector.Y.ToString(CultureInfo.InvariantCulture));
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}{VectorComponentFieldTokenPrefix}z",
+            $"{label}.Z",
+            "double",
+            vector.Z.ToString(CultureInfo.InvariantCulture),
+            vector.Z.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static void AddRotatorComponentDiscoveryCandidates(
+        List<StudioFieldDiscoveryCandidateDto> output,
+        string relativePath,
+        string fieldPath,
+        string label,
+        FRotator rotator)
+    {
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}{RotatorComponentFieldTokenPrefix}pitch",
+            $"{label}.Pitch",
+            "double",
+            rotator.Pitch.ToString(CultureInfo.InvariantCulture),
+            rotator.Pitch.ToString(CultureInfo.InvariantCulture));
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}{RotatorComponentFieldTokenPrefix}yaw",
+            $"{label}.Yaw",
+            "double",
+            rotator.Yaw.ToString(CultureInfo.InvariantCulture),
+            rotator.Yaw.ToString(CultureInfo.InvariantCulture));
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}{RotatorComponentFieldTokenPrefix}roll",
+            $"{label}.Roll",
+            "double",
+            rotator.Roll.ToString(CultureInfo.InvariantCulture),
+            rotator.Roll.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static void AddRichCurveKeyDiscoveryCandidates(
+        List<StudioFieldDiscoveryCandidateDto> output,
+        string relativePath,
+        string fieldPath,
+        string label,
+        RichCurveKeyPropertyData property)
+    {
+        var pointLabel = NormalizeCurvePointLabel(ToUserFieldLabel(relativePath, label));
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}/rk:time",
+            $"{pointLabel} / когда начинается эта ступень",
+            "float",
+            property.Value.Time.ToString(CultureInfo.InvariantCulture),
+            property.Value.Time.ToString(CultureInfo.InvariantCulture));
+        AddFieldDiscoveryCandidate(
+            output,
+            relativePath,
+            $"{fieldPath}/rk:value",
+            $"{pointLabel} / насколько сильно действует эта ступень",
+            "float",
+            property.Value.Value.ToString(CultureInfo.InvariantCulture),
+            property.Value.Value.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static void AddFieldDiscoveryCandidate(
+        List<StudioFieldDiscoveryCandidateDto> output,
+        string relativePath,
+        string fieldPath,
+        string sourceLabel,
+        string valueType,
+        string currentValue,
+        string currentDisplayValue)
+    {
+        var userLabel = ToUserFieldLabel(relativePath, sourceLabel);
+        userLabel = ApplyFieldLabelContext(relativePath, fieldPath, userLabel);
+        var safeFilterPassed = ShouldExposeSafeField(relativePath, userLabel, valueType);
+        var hiddenOpaqueLocalization = relativePath.Contains("/ui/gameevents/itemselection/", StringComparison.OrdinalIgnoreCase)
+                                       && userLabel.Contains("название набора", StringComparison.OrdinalIgnoreCase)
+                                       && LooksLikeOpaqueLocalizationKey(currentValue);
+        var picker = ResolveFieldReferencePicker(relativePath, userLabel, valueType, currentValue);
+        var options = ResolveFieldOptions(relativePath, userLabel, valueType, currentValue);
+        var editorKind = ResolveEditorKind(relativePath, userLabel, valueType, options, picker.ReferencePickerKind);
+        var blockedByAssetRef = valueType is "object" or "soft-object" or "soft-object-path"
+                                && editorKind == "asset-ref";
+        var exposed = safeFilterPassed && !hiddenOpaqueLocalization && !blockedByAssetRef;
+        var visibility = ResolveFieldDiscoveryVisibility(
+            relativePath,
+            userLabel,
+            valueType,
+            safeFilterPassed,
+            blockedByAssetRef,
+            hiddenOpaqueLocalization,
+            exposed);
+
+        output.Add(new StudioFieldDiscoveryCandidateDto(
+            fieldPath,
+            sourceLabel,
+            userLabel,
+            valueType,
+            currentValue,
+            currentDisplayValue,
+            exposed,
+            visibility,
+            ResolveFieldSection(relativePath, userLabel),
+            ResolveFieldDescription(relativePath, userLabel),
+            editorKind,
+            picker.ReferencePickerKind));
+    }
+
+    private static void AddListDiscoveryCandidate(
+        List<StudioListDiscoveryCandidateDto> output,
+        string targetPath,
+        string sourceLabel,
+        string label,
+        string itemKind,
+        int itemCount,
+        bool exposed,
+        bool SupportsAddClone,
+        bool SupportsRemove,
+        bool SupportsClear,
+        bool SupportsAddEmpty,
+        bool SupportsAddReference,
+        string? referencePickerKind)
+    {
+        output.Add(new StudioListDiscoveryCandidateDto(
+            targetPath,
+            sourceLabel,
+            label,
+            itemKind,
+            itemCount,
+            exposed,
+            exposed
+                ? "Показывается как редактируемый список."
+                : "Скрыто: контейнер не входит в текущий allowlist безопасных списков.",
+            SupportsAddClone,
+            SupportsRemove,
+            SupportsClear,
+            SupportsAddEmpty,
+            SupportsAddReference,
+            referencePickerKind));
+    }
+
+    private static string ResolveFieldDiscoveryVisibility(
+        string relativePath,
+        string userLabel,
+        string valueType,
+        bool safeFilterPassed,
+        bool blockedByAssetRef,
+        bool hiddenOpaqueLocalization,
+        bool exposed)
+    {
+        if (exposed)
+        {
+            return "Показывается как безопасная настройка.";
+        }
+
+        if (hiddenOpaqueLocalization)
+        {
+            return "Скрыто: похоже на внутренний ключ локализации, а не пользовательский текст.";
+        }
+
+        if (blockedByAssetRef)
+        {
+            return "Скрыто: ссылка на ассет пока не имеет безопасного picker для этого контекста.";
+        }
+
+        if (!safeFilterPassed)
+        {
+            return GuessSafeFieldHiddenReason(relativePath, userLabel, valueType);
+        }
+
+        return "Скрыто дополнительным защитным правилом.";
+    }
+
+    private static string GuessSafeFieldHiddenReason(string relativePath, string userLabel, string valueType)
+    {
+        if (string.IsNullOrWhiteSpace(userLabel))
+        {
+            return "Скрыто: пустое имя поля.";
+        }
+
+        if (userLabel.Length > 160)
+        {
+            return "Скрыто: слишком длинный технический путь поля.";
+        }
+
+        var label = userLabel.ToLowerInvariant();
+        var path = relativePath.ToLowerInvariant();
+        var technicalNoiseTokens = new[]
+        {
+            "icon", "ico", "image", "brush", "texture", "material", "mesh", "skeletal",
+            "sound", "audio", "anim", "widget", "sprite", "atlas", "thumbnail", "font",
+            "padding", "margin", "alignment", "offset", "shadow", "color", "opacity",
+            "pre infinity", "post infinity", "extrap", "default значение", "default value"
+        };
+        if (technicalNoiseTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
+        {
+            return "Скрыто: техническое/визуальное поле, которое может ломать ассет без отдельной безопасной логики.";
+        }
+
+        if (path.Contains("/ui/", StringComparison.Ordinal) && valueType is "string" or "text" or "name")
+        {
+            return "Скрыто: текст интерфейса часто хранится ключами локализации, а не готовыми строками.";
+        }
+
+        if (IsMapGameplayAsset(relativePath))
+        {
+            return "Скрыто: поле карты не похоже на безопасную точку спавна, NPC, транспорт, торговца или квест.";
+        }
+
+        if (valueType is "string" or "text" or "name" or "enum")
+        {
+            return "Скрыто: строковое поле не похоже на безопасный ID, тип, категорию, группу или разрешённый режим.";
+        }
+
+        if (valueType is "soft-object" or "soft-object-path" or "object")
+        {
+            return "Скрыто: ссылка на ассет не распознана как безопасный предмет, награда, патрон, модель или игровой класс.";
+        }
+
+        return "Скрыто: поле не входит в текущий allowlist безопасных игровых параметров этой поверхности.";
     }
 
     private static List<StudioModFieldDto> ApplyVehicleAutomaticSpawnFieldContext(
@@ -14815,7 +15477,40 @@ internal sealed class StudioRuntime
             false,
             null,
             null,
-            null));
+                null));
+    }
+
+    private static bool IsCommonItemSafeFieldLabel(string label)
+    {
+        return IsCommonItemSpawnZoneFieldLabel(label)
+            || label.Contains("rarity", StringComparison.Ordinal)
+            || label.Contains("редкость", StringComparison.Ordinal)
+            || label.Contains("случайный разброс поворота", StringComparison.Ordinal)
+            || label.Contains("уровень шума", StringComparison.Ordinal)
+            || label.Contains("noise level", StringComparison.Ordinal)
+            || label.Contains("урон со временем", StringComparison.Ordinal)
+            || label.Contains("выбрасывать при входе в боевой режим", StringComparison.Ordinal)
+            || label.Contains("should drop when entering combat mode", StringComparison.Ordinal);
+    }
+
+    private static bool IsCommonItemSpawnZoneFieldLabel(string label)
+    {
+        return label.Contains("item location", StringComparison.Ordinal)
+            || label.Contains("allowed locations", StringComparison.Ordinal)
+            || label.Contains("зоны появления", StringComparison.Ordinal)
+            || label.Contains("разрешённые зоны", StringComparison.Ordinal);
+    }
+
+    private static bool IsFuelPoweredItemSafeFieldLabel(string label)
+    {
+        return label.Contains("fuel amount", StringComparison.Ordinal)
+            || label.Contains("fuel расход", StringComparison.Ordinal)
+            || label.Contains("fuel filling", StringComparison.Ordinal)
+            || label.Contains("fuel consumption", StringComparison.Ordinal)
+            || label.Contains("noise loudness", StringComparison.Ordinal)
+            || label.Contains("movement speed multiplier", StringComparison.Ordinal)
+            || label.Contains("damage on use", StringComparison.Ordinal)
+            || label.Contains("is carried with two hands", StringComparison.Ordinal);
     }
 
     private static bool ShouldExposeSafeField(string relativePath, string userLabel, string valueType)
@@ -14880,7 +15575,11 @@ internal sealed class StudioRuntime
             "net update frequency", "частота обновления сети",
             "служебный поток условий", "служебная версия потока условий",
             "post process settings", "ambient occlusion",
-            "дальность отображения (lod)", "ld максимум draw", "ld maximum draw"
+            "дальность отображения (lod)", "ld максимум draw", "ld maximum draw",
+            "primary actor tick", "primary component tick", "tick интервал", "b start with tick enabled",
+            "replicate physics", "body instance", "collision responses", "component template",
+            "component class", "root component", "inheritable component handler", "simple construction script",
+            "uber graph function", "mass in kg", "b override mass"
         };
 
         if (hardBlockedTechnicalTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
@@ -15077,7 +15776,7 @@ internal sealed class StudioRuntime
             {
                 "всегда выдавать", "шанс появления набора",
                 "сколько предметов выдавать", "разрешать повторы предметов", "учитывать игровую зону предмета",
-                "готовый подпакет", "редкость набора",
+                "готовый подпакет", "редкость набора", "предметы контейнерного набора",
                 "учитывать модификатор шанса по локации", "учитывать модификатор веса по локации",
                 "начальная повреждённость", "разброс повреждённости",
                 "начальный ресурс или заряд", "разброс ресурса или заряда"
@@ -15198,7 +15897,8 @@ internal sealed class StudioRuntime
                 "вес", "ширина в инвентаре", "высота в инвентаре"
             };
 
-            return allowedWeaponClipTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+            return IsCommonItemSafeFieldLabel(label)
+                || allowedWeaponClipTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
         if (path.Contains("/items/weapons/ranged_weapons/", StringComparison.Ordinal))
@@ -15212,7 +15912,8 @@ internal sealed class StudioRuntime
                 "уровень шума", "урон со временем"
             };
 
-            return allowedRangedWeaponTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+            return IsCommonItemSafeFieldLabel(label)
+                || allowedRangedWeaponTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
         }
 
         if (path.Contains("/items/weapons/", StringComparison.Ordinal))
@@ -15225,7 +15926,24 @@ internal sealed class StudioRuntime
                 "общий шанс неисправности", "использовать свой шанс неисправности"
             };
 
-            return allowedWeaponTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+            return IsCommonItemSafeFieldLabel(label)
+                || IsFuelPoweredItemSafeFieldLabel(label)
+                || allowedWeaponTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal))
+        {
+            return label.Contains("доступные варианты транспорта", StringComparison.Ordinal)
+                || label.Contains("vehicle spawn", StringComparison.Ordinal);
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal))
+        {
+            if (IsCommonItemSafeFieldLabel(label)
+                || IsFuelPoweredItemSafeFieldLabel(label))
+            {
+                return true;
+            }
         }
 
         if (path.Contains("/skills/", StringComparison.Ordinal))
@@ -15659,7 +16377,7 @@ internal sealed class StudioRuntime
         {
             "draw distance", "дистанция отображения", "ignored by spawners", "игнорируется спавнерами",
             "не использовать для спавна в мире", "socket", "сокет",
-            "mesh slice", "части 3d-модели", "override materials", "переопределение материалов",
+            "mesh slice condition", "условие части 3d-модели",
             "asset user data", "query token stream", "token stream version",
             "net update frequency", "частота обновления сети",
             "служебный поток условий", "служебная версия потока условий",
@@ -16623,6 +17341,40 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
+            && label.Contains("доступные варианты транспорта", StringComparison.Ordinal))
+        {
+            return "Варианты транспорта";
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal))
+        {
+            if (IsCommonItemSpawnZoneFieldLabel(label))
+            {
+                return "Зоны появления";
+            }
+
+            if (label.Contains("rarity", StringComparison.Ordinal)
+                || label.Contains("редкость", StringComparison.Ordinal))
+            {
+                return "Лут и редкость";
+            }
+
+            if (IsFuelPoweredItemSafeFieldLabel(label))
+            {
+                return "Ресурс и топливо";
+            }
+
+            if (label.Contains("урон со временем", StringComparison.Ordinal)
+                || label.Contains("уровень шума", StringComparison.Ordinal)
+                || label.Contains("noise level", StringComparison.Ordinal)
+                || label.Contains("выбрасывать при входе в боевой режим", StringComparison.Ordinal)
+                || label.Contains("случайный разброс поворота", StringComparison.Ordinal))
+            {
+                return "Поведение предмета";
+            }
+        }
+
         if (path.Contains("/items/spawnerpresets/examine_data_presets/", StringComparison.OrdinalIgnoreCase))
         {
             if (IsExamineDataPresetItemListSurface(relativePath, userLabel))
@@ -17151,6 +17903,60 @@ internal sealed class StudioRuntime
             }
 
             return "Определяет текстуру или иконку для инвентаря/интерфейса. Замена меняет отображение предмета, но не его характеристики.";
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
+            && label.Contains("доступные варианты транспорта", StringComparison.Ordinal))
+        {
+            return "Какие пресеты транспорта входят в эту группу спавна. Замена меняет, какие машины, лодки или самолёты игра сможет выбрать для этой группы.";
+        }
+
+        if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
+            && label.Contains("предметы контейнерного набора", StringComparison.Ordinal))
+        {
+            return "Конкретный предмет внутри контейнерного набора лута. Меняй на совместимый предмет игры или свой cooked-ассет предмета.";
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal))
+        {
+            if (IsCommonItemSpawnZoneFieldLabel(label))
+            {
+                return "В каких типах зон этот предмет считается подходящим для появления. Эти флаги помогают спавнерам выбирать лут по месту.";
+            }
+
+            if (label.Contains("rarity", StringComparison.Ordinal)
+                || label.Contains("редкость", StringComparison.Ordinal))
+            {
+                return "Редкость предмета для систем лута. Чем выше редкость, тем осторожнее спавнеры выбирают предмет при включённом учёте редкости.";
+            }
+
+            if (label.Contains("случайный разброс поворота", StringComparison.Ordinal))
+            {
+                return "Насколько сильно предмет может случайно поворачиваться при появлении, чтобы лут не лежал всегда под одинаковым углом.";
+            }
+
+            if (label.Contains("уровень шума", StringComparison.Ordinal)
+                || label.Contains("noise level", StringComparison.Ordinal)
+                || label.Contains("noise loudness", StringComparison.Ordinal))
+            {
+                return "Насколько заметным или громким считается предмет при использовании, движении или запуске.";
+            }
+
+            if (label.Contains("урон со временем", StringComparison.Ordinal)
+                || label.Contains("damage on use", StringComparison.Ordinal))
+            {
+                return "Как быстро предмет теряет состояние при использовании или со временем. Повышай аккуратно, чтобы не сделать предмет слишком ломким.";
+            }
+
+            if (label.Contains("выбрасывать при входе в боевой режим", StringComparison.Ordinal))
+            {
+                return "Если включено, предмет автоматически сбрасывается или убирается, когда игрок переходит в боевой режим.";
+            }
+
+            if (IsFuelPoweredItemSafeFieldLabel(label))
+            {
+                return "Настройки внутреннего топлива или ресурса предмета: запас, расход, заправка и поведение при активном использовании.";
+            }
         }
 
         if (IsMapGameplayAsset(relativePath))
@@ -19070,6 +19876,22 @@ internal sealed class StudioRuntime
             return (visualPickerKind, visualPickerPrompt);
         }
 
+        if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
+            && label.Contains("предметы контейнерного набора", StringComparison.Ordinal))
+        {
+            return (
+                "item-asset",
+                "Найди предмет, который должен входить в этот контейнерный набор лута.");
+        }
+
+        if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
+            && label.Contains("доступные варианты транспорта", StringComparison.Ordinal))
+        {
+            return (
+                "vehicle-spawn-preset",
+                "Найди пресет транспорта, который эта группа сможет выбирать при спавне.");
+        }
+
         if (path.Contains("/cooking/recipes/", StringComparison.Ordinal)
             && (label.Contains("ингредиент", StringComparison.Ordinal)
                 || label.Contains("подходящий предмет", StringComparison.Ordinal)
@@ -19333,7 +20155,6 @@ internal sealed class StudioRuntime
                             || ContainsSearchTermAtBoundary(label, "модель");
         return hasModelToken
                && !label.Contains("slice", StringComparison.Ordinal)
-               && !label.Contains("части 3d-модели", StringComparison.Ordinal)
                && !label.Contains("socket", StringComparison.Ordinal)
                && !label.Contains("сокет", StringComparison.Ordinal);
     }
@@ -19342,8 +20163,6 @@ internal sealed class StudioRuntime
     {
         return (label.Contains("material", StringComparison.Ordinal)
                 || label.Contains("материал", StringComparison.Ordinal))
-               && !label.Contains("override", StringComparison.Ordinal)
-               && !label.Contains("переопределение", StringComparison.Ordinal)
                && !label.Contains("расход", StringComparison.Ordinal)
                && !label.Contains("ингредиент", StringComparison.Ordinal);
     }
