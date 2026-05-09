@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 using Velopack;
@@ -50,6 +51,12 @@ internal static class Program
             return 2;
         }
 
+        builder.Services.Configure<FormOptions>(options =>
+        {
+            options.MultipartBodyLengthLimit = 2L * 1024 * 1024 * 1024;
+            options.ValueLengthLimit = int.MaxValue;
+            options.MultipartHeadersLengthLimit = int.MaxValue;
+        });
         builder.WebHost.ConfigureKestrel(options => options.ListenLocalhost(StudioPort));
         var app = builder.Build();
 
@@ -82,6 +89,21 @@ internal static class Program
             Results.Ok(studio.PreviewModdingAssetSchema(request)));
         app.MapGet("/api/modding/reference-options", (string pickerKind, string? term, int? limit) =>
             Results.Ok(studio.GetModdingReferenceOptions(pickerKind, term, limit ?? 24)));
+        app.MapPost("/api/custom-visual-assets/import", async (HttpRequest request) =>
+        {
+            if (!request.HasFormContentType)
+            {
+                return Results.BadRequest(new StudioCustomVisualImportResultDto(
+                    false,
+                    "Нужна multipart form-data форма с cooked UE-файлами.",
+                    0,
+                    [],
+                    []));
+            }
+
+            var form = await request.ReadFormAsync();
+            return Results.Ok(await studio.ImportCustomVisualAssetsAsync(form.Files));
+        });
         app.MapGet("/api/research/mod-pattern", (string assetPath, bool? includeImportDiff, int? maxItems) =>
             Results.Ok(studio.InspectResearchModPattern(assetPath, includeImportDiff ?? true, maxItems ?? 12)));
         app.MapGet("/api/catalog", () => Results.Ok(studio.GetItemCatalog()));

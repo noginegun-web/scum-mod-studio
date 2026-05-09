@@ -25,6 +25,7 @@ const state = {
     currentSceneSearch: "",
     currentSceneFocusMode: "all",
     currentSceneNudgeStep: 25,
+    schemaLoadToken: 0,
     stagedByAssetId: new Map(),
     showOnlyEditable: false,
     schemaFieldFilter: ""
@@ -1372,15 +1373,11 @@ function syncSelectedAssetWithVisibleList() {
     return visibleAssets;
   }
 
-  const exists = visibleAssets.some((asset) => asset.assetId === state.modding.selectedAssetId);
-  if (!exists) {
-    state.modding.selectedAssetId = visibleAssets[0]?.assetId || "";
-  }
-
   state.modding.selectedAsset =
-    visibleAssets.find((asset) => asset.assetId === state.modding.selectedAssetId) ||
-    visibleAssets[0] ||
-    null;
+    visibleAssets.find((asset) => asset.assetId === state.modding.selectedAssetId) || null;
+  if (!state.modding.selectedAsset) {
+    state.modding.selectedAssetId = "";
+  }
   return visibleAssets;
 }
 
@@ -1417,6 +1414,80 @@ async function fetchReferenceOptions(pickerKind, term, limit = 12) {
     limit: String(limit)
   });
   return api(`/api/modding/reference-options?${query.toString()}`);
+}
+
+function formatCustomVisualKind(kind) {
+  return {
+    "static-mesh": "модель",
+    "skeletal-mesh": "скелетная модель",
+    material: "материал",
+    texture: "текстура"
+  }[String(kind || "").toLowerCase()] || "ассет";
+}
+
+function setCustomVisualImportStatus(text, isError = false) {
+  const status = el("customVisualImportStatus");
+  if (!status) {
+    return;
+  }
+
+  status.textContent = text || "";
+  status.classList.toggle("status-error", Boolean(isError));
+}
+
+async function importCustomVisualAssets() {
+  const fileInput = el("customVisualFiles");
+  const folderInput = el("customVisualFolder");
+  const files = [
+    ...Array.from(fileInput?.files || []),
+    ...Array.from(folderInput?.files || [])
+  ];
+  if (!files.length) {
+    setCustomVisualImportStatus("Выбери cooked UE-файлы для импорта.", true);
+    return;
+  }
+
+  const form = new FormData();
+  for (const file of files) {
+    form.append("files", file, file.webkitRelativePath || file.name);
+  }
+
+  setCustomVisualImportStatus("Импортирую...");
+  const result = await api("/api/custom-visual-assets/import", {
+    method: "POST",
+    body: form
+  });
+
+  const importedCount = Number(result.importedFileCount || 0);
+  const assets = Array.isArray(result.assets) ? result.assets : [];
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const parts = [];
+
+  if (result.ok === false) {
+    parts.push(result.error || "Импорт не выполнен.");
+  } else {
+    parts.push(`Импортировано файлов: ${importedCount}. Распознано ассетов: ${assets.length}.`);
+  }
+
+  if (assets.length) {
+    const preview = assets
+      .slice(0, 4)
+      .map((asset) => `${formatCustomVisualKind(asset.kind)}: ${asset.name}`)
+      .join("; ");
+    parts.push(preview);
+  }
+
+  if (warnings.length) {
+    parts.push(`Предупреждения: ${warnings.slice(0, 3).join(" ")}`);
+  }
+
+  setCustomVisualImportStatus(parts.join("\n"), result.ok === false);
+  if (fileInput) {
+    fileInput.value = "";
+  }
+  if (folderInput) {
+    folderInput.value = "";
+  }
 }
 
 async function loadStatus() {
@@ -1693,7 +1764,18 @@ function renderSelectedAssetPreview() {
   openSchemaBtn.type = "button";
   openSchemaBtn.textContent = "Перейти к настройкам";
   openSchemaBtn.addEventListener("click", () => {
-    document.getElementById("schemaPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const scrollToSchema = () => {
+      document.getElementById("schemaPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+
+    if (state.modding.currentSchema?.assetId === asset.assetId) {
+      scrollToSchema();
+      return;
+    }
+
+    loadSelectedAssetSchema()
+      .then(scrollToSchema)
+      .catch(showError);
   });
 
   const reloadBtn = document.createElement("button");
@@ -1775,6 +1857,20 @@ function renderModAssetRows() {
   renderModPaging();
 }
 
+function syncSchemaAfterAssetListChange() {
+  if (!state.modding.selectedAssetId) {
+    clearSchemaView();
+    return;
+  }
+
+  if (state.modding.currentSchema?.assetId === state.modding.selectedAssetId) {
+    renderSelectedAssetPreview();
+    return;
+  }
+
+  showDeferredSchemaView(state.modding.selectedAsset);
+}
+
 async function loadModdingAssets() {
   const search = encodeURIComponent(el("modAssetSearch").value.trim());
   const categoryId = encodeURIComponent(state.modding.selectedCategoryId);
@@ -1794,12 +1890,7 @@ async function loadModdingAssets() {
 
   syncSelectedAssetWithVisibleList();
   renderModAssetRows();
-
-  if (state.modding.selectedAssetId) {
-    await loadSelectedAssetSchema();
-  } else {
-    clearSchemaView();
-  }
+  syncSchemaAfterAssetListChange();
 }
 
 function clearSchemaView() {
@@ -1838,6 +1929,37 @@ function clearSchemaView() {
   }
   renderCurrentListOps();
   renderSceneEditor();
+  renderSelectedAssetPreview();
+}
+
+function showDeferredSchemaView(asset) {
+  state.modding.currentSchema = null;
+  state.modding.currentFieldValues = new Map();
+  state.modding.currentFieldDisplayValues = new Map();
+  state.modding.currentOriginalValues = new Map();
+  state.modding.currentListEdits = [];
+  state.modding.currentScene = null;
+  state.modding.currentSceneSelectionId = "";
+  state.modding.currentSceneDrag = null;
+  state.modding.currentSceneFilterKind = "all";
+  state.modding.currentSceneSearch = "";
+  state.modding.currentSceneFocusMode = "all";
+  state.modding.schemaFieldFilter = "";
+
+  el("schemaAssetTitle").textContent = asset?.displayName || "Раздел выбран";
+  el("schemaAssetSummary").textContent = asset?.summary || "";
+  el("schemaMeta").textContent = "Настройки ещё не загружены.";
+  el("schemaWarnings").innerHTML = "";
+  el("schemaSections").innerHTML = '<div class="schema-loading muted">Нажми на карточку системы или кнопку обновления, чтобы прочитать настройки из игры.</div>';
+  el("listTargetRows").innerHTML = "";
+  if (el("schemaFieldFilter")) {
+    el("schemaFieldFilter").value = "";
+  }
+  if (el("schemaFilterMeta")) {
+    el("schemaFilterMeta").textContent = "";
+  }
+  clearScenePanelContent();
+  renderCurrentListOps();
   renderSelectedAssetPreview();
 }
 
@@ -3447,6 +3569,7 @@ async function loadSelectedAssetSchema() {
     return;
   }
 
+  const loadToken = ++state.modding.schemaLoadToken;
   const selected = selectedAssetFromCurrentPage();
   state.modding.selectedAsset = selected;
   if (selected) {
@@ -3461,6 +3584,10 @@ async function loadSelectedAssetSchema() {
   el("schemaSections").innerHTML = '<div class="schema-loading muted">Читаю безопасные настройки из игры. На больших ассетах это может занять несколько секунд.</div>';
   el("listTargetRows").innerHTML = '<div class="schema-loading muted">Собираю состав системы и связанные элементы...</div>';
   const schema = await api(`/api/modding/schema?assetId=${encodeURIComponent(assetId)}`);
+  if (loadToken !== state.modding.schemaLoadToken || state.modding.selectedAssetId !== assetId) {
+    return;
+  }
+
   state.modding.currentSchema = schema;
   state.modding.currentFieldValues = new Map();
   state.modding.currentFieldDisplayValues = new Map();
@@ -3813,7 +3940,6 @@ function setupActions() {
   });
 
   el("modOnlyEditableCheck").addEventListener("change", () => {
-    const previousAssetId = state.modding.selectedAssetId;
     const visibleAssets = syncSelectedAssetWithVisibleList();
     renderModAssetRows();
     if (!visibleAssets.length) {
@@ -3821,12 +3947,7 @@ function setupActions() {
       return;
     }
 
-    if (state.modding.selectedAssetId !== previousAssetId || state.modding.currentSchema?.assetId !== state.modding.selectedAssetId) {
-      loadSelectedAssetSchema().catch(showError);
-      return;
-    }
-
-    renderSelectedAssetPreview();
+    syncSchemaAfterAssetListChange();
   });
 
   el("modPrevBtn").addEventListener("click", () => {
@@ -3846,6 +3967,7 @@ function setupActions() {
   });
 
   el("loadSchemaBtn").addEventListener("click", () => loadSelectedAssetSchema().catch(showError));
+  el("customVisualImportBtn").addEventListener("click", () => importCustomVisualAssets().catch(showError));
   el("schemaFieldFilter").addEventListener("input", () => {
     state.modding.schemaFieldFilter = el("schemaFieldFilter").value;
     renderSceneEditor();

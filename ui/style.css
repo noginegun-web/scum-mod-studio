@@ -1208,6 +1208,37 @@ button.primary {
   min-width: 260px;
 }
 
+.custom-visual-import {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin: 0 0 12px;
+}
+
+.custom-visual-file {
+  min-width: 0;
+}
+
+.custom-visual-file input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #0e151f;
+  color: var(--text);
+}
+
+#customVisualImportStatus {
+  grid-column: 1 / -1;
+  min-height: 16px;
+  white-space: pre-line;
+}
+
+.status-error {
+  color: #ffb7b7;
+}
+
 .output {
   min-height: 130px;
   max-height: 320px;
@@ -1247,6 +1278,10 @@ button.primary {
 
   .field-input {
     min-width: 170px;
+  }
+
+  .custom-visual-import {
+    grid-template-columns: 1fr;
   }
 
   .scene-editor-layout {

@@ -163,6 +163,20 @@ internal sealed record StudioReferenceOptionDto(
     string Value,
     string Label);
 
+internal sealed record StudioCustomVisualAssetDto(
+    string Name,
+    string Kind,
+    string TargetRelativePath,
+    string ObjectReference,
+    string AssetReference);
+
+internal sealed record StudioCustomVisualImportResultDto(
+    bool Ok,
+    string? Error,
+    int ImportedFileCount,
+    List<StudioCustomVisualAssetDto> Assets,
+    List<string> Warnings);
+
 internal sealed record StudioModAssetSchemaDto(
     string AssetId,
     string RelativePath,

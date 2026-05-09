@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Reflection;
 using System.Security.Cryptography;
+using Microsoft.AspNetCore.Http;
 using UAssetAPI;
 using UAssetAPI.ExportTypes;
 using UAssetAPI.PropertyTypes.Objects;
@@ -17,7 +18,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 18;
+    private const int ModAssetsCatalogCacheFormatVersion = 22;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -64,8 +65,10 @@ internal sealed class StudioRuntime
         "scum/content/conz_files/items/crafting/recipes/items/cr_wooden_club_wire.uasset",
         "scum/content/conz_files/maps/the_island/b_3_refinery_base_01.umap",
         "scum/content/conz_files/maps/the_island/b_3_refinery_base_03.umap",
+        "scum/content/conz_files/maps/the_island/a_4_military_base.umap",
         "scum/content/conz_files/maps/the_island/tv_base_c_1.umap",
         "scum/content/conz_files/maps/the_island/tv_base_d_0.umap",
+        "scum/content/conz_files/maps/the_island/tv_base_b_4.umap",
         "scum/content/conz_files/maps/the_island/tv_base_z_0.umap",
         "scum/content/conz_files/maps/the_island/tv_base_z_2.umap",
         "scum/content/conz_files/gameresources/food/solids/cookeddishes/bp_dish_fishpaprikash.uasset",
@@ -76,6 +79,27 @@ internal sealed class StudioRuntime
         "scum/content/conz_files/items/ammunition/ammunition_class/bp_weaponbullet_9x39mm_crafted.uasset",
         "scum/content/conz_files/items/ammunition/ammunition_class/bp_sentryhighprecisionbullet_client.uasset",
         "scum/content/conz_files/items/ammunition/ammunition_class/bp_weaponbullet_shotgunshell_crafted.uasset",
+        "scum/content/conz_files/items/ammunition/ammoboxes/cal_7_62x39mm_ap_ammobox_es.uasset",
+        "scum/content/conz_files/items/ammunition/cal_45_ap_cr_es.uasset",
+        "scum/content/conz_files/items/ammunition/cal_45_es.uasset",
+        "scum/content/conz_files/items/clothes/backpacks_bags/military_backpack_02_05.uasset",
+        "scum/content/conz_files/items/clothes/eyewear/military_goggles_01.uasset",
+        "scum/content/conz_files/items/clothes/footwear/kilt_brogue_shoe_02_es.uasset",
+        "scum/content/conz_files/items/clothes/footwear/kilt_brogue_shoe_03_es.uasset",
+        "scum/content/conz_files/items/clothes/footwear/kilt_brogue_shoe_04_es.uasset",
+        "scum/content/conz_files/items/clothes/footwear/kilt_brogue_shoe_05_es.uasset",
+        "scum/content/conz_files/items/clothes/footwear/kilt_brogue_shoe_06_es.uasset",
+        "scum/content/conz_files/items/clothes/headgear/night_vision_googles_with_batteries_01_es.uasset",
+        "scum/content/conz_files/items/food/fruit/apricot_es.uasset",
+        "scum/content/conz_files/items/equipment/active_items/fireworks_big_es.uasset",
+        "scum/content/conz_files/items/vehicle/attachments/wolfswagen/ww_body_armorheavy_top_item_es.uasset",
+        "scum/content/conz_files/items/weapons/attachments/scope/weaponscope_m82a1_black_es.uasset",
+        "scum/content/conz_files/items/weapons/new_melee/2h_tang_dao.uasset",
+        "scum/content/conz_files/items/weapons/ranged_weapons/weapon_awp_green_es.uasset",
+        "scum/content/conz_files/items/weapons/weapon_clips/magazine_hunter85_v2_es.uasset",
+        "scum/content/conz_files/items/weapons/weapon_parts/weapon_parts_flaregun_es.uasset",
+        "scum/content/conz_files/items/weapons/weapon_parts/weapon_parts_m1_garand.uasset",
+        "scum/content/conz_files/items/weapons/weapon_parts/weapon_parts_m16a4_es.uasset",
         "scum/content/conz_files/items/spawnerpresets2/buildings/church/examine_bible_stand.uasset",
         "scum/content/conz_files/items/spawnerpresets2/special_packages/cargo_drops/examine_aks_74u_addons_cargodrop.uasset",
         "scum/content/conz_files/items/spawnerpresets2/farming/examine_apricot.uasset",
@@ -303,6 +327,7 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _visualMaterialSoftReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualTextureObjectReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualTextureSoftReferenceOptionsCache;
+    private List<CustomVisualAssetInfo>? _customVisualAssetCache;
     private List<StudioReferenceOptionDto>? _ammoItemReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _ammoProjectileReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _genericGameplayReferenceOptionsCache;
@@ -744,6 +769,11 @@ internal sealed class StudioRuntime
             return GetWeaponBulletClassReferenceOptions(term, limit);
         }
 
+        if (!string.IsNullOrWhiteSpace(term) && TryBuildFastCustomVisualReferenceOptions(normalizedPicker, term, limit, out var customVisualOptions))
+        {
+            return customVisualOptions;
+        }
+
         List<StudioReferenceOptionDto> allOptions;
         lock (_sync)
         {
@@ -914,6 +944,62 @@ internal sealed class StudioRuntime
             .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
             .Take(limit)
             .ToList();
+    }
+
+    private bool TryBuildFastCustomVisualReferenceOptions(
+        string normalizedPicker,
+        string term,
+        int limit,
+        out List<StudioReferenceOptionDto> options)
+    {
+        options = [];
+        var kind = ResolveCustomVisualKindFromPicker(normalizedPicker);
+        if (string.IsNullOrWhiteSpace(kind))
+        {
+            return false;
+        }
+
+        var objectReference = normalizedPicker.EndsWith("-object", StringComparison.OrdinalIgnoreCase)
+                              || normalizedPicker.Equals("visual-icon-object", StringComparison.OrdinalIgnoreCase);
+        var allOptions = GetCustomVisualAssetCatalog()
+            .Where(asset => asset.Kind.Equals(kind, StringComparison.OrdinalIgnoreCase))
+            .Select(asset => new StudioReferenceOptionDto(
+                objectReference ? asset.ObjectReference : asset.AssetReference,
+                PrefixReferenceOptionLabel("Пользовательский ассет", asset.DisplayName)))
+            .Where(option => !string.IsNullOrWhiteSpace(option.Value))
+            .ToList();
+        if (allOptions.Count == 0)
+        {
+            return false;
+        }
+
+        var trimmed = term.Trim();
+        var searchTerms = ExpandReferenceSearchTerms(normalizedPicker, trimmed).ToList();
+        var normalizedTerms = searchTerms
+            .Select(NormalizeLooseSearch)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        options = allOptions
+            .Where(option => MatchesReferenceSearch(option, searchTerms, normalizedTerms))
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToList();
+        return options.Count > 0;
+    }
+
+    private static string ResolveCustomVisualKindFromPicker(string normalizedPicker)
+    {
+        return normalizedPicker switch
+        {
+            "visual-static-mesh-object" or "visual-static-mesh-asset" => "static-mesh",
+            "visual-skeletal-mesh-object" or "visual-skeletal-mesh-asset" => "skeletal-mesh",
+            "visual-material-object" or "visual-material-asset" => "material",
+            "visual-texture-object" or "visual-texture-asset" or "visual-icon-object" or "visual-icon-asset" => "texture",
+            _ => string.Empty
+        };
     }
 
     private static bool IsGenericGameplayPickerKind(string pickerKind)
@@ -2247,41 +2333,56 @@ internal sealed class StudioRuntime
 
     private List<StudioReferenceOptionDto> BuildVisualStaticMeshObjectReferenceOptions()
     {
-        return BuildGameObjectReferenceOptions(
+        return MergeCustomVisualReferenceOptions(
+            BuildGameObjectReferenceOptions(
             IsVisualStaticMeshAssetCandidate,
             "/Script/Engine",
             "StaticMesh",
-            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SM_")));
+                assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SM_"))),
+            "static-mesh",
+            objectReference: true);
     }
 
     private List<StudioReferenceOptionDto> BuildVisualStaticMeshSoftReferenceOptions()
     {
-        return BuildSoftGameAssetReferenceOptions(
+        return MergeCustomVisualReferenceOptions(
+            BuildSoftGameAssetReferenceOptions(
             IsVisualStaticMeshAssetCandidate,
-            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SM_")));
+                assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SM_"))),
+            "static-mesh",
+            objectReference: false);
     }
 
     private List<StudioReferenceOptionDto> BuildVisualSkeletalMeshObjectReferenceOptions()
     {
-        return BuildGameObjectReferenceOptions(
+        return MergeCustomVisualReferenceOptions(
+            BuildGameObjectReferenceOptions(
             IsVisualSkeletalMeshAssetCandidate,
             "/Script/Engine",
             "SkeletalMesh",
-            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SK_")));
+                assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SK_"))),
+            "skeletal-mesh",
+            objectReference: true);
     }
 
     private List<StudioReferenceOptionDto> BuildVisualSkeletalMeshSoftReferenceOptions()
     {
-        return BuildSoftGameAssetReferenceOptions(
+        return MergeCustomVisualReferenceOptions(
+            BuildSoftGameAssetReferenceOptions(
             IsVisualSkeletalMeshAssetCandidate,
-            assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SK_")));
+                assetInfo => PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "SK_"))),
+            "skeletal-mesh",
+            objectReference: false);
     }
 
     private List<StudioReferenceOptionDto> BuildVisualMaterialSoftReferenceOptions()
     {
-        return BuildSoftGameAssetReferenceOptions(
+        return MergeCustomVisualReferenceOptions(
+            BuildSoftGameAssetReferenceOptions(
             IsVisualMaterialAssetCandidate,
-            assetInfo => PrefixReferenceOptionLabel("Материал", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "MI_", "M_", "MAT_")));
+                assetInfo => PrefixReferenceOptionLabel("Материал", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "MI_", "M_", "MAT_"))),
+            "material",
+            objectReference: false);
     }
 
     private List<StudioReferenceOptionDto> BuildVisualMaterialObjectReferenceOptions()
@@ -2318,26 +2419,643 @@ internal sealed class StudioRuntime
                 PrefixReferenceOptionLabel("Материал", ResolveVisualAssetDisplayName(relativePath, "MI_", "M_", "MAT_"))));
         }
 
-        return result
+        return MergeCustomVisualReferenceOptions(result, "material", objectReference: true);
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualTextureObjectReferenceOptions()
+    {
+        return MergeCustomVisualReferenceOptions(
+            BuildGameObjectReferenceOptions(
+            IsVisualTextureAssetCandidate,
+            "/Script/Engine",
+            "Texture2D",
+                assetInfo => PrefixReferenceOptionLabel("Текстура", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "T_", "TX_", "TEX_", "ICO_", "ICON_"))),
+            "texture",
+            objectReference: true);
+    }
+
+    private List<StudioReferenceOptionDto> BuildVisualTextureSoftReferenceOptions()
+    {
+        return MergeCustomVisualReferenceOptions(
+            BuildSoftGameAssetReferenceOptions(
+            IsVisualTextureAssetCandidate,
+                assetInfo => PrefixReferenceOptionLabel("Текстура", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "T_", "TX_", "TEX_", "ICO_", "ICON_"))),
+            "texture",
+            objectReference: false);
+    }
+
+    private List<StudioReferenceOptionDto> MergeCustomVisualReferenceOptions(
+        List<StudioReferenceOptionDto> baseOptions,
+        string kind,
+        bool objectReference)
+    {
+        var result = new Dictionary<string, StudioReferenceOptionDto>(StringComparer.OrdinalIgnoreCase);
+        foreach (var option in baseOptions)
+        {
+            result[option.Value] = option;
+        }
+
+        foreach (var asset in GetCustomVisualAssetCatalog().Where(asset =>
+                     asset.Kind.Equals(kind, StringComparison.OrdinalIgnoreCase)))
+        {
+            var value = objectReference ? asset.ObjectReference : asset.AssetReference;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            result[value] = new StudioReferenceOptionDto(
+                value,
+                PrefixReferenceOptionLabel("Пользовательский ассет", asset.DisplayName));
+        }
+
+        return result.Values
             .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
             .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    private List<StudioReferenceOptionDto> BuildVisualTextureObjectReferenceOptions()
+    private List<CustomVisualAssetInfo> GetCustomVisualAssetCatalog()
     {
-        return BuildGameObjectReferenceOptions(
-            IsVisualTextureAssetCandidate,
-            "/Script/Engine",
-            "Texture2D",
-            assetInfo => PrefixReferenceOptionLabel("Текстура", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "T_", "TX_", "TEX_", "ICO_", "ICON_")));
+        return _customVisualAssetCache ??= BuildCustomVisualAssetCatalog();
     }
 
-    private List<StudioReferenceOptionDto> BuildVisualTextureSoftReferenceOptions()
+    public async Task<StudioCustomVisualImportResultDto> ImportCustomVisualAssetsAsync(IFormFileCollection files)
     {
-        return BuildSoftGameAssetReferenceOptions(
-            IsVisualTextureAssetCandidate,
-            assetInfo => PrefixReferenceOptionLabel("Текстура", ResolveVisualAssetDisplayName(assetInfo.RelativePath, "T_", "TX_", "TEX_", "ICO_", "ICON_")));
+        var warnings = new List<string>();
+        if (files is null || files.Count == 0)
+        {
+            return new StudioCustomVisualImportResultDto(
+                false,
+                "Выбери cooked UE-файлы .uasset/.uexp/.ubulk/.uptnl.",
+                0,
+                [],
+                warnings);
+        }
+
+        var customRoot = GetWritableCustomVisualAssetRoot();
+        var importRoot = Path.Combine(customRoot, "Imported");
+        Directory.CreateDirectory(importRoot);
+
+        var importedFiles = new List<string>();
+        foreach (var file in files)
+        {
+            if (file.Length <= 0)
+            {
+                continue;
+            }
+
+            if (!TryGetSafeCustomVisualUploadPath(file.FileName, out var safeRelativePath))
+            {
+                warnings.Add($"Файл пропущен: небезопасное имя {file.FileName}");
+                continue;
+            }
+
+            var extension = Path.GetExtension(safeRelativePath);
+            if (!IsAllowedCustomVisualUploadExtension(extension))
+            {
+                warnings.Add(IsRawModelUploadExtension(extension)
+                    ? $"Сырые модели {extension} нужно сначала импортировать и cook в Unreal Engine 4.27 под Windows: {file.FileName}"
+                    : $"Файл пропущен: поддерживаются только .uasset/.uexp/.ubulk/.uptnl ({file.FileName})");
+                continue;
+            }
+
+            var destinationPath = Path.GetFullPath(Path.Combine(importRoot, safeRelativePath));
+            if (!IsPathInsideDirectory(destinationPath, importRoot))
+            {
+                warnings.Add($"Файл пропущен: небезопасный путь {file.FileName}");
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? importRoot);
+            await using var stream = File.Create(destinationPath);
+            await file.CopyToAsync(stream);
+            importedFiles.Add(destinationPath);
+        }
+
+        if (importedFiles.Count == 0)
+        {
+            return new StudioCustomVisualImportResultDto(
+                false,
+                "Не удалось импортировать ни одного cooked UE-файла.",
+                0,
+                [],
+                warnings);
+        }
+
+        _customVisualAssetCache = null;
+        var assetInfos = importedFiles
+            .Where(path => path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+            .Select(path => TryBuildCustomVisualAssetInfo(customRoot, path, out var info) ? info : null)
+            .Where(info => info is not null)
+            .Select(info => info!)
+            .ToList();
+
+        var assets = assetInfos
+            .Select(info => new StudioCustomVisualAssetDto(
+                info.DisplayName,
+                info.Kind,
+                info.TargetRelativePath,
+                info.ObjectReference,
+                info.AssetReference))
+            .OrderBy(asset => asset.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(asset => asset.TargetRelativePath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var importedUassets = importedFiles
+            .Where(path => path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (importedUassets.Count > assets.Count)
+        {
+            warnings.Add("Часть .uasset не распознана как визуальный ассет. Для автоопределения нужны cooked UE4.27 ассеты или префиксы SM_, SK_, MI_, M_, MAT_, T_, TX_, TEX_, ICO_, ICON_.");
+        }
+
+        foreach (var asset in assetInfos)
+        {
+            var sourceStem = Path.Combine(
+                Path.GetDirectoryName(asset.SourcePath) ?? string.Empty,
+                Path.GetFileNameWithoutExtension(asset.SourcePath));
+            if (!File.Exists($"{sourceStem}.uexp"))
+            {
+                warnings.Add($"У импортированного ассета нет companion .uexp: {asset.TargetRelativePath}");
+            }
+        }
+
+        return new StudioCustomVisualImportResultDto(
+            true,
+            null,
+            importedFiles.Count,
+            assets,
+            warnings);
+    }
+
+    private List<CustomVisualAssetInfo> BuildCustomVisualAssetCatalog()
+    {
+        var result = new Dictionary<string, CustomVisualAssetInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var root in EnumerateCustomVisualAssetRoots().Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!Directory.Exists(root))
+            {
+                continue;
+            }
+
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(root, "*.uasset", SearchOption.AllDirectories);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var file in files)
+            {
+                if (!TryBuildCustomVisualAssetInfo(root, file, out var info))
+                {
+                    continue;
+                }
+
+                result[info.ObjectPath] = info;
+            }
+        }
+
+        return result.Values
+            .OrderBy(asset => asset.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(asset => asset.ObjectPath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private IEnumerable<string> EnumerateCustomVisualAssetRoots()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        var roots = new[]
+        {
+            Path.Combine(_runtimePaths.WorkspaceRoot, "custom_assets"),
+            Path.Combine(_runtimePaths.WorkspaceRoot, "custom-assets"),
+            Path.Combine(_runtimePaths.WorkspaceRoot, "visual_assets"),
+            Path.Combine(_runtimePaths.WorkspaceRoot, "visual-assets"),
+            Path.Combine(_runtimePaths.WorkspaceRoot, "ScumPakWizard", "custom_assets"),
+            Path.Combine(_runtimePaths.WorkspaceRoot, "ScumPakWizard", "custom-assets"),
+            Path.Combine(_runtimePaths.AppRoot, "custom_assets"),
+            Path.Combine(_runtimePaths.AppRoot, "custom-assets"),
+            string.IsNullOrWhiteSpace(localAppData)
+                ? string.Empty
+                : Path.Combine(localAppData, "ScumPakWizard", "custom-assets"),
+            string.IsNullOrWhiteSpace(documents)
+                ? string.Empty
+                : Path.Combine(documents, "SCUM Mod Studio", "custom-assets")
+        };
+
+        foreach (var root in roots.Where(root => !string.IsNullOrWhiteSpace(root)))
+        {
+            yield return root;
+        }
+    }
+
+    private string GetWritableCustomVisualAssetRoot()
+    {
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(localAppData))
+        {
+            return Path.Combine(localAppData, "ScumPakWizard", "custom-assets");
+        }
+
+        return Path.Combine(_runtimePaths.WorkspaceRoot, "custom-assets");
+    }
+
+    private static bool TryGetSafeCustomVisualUploadPath(string rawFileName, out string safeRelativePath)
+    {
+        safeRelativePath = string.Empty;
+        var normalized = PathUtil.NormalizeRelative((rawFileName ?? string.Empty).Replace('\\', '/'));
+        var segments = normalized
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(segment => !segment.Equals(".", StringComparison.Ordinal)
+                              && !segment.Equals("..", StringComparison.Ordinal)
+                              && !segment.Equals("fakepath", StringComparison.OrdinalIgnoreCase)
+                              && !segment.EndsWith(":", StringComparison.Ordinal))
+            .Select(segment => PathUtil.SanitizeFileName(segment))
+            .Where(segment => !string.IsNullOrWhiteSpace(segment))
+            .Take(8)
+            .ToList();
+
+        if (segments.Count == 0)
+        {
+            return false;
+        }
+
+        var fileName = segments[^1];
+        if (string.IsNullOrWhiteSpace(Path.GetExtension(fileName)))
+        {
+            return false;
+        }
+
+        if (fileName.Length > 180)
+        {
+            var extension = Path.GetExtension(fileName);
+            fileName = $"{Path.GetFileNameWithoutExtension(fileName)[..Math.Min(140, Path.GetFileNameWithoutExtension(fileName).Length)]}{extension}";
+            segments[^1] = fileName;
+        }
+
+        safeRelativePath = Path.Combine(segments.ToArray());
+        return !string.IsNullOrWhiteSpace(safeRelativePath);
+    }
+
+    private static bool IsAllowedCustomVisualUploadExtension(string extension)
+    {
+        return extension.Equals(".uasset", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".uexp", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".ubulk", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".uptnl", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRawModelUploadExtension(string extension)
+    {
+        return extension.Equals(".fbx", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".glb", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".obj", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".blend", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPathInsideDirectory(string path, string directory)
+    {
+        var normalizedPath = Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normalizedDirectory = Path.GetFullPath(directory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return normalizedPath.Equals(normalizedDirectory, StringComparison.OrdinalIgnoreCase)
+               || normalizedPath.StartsWith($"{normalizedDirectory}{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+               || normalizedPath.StartsWith($"{normalizedDirectory}{Path.AltDirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryBuildCustomVisualAssetInfo(string root, string sourcePath, out CustomVisualAssetInfo info)
+    {
+        info = null!;
+        if (string.IsNullOrWhiteSpace(root)
+            || string.IsNullOrWhiteSpace(sourcePath)
+            || !sourcePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!TryResolveCustomAssetTargetRelativePath(root, sourcePath, out var targetRelativePath))
+        {
+            return false;
+        }
+
+        var kind = ResolveCustomVisualAssetKind(targetRelativePath);
+        var className = ResolveCustomVisualAssetClassName(kind, targetRelativePath);
+        if ((string.IsNullOrWhiteSpace(kind) || string.IsNullOrWhiteSpace(className))
+            && TryInferCustomVisualAssetIdentity(sourcePath, out var inferredKind, out var inferredClassName)
+            && (string.IsNullOrWhiteSpace(kind) || kind.Equals(inferredKind, StringComparison.OrdinalIgnoreCase)))
+        {
+            kind = inferredKind;
+            className = inferredClassName;
+        }
+
+        if (string.IsNullOrWhiteSpace(kind) || string.IsNullOrWhiteSpace(className))
+        {
+            return false;
+        }
+
+        var objectPath = BuildGameObjectPathFromTargetRelativePath(targetRelativePath);
+        if (string.IsNullOrWhiteSpace(objectPath))
+        {
+            return false;
+        }
+
+        var dotIndex = objectPath.LastIndexOf('.');
+        if (dotIndex <= 0 || dotIndex >= objectPath.Length - 1)
+        {
+            return false;
+        }
+
+        var displayName = ResolveCustomVisualAssetDisplayName(targetRelativePath, kind);
+        info = new CustomVisualAssetInfo(
+            sourcePath,
+            targetRelativePath,
+            objectPath,
+            BuildImportedObjectReferenceRawValue(
+                objectPath[..dotIndex],
+                objectPath[(dotIndex + 1)..],
+                "/Script/Engine",
+                className),
+            objectPath,
+            displayName,
+            kind);
+        return true;
+    }
+
+    private static bool TryResolveCustomAssetTargetRelativePath(string root, string sourcePath, out string targetRelativePath)
+    {
+        targetRelativePath = string.Empty;
+        string rel;
+        try
+        {
+            rel = PathUtil.NormalizeRelative(Path.GetRelativePath(root, sourcePath));
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(rel) || rel.StartsWith("../", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var segments = rel.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length == 0)
+        {
+            return false;
+        }
+
+        var scumIndex = Array.FindIndex(segments, segment => segment.Equals("SCUM", StringComparison.OrdinalIgnoreCase));
+        if (scumIndex >= 0
+            && scumIndex + 1 < segments.Length
+            && segments[scumIndex + 1].Equals("Content", StringComparison.OrdinalIgnoreCase))
+        {
+            targetRelativePath = PathUtil.NormalizeRelative(string.Join('/', segments[scumIndex..]));
+            return true;
+        }
+
+        var rootName = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (rootName.Equals("Content", StringComparison.OrdinalIgnoreCase))
+        {
+            targetRelativePath = PathUtil.NormalizeRelative($"SCUM/Content/{rel}");
+            return true;
+        }
+
+        if (rootName.Equals("SCUM", StringComparison.OrdinalIgnoreCase)
+            && rel.StartsWith("Content/", StringComparison.OrdinalIgnoreCase))
+        {
+            targetRelativePath = PathUtil.NormalizeRelative($"SCUM/{rel}");
+            return true;
+        }
+
+        var contentIndex = Array.FindIndex(segments, segment => segment.Equals("Content", StringComparison.OrdinalIgnoreCase));
+        if (contentIndex >= 0 && contentIndex + 1 < segments.Length)
+        {
+            targetRelativePath = PathUtil.NormalizeRelative($"SCUM/Content/{string.Join('/', segments[(contentIndex + 1)..])}");
+            return true;
+        }
+
+        if (rel.StartsWith("Game/", StringComparison.OrdinalIgnoreCase))
+        {
+            targetRelativePath = PathUtil.NormalizeRelative($"SCUM/Content/{rel["Game/".Length..]}");
+            return true;
+        }
+
+        targetRelativePath = PathUtil.NormalizeRelative($"SCUM/Content/ScumModStudio/Visuals/{rel}");
+        return true;
+    }
+
+    private static bool TryInferCustomVisualAssetIdentity(string sourcePath, out string kind, out string className)
+    {
+        kind = string.Empty;
+        className = string.Empty;
+
+        UAsset asset;
+        try
+        {
+            asset = new UAsset(sourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+        }
+        catch
+        {
+            return false;
+        }
+
+        foreach (var export in asset.Exports.OfType<NormalExport>())
+        {
+            if (TryResolveImportObjectName(asset, export.ClassIndex, out var exportClassName)
+                && TryMapEngineVisualClass(exportClassName, out kind, out className))
+            {
+                return true;
+            }
+        }
+
+        var candidates = asset.Imports
+            .Select(import => import.ObjectName?.ToString() ?? string.Empty)
+            .Select(name => TryMapEngineVisualClass(name, out var candidateKind, out var candidateClassName)
+                ? new { Kind = candidateKind, ClassName = candidateClassName }
+                : null)
+            .Where(candidate => candidate is not null)
+            .DistinctBy(candidate => $"{candidate!.Kind}|{candidate.ClassName}", StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (candidates.Count != 1)
+        {
+            return false;
+        }
+
+        kind = candidates[0]!.Kind;
+        className = candidates[0]!.ClassName;
+        return true;
+    }
+
+    private static bool TryMapEngineVisualClass(string rawClassName, out string kind, out string className)
+    {
+        kind = string.Empty;
+        className = string.Empty;
+        var normalized = (rawClassName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return false;
+        }
+
+        if (normalized.Equals("StaticMesh", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = "static-mesh";
+            className = "StaticMesh";
+            return true;
+        }
+
+        if (normalized.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = "skeletal-mesh";
+            className = "SkeletalMesh";
+            return true;
+        }
+
+        if (normalized.Equals("Texture2D", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = "texture";
+            className = "Texture2D";
+            return true;
+        }
+
+        if (normalized.Equals("MaterialInstanceConstant", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("MaterialInstance", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = "material";
+            className = "MaterialInstanceConstant";
+            return true;
+        }
+
+        if (normalized.Equals("Material", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = "material";
+            className = "Material";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string ResolveCustomVisualAssetKind(string targetRelativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(targetRelativePath);
+        if (stem.StartsWith("SK_", StringComparison.OrdinalIgnoreCase))
+        {
+            return "skeletal-mesh";
+        }
+
+        if (stem.StartsWith("SM_", StringComparison.OrdinalIgnoreCase))
+        {
+            return "static-mesh";
+        }
+
+        if (stem.StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+            || stem.StartsWith("M_", StringComparison.OrdinalIgnoreCase)
+            || stem.StartsWith("MAT_", StringComparison.OrdinalIgnoreCase))
+        {
+            return "material";
+        }
+
+        if (stem.StartsWith("T_", StringComparison.OrdinalIgnoreCase)
+            || stem.StartsWith("TX_", StringComparison.OrdinalIgnoreCase)
+            || stem.StartsWith("TEX_", StringComparison.OrdinalIgnoreCase)
+            || stem.StartsWith("ICO_", StringComparison.OrdinalIgnoreCase)
+            || stem.StartsWith("ICON_", StringComparison.OrdinalIgnoreCase))
+        {
+            return "texture";
+        }
+
+        var normalizedPath = targetRelativePath.Replace('\\', '/');
+        if (normalizedPath.Contains("/SkeletalMeshes/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/SkeletalMesh/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/Skeletal_Meshes/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/Skeletal_Mesh/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "skeletal-mesh";
+        }
+
+        if (normalizedPath.Contains("/StaticMeshes/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/StaticMesh/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/Static_Meshes/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/Static_Mesh/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "static-mesh";
+        }
+
+        if (normalizedPath.Contains("/Materials/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/MaterialInstances/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "material";
+        }
+
+        if (normalizedPath.Contains("/Textures/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/Icons/", StringComparison.OrdinalIgnoreCase))
+        {
+            return "texture";
+        }
+
+        return string.Empty;
+    }
+
+    private static string ResolveCustomVisualAssetClassName(string kind, string targetRelativePath)
+    {
+        return kind switch
+        {
+            "static-mesh" => "StaticMesh",
+            "skeletal-mesh" => "SkeletalMesh",
+            "texture" => "Texture2D",
+            "material" => Path.GetFileNameWithoutExtension(targetRelativePath).StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+                ? "MaterialInstanceConstant"
+                : "Material",
+            _ => string.Empty
+        };
+    }
+
+    private static string ResolveCustomVisualAssetDisplayName(string targetRelativePath, string kind)
+    {
+        var stem = Path.GetFileNameWithoutExtension(targetRelativePath);
+        var display = kind switch
+        {
+            "static-mesh" => ResolveVisualAssetDisplayName(targetRelativePath, "SM_"),
+            "skeletal-mesh" => ResolveVisualAssetDisplayName(targetRelativePath, "SK_"),
+            "material" => ResolveVisualAssetDisplayName(targetRelativePath, "MI_", "M_", "MAT_"),
+            "texture" => ResolveVisualAssetDisplayName(targetRelativePath, "T_", "TX_", "TEX_", "ICO_", "ICON_"),
+            _ => LocalizeAssetStem(stem)
+        };
+
+        return string.IsNullOrWhiteSpace(display) ? stem : display;
+    }
+
+    private static string BuildGameObjectPathFromTargetRelativePath(string targetRelativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(targetRelativePath);
+        if (!normalized.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        var withoutExtension = normalized[..^".uasset".Length];
+        var contentRelative = withoutExtension.StartsWith("SCUM/Content/", StringComparison.OrdinalIgnoreCase)
+            ? withoutExtension["SCUM/Content/".Length..]
+            : withoutExtension.StartsWith("scum/content/", StringComparison.OrdinalIgnoreCase)
+                ? withoutExtension["scum/content/".Length..]
+                : string.Empty;
+        if (string.IsNullOrWhiteSpace(contentRelative))
+        {
+            return string.Empty;
+        }
+
+        var objectName = Path.GetFileNameWithoutExtension(normalized);
+        return $"/Game/{contentRelative}.{objectName}";
     }
 
     private static bool IsGameplayVisualAssetPath(string relativePath)
@@ -5432,8 +6150,6 @@ internal sealed class StudioRuntime
     {
         if (fileName.StartsWith("ia_", StringComparison.OrdinalIgnoreCase)
             || path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
-            || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
-            || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
             || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal))
         {
             return false;
@@ -5441,7 +6157,13 @@ internal sealed class StudioRuntime
 
         return path.Contains("/items/weapons/ranged_weapons/", StringComparison.Ordinal)
             || path.Contains("/items/weapons/weapon_clips/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
+            || path.Contains("/items/weapons/new_melee/", StringComparison.Ordinal)
             || path.Contains("/items/ammunition/", StringComparison.Ordinal)
+            || path.Contains("/items/clothes/", StringComparison.Ordinal)
+            || path.Contains("/items/vehicle/attachments/", StringComparison.Ordinal)
+            || path.Contains("/items/food/", StringComparison.Ordinal)
             || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
             || path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal)
             || path.Contains("/items/equipment/active_items/", StringComparison.Ordinal)
@@ -5569,10 +6291,7 @@ internal sealed class StudioRuntime
         var path = relativePath.ToLowerInvariant();
         var fileName = Path.GetFileNameWithoutExtension(path);
         return path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
-               || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
-               || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
                || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal)
-               || path.Contains("/items/weapons/new_melee/", StringComparison.Ordinal)
                || (path.Contains("/items/crafting/ingredients/", StringComparison.Ordinal)
                     && fileName.StartsWith("ci_", StringComparison.Ordinal))
                || (path.Contains("/items/crafting/ingredients/", StringComparison.Ordinal)
@@ -14160,6 +14879,7 @@ internal sealed class StudioRuntime
             "asset user data", "query token stream", "token stream version",
             "net update frequency", "частота обновления сети",
             "служебный поток условий", "служебная версия потока условий",
+            "post process settings", "ambient occlusion",
             "дальность отображения (lod)", "ld максимум draw", "ld maximum draw"
         };
 
@@ -14465,8 +15185,6 @@ internal sealed class StudioRuntime
         }
 
         if (path.Contains("/items/weapons/attachmentsockets/", StringComparison.Ordinal)
-            || path.Contains("/items/weapons/attachments/", StringComparison.Ordinal)
-            || path.Contains("/items/weapons/weapon_parts/", StringComparison.Ordinal)
             || path.Contains("/items/weapons/malfunctions/", StringComparison.Ordinal))
         {
             return false;
@@ -14502,7 +15220,8 @@ internal sealed class StudioRuntime
             var allowedWeaponTokens = new[]
             {
                 "урон за выстрел", "патронов в магазине", "патронов для события", "патрон по умолчанию",
-                "вес", "ширина в инвентаре", "высота в инвентаре",
+                "сила отдачи", "сила отдачи камеры", "максимальная отдача", "скорость возврата после отдачи",
+                "максимальная дальность", "скорострельность", "вес", "ширина в инвентаре", "высота в инвентаре",
                 "общий шанс неисправности", "использовать свой шанс неисправности"
             };
 
@@ -18610,6 +19329,7 @@ internal sealed class StudioRuntime
     private static bool IsVisualModelLabel(string label)
     {
         var hasModelToken = ContainsSearchTermAtBoundary(label, "mesh")
+                            || ContainsSearchTermAtBoundary(label, "model")
                             || ContainsSearchTermAtBoundary(label, "модель");
         return hasModelToken
                && !label.Contains("slice", StringComparison.Ordinal)
@@ -22770,6 +23490,9 @@ internal sealed class StudioRuntime
         }
 
         var fileName = Path.GetFileNameWithoutExtension(normalizedPath);
+        var isItemEquipmentSettingsAsset = fileName.EndsWith("_ES", StringComparison.OrdinalIgnoreCase)
+            && IsItemEquipmentSettingsSurface(path);
+
         if (fileName.StartsWith("T_", StringComparison.OrdinalIgnoreCase)
             || fileName.StartsWith("M_", StringComparison.OrdinalIgnoreCase)
             || fileName.StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
@@ -22780,7 +23503,7 @@ internal sealed class StudioRuntime
             || fileName.Contains("uidata", StringComparison.OrdinalIgnoreCase)
             || fileName.Contains("widget", StringComparison.OrdinalIgnoreCase)
             || fileName.Contains("rendertarget", StringComparison.OrdinalIgnoreCase)
-            || fileName.EndsWith("_ES", StringComparison.OrdinalIgnoreCase)
+            || (!isItemEquipmentSettingsAsset && fileName.EndsWith("_ES", StringComparison.OrdinalIgnoreCase))
             || fileName.EndsWith("_TR", StringComparison.OrdinalIgnoreCase))
         {
             return false;
@@ -22949,6 +23672,9 @@ internal sealed class StudioRuntime
         {
             return (path.Contains("/items/weapons/", StringComparison.Ordinal)
                     || path.Contains("/items/ammunition/", StringComparison.Ordinal)
+                    || path.Contains("/items/clothes/", StringComparison.Ordinal)
+                    || path.Contains("/items/vehicle/attachments/", StringComparison.Ordinal)
+                    || path.Contains("/items/food/", StringComparison.Ordinal)
                     || path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.Ordinal)
                     || path.Contains("/ui/gameevents/itemselection/", StringComparison.Ordinal)
                     || path.Contains("/items/equipment/active_items/", StringComparison.Ordinal)
@@ -22960,6 +23686,16 @@ internal sealed class StudioRuntime
         }
 
         return false;
+    }
+
+    private static bool IsItemEquipmentSettingsSurface(string path)
+    {
+        return path.Contains("/items/weapons/", StringComparison.Ordinal)
+            || path.Contains("/items/ammunition/", StringComparison.Ordinal)
+            || path.Contains("/items/clothes/", StringComparison.Ordinal)
+            || path.Contains("/items/vehicle/attachments/", StringComparison.Ordinal)
+            || path.Contains("/items/food/", StringComparison.Ordinal)
+            || path.Contains("/items/equipment/active_items/", StringComparison.Ordinal);
     }
 
     public StudioCatalogDto GetItemCatalog()
@@ -23178,7 +23914,11 @@ internal sealed class StudioRuntime
 
             var textFiles = BuildRecipeFiles(request);
             var editedFiles = BuildEditedAssetFiles(request, assetSettings, preWarnings);
-            if (selectedAssetsById.Count == 0 && textFiles.Count == 0 && editedFiles.Count == 0)
+            var customVisualFiles = BuildCustomVisualReferenceFiles(request, preWarnings);
+            if (selectedAssetsById.Count == 0
+                && textFiles.Count == 0
+                && editedFiles.Count == 0
+                && customVisualFiles.Count == 0)
             {
                 return new StudioBuildResultDto(
                     false,
@@ -23225,7 +23965,15 @@ internal sealed class StudioRuntime
                 binaryFiles.AddRange(editedFiles);
             }
 
-            if (binaryFiles.Count == 0 && textFiles.Count == 0 && editedFiles.Count == 0)
+            if (customVisualFiles.Count > 0)
+            {
+                binaryFiles.AddRange(customVisualFiles);
+            }
+
+            if (binaryFiles.Count == 0
+                && textFiles.Count == 0
+                && editedFiles.Count == 0
+                && customVisualFiles.Count == 0)
             {
                 return new StudioBuildResultDto(
                     false,
@@ -24716,6 +25464,180 @@ internal sealed class StudioRuntime
         }
 
         return result;
+    }
+
+    private List<BuildInputFile> BuildCustomVisualReferenceFiles(StudioBuildRequestDto request, List<string> warnings)
+    {
+        var result = new Dictionary<string, BuildInputFile>(StringComparer.OrdinalIgnoreCase);
+        if (request.AssetEdits is null || request.AssetEdits.Count == 0)
+        {
+            return [];
+        }
+
+        var catalog = GetCustomVisualAssetCatalog()
+            .ToDictionary(asset => asset.ObjectPath, StringComparer.OrdinalIgnoreCase);
+        if (catalog.Count == 0)
+        {
+            return [];
+        }
+
+        var rawReferences = request.AssetEdits
+            .SelectMany(edit => (edit.Edits ?? []).Select(field => field.Value)
+                .Concat((edit.ListEdits ?? []).Select(list => list.RawValue ?? string.Empty)))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var visiting = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rawReference in rawReferences)
+        {
+            if (!TryExtractGameObjectPathFromPickerValue(rawReference, out var objectPath))
+            {
+                continue;
+            }
+
+            if (!catalog.TryGetValue(objectPath, out var customAsset))
+            {
+                if (objectPath.Contains("/ScumModStudio/", StringComparison.OrdinalIgnoreCase)
+                    || objectPath.Contains("/Custom", StringComparison.OrdinalIgnoreCase))
+                {
+                    warnings.Add($"Пользовательский visual asset выбран, но cooked-файл не найден рядом со студией: {objectPath}");
+                }
+
+                continue;
+            }
+
+            AddCustomVisualAssetInputs(customAsset, catalog, result, visiting, warnings);
+        }
+
+        return result.Values
+            .OrderBy(file => file.TargetRelativePath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static void AddCustomVisualAssetInputs(
+        CustomVisualAssetInfo asset,
+        IReadOnlyDictionary<string, CustomVisualAssetInfo> catalog,
+        Dictionary<string, BuildInputFile> output,
+        HashSet<string> visiting,
+        List<string> warnings)
+    {
+        if (!visiting.Add(asset.ObjectPath))
+        {
+            return;
+        }
+
+        if (!File.Exists(asset.SourcePath))
+        {
+            warnings.Add($"Пользовательский visual asset пропущен: файл не найден {asset.SourcePath}");
+            return;
+        }
+
+        output[asset.TargetRelativePath] = new BuildInputFile(asset.SourcePath, asset.TargetRelativePath);
+        AddCustomVisualCompanionInputs(asset, output, warnings);
+
+        foreach (var dependencyObjectPath in EnumerateCustomVisualDependencies(asset.SourcePath))
+        {
+            if (catalog.TryGetValue(dependencyObjectPath, out var dependency))
+            {
+                AddCustomVisualAssetInputs(dependency, catalog, output, visiting, warnings);
+            }
+        }
+    }
+
+    private static void AddCustomVisualCompanionInputs(
+        CustomVisualAssetInfo asset,
+        Dictionary<string, BuildInputFile> output,
+        List<string> warnings)
+    {
+        var sourceStem = Path.Combine(
+            Path.GetDirectoryName(asset.SourcePath) ?? string.Empty,
+            Path.GetFileNameWithoutExtension(asset.SourcePath));
+        var targetStem = asset.TargetRelativePath[..^Path.GetExtension(asset.TargetRelativePath).Length];
+        var hasUexp = false;
+
+        foreach (var ext in new[] { ".uexp", ".ubulk", ".uptnl" })
+        {
+            var source = $"{sourceStem}{ext}";
+            if (!File.Exists(source))
+            {
+                continue;
+            }
+
+            if (ext.Equals(".uexp", StringComparison.OrdinalIgnoreCase))
+            {
+                hasUexp = true;
+            }
+
+            output[$"{targetStem}{ext}"] = new BuildInputFile(source, $"{targetStem}{ext}");
+        }
+
+        if (!hasUexp && (asset.Kind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase)
+                         || asset.Kind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase)
+                         || asset.Kind.Equals("material", StringComparison.OrdinalIgnoreCase)
+                         || asset.Kind.Equals("texture", StringComparison.OrdinalIgnoreCase)))
+        {
+            warnings.Add($"У пользовательского ассета нет companion .uexp: {asset.TargetRelativePath}. Если он не cooked из UE4.27 для Windows, игра может не загрузить его.");
+        }
+    }
+
+    private static IEnumerable<string> EnumerateCustomVisualDependencies(string sourcePath)
+    {
+        UAsset asset;
+        try
+        {
+            asset = new UAsset(sourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+        }
+        catch
+        {
+            yield break;
+        }
+
+        foreach (var import in asset.Imports)
+        {
+            var objectName = import.ObjectName?.ToString() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(objectName)
+                || !TryResolvePackageImportPath(asset, import.OuterIndex, out var packagePath))
+            {
+                continue;
+            }
+
+            yield return $"{packagePath}.{objectName}";
+        }
+
+        foreach (var softPath in asset.SoftObjectPathList ?? [])
+        {
+            var reference = ExtractSoftObjectReference(softPath);
+            if (reference.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+                && reference.Contains('.', StringComparison.Ordinal))
+            {
+                yield return reference;
+            }
+        }
+    }
+
+    private static bool TryExtractGameObjectPathFromPickerValue(string rawValue, out string objectPath)
+    {
+        objectPath = string.Empty;
+        var normalized = (rawValue ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return false;
+        }
+
+        if (TryParseImportedObjectReferenceRawValue(normalized, out var importedObjectPath, out _, out _))
+        {
+            normalized = importedObjectPath;
+        }
+
+        if (!normalized.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || !normalized.Contains('.', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        objectPath = normalized;
+        return true;
     }
 
     private static void AddEditedCompanionInputs(List<BuildInputFile> result, string editedAssetPath, string targetRelativePath)
@@ -30059,6 +30981,15 @@ internal sealed class StudioRuntime
     private sealed record ModAssetDescriptor(
         string DisplayName,
         string Summary);
+
+    private sealed record CustomVisualAssetInfo(
+        string SourcePath,
+        string TargetRelativePath,
+        string ObjectPath,
+        string ObjectReference,
+        string AssetReference,
+        string DisplayName,
+        string Kind);
 
     private sealed class ModAssetsCatalogCacheEnvelope
     {

@@ -112,6 +112,18 @@
         <input id="schemaFieldFilter" type="text" placeholder="Найти настройку или блок состава: ресурс, отдача, количество, квест">
         <div id="schemaFilterMeta" class="muted small"></div>
       </div>
+      <div class="custom-visual-import">
+        <label class="custom-visual-file">
+          <span>Cooked файлы</span>
+          <input id="customVisualFiles" type="file" multiple accept=".uasset,.uexp,.ubulk,.uptnl,.fbx,.glb,.gltf,.obj,.blend">
+        </label>
+        <label class="custom-visual-file">
+          <span>Папка cooked Content</span>
+          <input id="customVisualFolder" type="file" multiple webkitdirectory>
+        </label>
+        <button id="customVisualImportBtn" type="button">Импортировать</button>
+        <div id="customVisualImportStatus" class="muted small"></div>
+      </div>
       <div id="schemaWarnings" class="warning-list"></div>
 
       <details class="advanced-box">
