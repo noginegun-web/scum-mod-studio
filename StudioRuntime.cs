@@ -321,6 +321,7 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _vehicleSpawnPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _vehicleClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _vehicleAttachmentClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _foodResourceReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualStaticMeshObjectReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualStaticMeshSoftReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualSkeletalMeshObjectReferenceOptionsCache;
@@ -885,6 +886,8 @@ internal sealed class StudioRuntime
                     _vehicleClassReferenceOptionsCache ??= BuildVehicleClassReferenceOptions(),
                 "vehicle-attachment-class" =>
                     _vehicleAttachmentClassReferenceOptionsCache ??= BuildVehicleAttachmentClassReferenceOptions(),
+                "food-resource-class" or "food-resource" =>
+                    _foodResourceReferenceOptionsCache ??= BuildFoodResourceReferenceOptions(),
                 "visual-static-mesh-object" =>
                     _visualStaticMeshObjectReferenceOptionsCache ??= BuildVisualStaticMeshObjectReferenceOptions(),
                 "visual-static-mesh-asset" =>
@@ -2351,6 +2354,13 @@ internal sealed class StudioRuntime
             assetInfo => PrefixReferenceOptionLabel("Деталь транспорта", ResolveVehicleClassDisplayName(assetInfo.RelativePath)));
     }
 
+    private List<StudioReferenceOptionDto> BuildFoodResourceReferenceOptions()
+    {
+        return BuildBlueprintReferenceOptions(
+            IsFoodResourceAssetCandidate,
+            assetInfo => PrefixReferenceOptionLabel("Ресурс еды", ResolveFoodResourceDisplayName(assetInfo.RelativePath)));
+    }
+
     private List<StudioReferenceOptionDto> BuildVisualStaticMeshObjectReferenceOptions()
     {
         return MergeCustomVisualReferenceOptions(
@@ -3144,6 +3154,23 @@ internal sealed class StudioRuntime
         var stem = Path.GetFileNameWithoutExtension(path);
         return stem.StartsWith("bpc_", StringComparison.OrdinalIgnoreCase)
                || stem.StartsWith("bp_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsFoodResourceAssetCandidate(string relativePath)
+    {
+        var path = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+            || !path.Contains("/gameresources/food/", StringComparison.Ordinal)
+            || path.Contains("/ui/", StringComparison.Ordinal)
+            || path.Contains("/item_icons/", StringComparison.Ordinal)
+            || path.Contains("/stringtables/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(path);
+        return !string.IsNullOrWhiteSpace(stem)
+               && !stem.EndsWith("_es", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsVisualSkeletalMeshAssetCandidate(string relativePath)
@@ -4721,6 +4748,51 @@ internal sealed class StudioRuntime
                 || normalizedTerm.Contains("жидк", StringComparison.Ordinal))
             {
                 Add("water", "liquid", "bottle", "вода", "жидкость");
+            }
+        }
+
+        if (normalizedPicker == "foodresourceclass" || normalizedPicker == "foodresource")
+        {
+            if (normalizedTerm.Contains("еда", StringComparison.Ordinal)
+                || normalizedTerm.Contains("пищ", StringComparison.Ordinal)
+                || normalizedTerm.Contains("food", StringComparison.Ordinal))
+            {
+                Add("food", "resource", "solid", "liquid", "еда", "пища", "ресурс");
+            }
+
+            if (normalizedTerm.Contains("мяс", StringComparison.Ordinal))
+            {
+                Add("meat", "steak", "biltong", "мясо");
+            }
+
+            if (normalizedTerm.Contains("вода", StringComparison.Ordinal)
+                || normalizedTerm.Contains("жидк", StringComparison.Ordinal))
+            {
+                Add("water", "liquid", "drink", "вода", "жидкость");
+            }
+        }
+
+        if (normalizedPicker == "vehicleattachmentclass")
+        {
+            if (normalizedTerm.Contains("колес", StringComparison.Ordinal)
+                || normalizedTerm.Contains("колёс", StringComparison.Ordinal))
+            {
+                Add("wheel", "tire", "колесо");
+            }
+
+            if (normalizedTerm.Contains("двиг", StringComparison.Ordinal))
+            {
+                Add("engine", "двигатель");
+            }
+
+            if (normalizedTerm.Contains("брон", StringComparison.Ordinal))
+            {
+                Add("armor", "броня");
+            }
+
+            if (normalizedTerm.Contains("радио", StringComparison.Ordinal))
+            {
+                Add("radio", "радио");
             }
         }
 
@@ -14012,6 +14084,7 @@ internal sealed class StudioRuntime
                 .Replace("trader тип", "тип торговца", StringComparison.OrdinalIgnoreCase)
                 .Replace("tag name", "тег", StringComparison.OrdinalIgnoreCase)
                 .Replace("prosperity level info per level", "уровни процветания", StringComparison.OrdinalIgnoreCase)
+                .Replace("prosperity level name", "название уровня процветания", StringComparison.OrdinalIgnoreCase)
                 .Replace("prosperity level threshold gold", "порог золота для уровня", StringComparison.OrdinalIgnoreCase)
                 .Replace("prosperity level threshold", "порог наличных для уровня", StringComparison.OrdinalIgnoreCase)
                 .Replace("gbcrefresh rate per hour", "скорость обновления GBC в час", StringComparison.OrdinalIgnoreCase)
@@ -14072,6 +14145,7 @@ internal sealed class StudioRuntime
                 .Replace("auto description", "автоописание условия", StringComparison.OrdinalIgnoreCase)
                 .Replace("must be in vicinity", "нужно держать рядом", StringComparison.OrdinalIgnoreCase)
                 .Replace("accepted items", "подходящие предметы", StringComparison.OrdinalIgnoreCase)
+                .Replace("accepted recipes", "подходящие рецепты", StringComparison.OrdinalIgnoreCase)
                 .Replace("allow child classes", "засчитывать похожие предметы по классу", StringComparison.OrdinalIgnoreCase)
                 .Replace("accepted item uses", "минимум оставшихся использований", StringComparison.OrdinalIgnoreCase)
                 .Replace("max random additional count", "случайная добавка к количеству", StringComparison.OrdinalIgnoreCase)
@@ -14166,6 +14240,7 @@ internal sealed class StudioRuntime
                 .Replace("опыт awards", "награда опытом", StringComparison.OrdinalIgnoreCase)
                 .Replace("skill parameters", "параметры навыка", StringComparison.OrdinalIgnoreCase)
                 .Replace("experience awards", "награда опытом", StringComparison.OrdinalIgnoreCase)
+                .Replace("skill icon", "иконка навыка", StringComparison.OrdinalIgnoreCase)
                 .Replace("no skill", "без навыка", StringComparison.OrdinalIgnoreCase)
                 .Replace("basic skill", "базовый уровень", StringComparison.OrdinalIgnoreCase)
                 .Replace("medium skill", "средний уровень", StringComparison.OrdinalIgnoreCase)
@@ -14218,6 +14293,20 @@ internal sealed class StudioRuntime
             label = label
                 .Replace("vehicle class", "класс транспорта", StringComparison.OrdinalIgnoreCase)
                 .Replace("attachment class", "класс детали транспорта", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (path.Contains("/items/vehicle/attachments/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("attachment class", "класс детали транспорта", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (path.Contains("/items/food/", StringComparison.OrdinalIgnoreCase))
+        {
+            label = label
+                .Replace("resource type for consumption", "ресурс употребления", StringComparison.OrdinalIgnoreCase)
+                .Replace("resource тип for consumption", "ресурс употребления", StringComparison.OrdinalIgnoreCase)
+                .Replace("resource for consumption", "ресурс употребления", StringComparison.OrdinalIgnoreCase);
         }
 
         if (path.Contains("/vehicles/spawningpresets/automaticspawn/", StringComparison.OrdinalIgnoreCase)
@@ -14537,6 +14626,8 @@ internal sealed class StudioRuntime
             label = label
                 .Replace("number of neutralization attempts", "число попыток обезвреживания", StringComparison.OrdinalIgnoreCase)
                 .Replace("are fame points required", "требуются очки славы", StringComparison.OrdinalIgnoreCase)
+                .Replace("damage inner radius", "радиус полного урона", StringComparison.OrdinalIgnoreCase)
+                .Replace("damage outer radius", "внешний радиус урона", StringComparison.OrdinalIgnoreCase)
                 .Replace("locked message", "текст при закрытом замке", StringComparison.OrdinalIgnoreCase)
                 .Replace("lockpick message", "текст для взлома", StringComparison.OrdinalIgnoreCase);
             label = ReplaceSemanticLabelPart(label, "lock mesh outer", "внешняя модель замка");
@@ -14599,6 +14690,7 @@ internal sealed class StudioRuntime
                 .Replace("награда currency", "денежная награда", StringComparison.OrdinalIgnoreCase)
                 .Replace("награда trade deals", "варианты выдачи у торговца", StringComparison.OrdinalIgnoreCase)
                 .Replace("награда trade deal", "выдача у торговца", StringComparison.OrdinalIgnoreCase)
+                .Replace("accepted recipes", "подходящие рецепты", StringComparison.OrdinalIgnoreCase)
                 .Replace("random additional сколько нужно рядом", "случайная добавка к количеству", StringComparison.OrdinalIgnoreCase)
                 .Replace("accepted cook level", "готовность еды", StringComparison.OrdinalIgnoreCase)
                 .Replace("accepted cook quality", "качество еды", StringComparison.OrdinalIgnoreCase)
@@ -14926,6 +15018,7 @@ internal sealed class StudioRuntime
             ("required item tags", "обязательные теги предмета"),
             ("item tags", "теги предмета"),
             ("prosperity level info per level", "уровни процветания"),
+            ("prosperity level name", "название уровня процветания"),
             ("prosperity level threshold gold", "порог процветания по золоту"),
             ("prosperity level threshold", "порог процветания"),
             ("gbc refresh rate per hour", "обновление GBC в час"),
@@ -15578,6 +15671,34 @@ internal sealed class StudioRuntime
             || label.Contains("is carried with two hands", StringComparison.Ordinal);
     }
 
+    private static bool IsFoodConsumptionResourceLabel(string label)
+    {
+        return label.Contains("ресурс употребления", StringComparison.Ordinal)
+            || label.Contains("resource type for consumption", StringComparison.Ordinal)
+            || label.Contains("resource тип for consumption", StringComparison.Ordinal)
+            || label.Contains("resource for consumption", StringComparison.Ordinal);
+    }
+
+    private static bool IsVehicleAttachmentClassLabel(string label)
+    {
+        return label.Contains("класс детали транспорта", StringComparison.Ordinal)
+            || label.Contains("attachment class", StringComparison.Ordinal);
+    }
+
+    private static bool IsQuestAcceptedRecipesLabel(string label)
+    {
+        return label.Contains("подходящие рецепты", StringComparison.Ordinal)
+            || label.Contains("accepted recipes", StringComparison.Ordinal);
+    }
+
+    private static bool IsLockExplosionRadiusLabel(string label)
+    {
+        return label.Contains("радиус полного урона", StringComparison.Ordinal)
+            || label.Contains("внешний радиус урона", StringComparison.Ordinal)
+            || label.Contains("damage inner radius", StringComparison.Ordinal)
+            || label.Contains("damage outer radius", StringComparison.Ordinal);
+    }
+
     private static bool ShouldExposeSafeField(string relativePath, string userLabel, string valueType)
     {
         if (string.IsNullOrWhiteSpace(userLabel))
@@ -16030,6 +16151,18 @@ internal sealed class StudioRuntime
                 || label.Contains("vehicle spawn", StringComparison.Ordinal);
         }
 
+        if (path.Contains("/items/food/", StringComparison.Ordinal)
+            && IsFoodConsumptionResourceLabel(label))
+        {
+            return true;
+        }
+
+        if (path.Contains("/items/vehicle/attachments/", StringComparison.Ordinal)
+            && IsVehicleAttachmentClassLabel(label))
+        {
+            return true;
+        }
+
         if (path.Contains("/items/", StringComparison.Ordinal))
         {
             if (IsCommonItemSafeFieldLabel(label)
@@ -16073,7 +16206,9 @@ internal sealed class StudioRuntime
         {
             var allowedLockTokens = new[]
             {
-                "время", "число попыток обезвреживания", "требуются очки славы"
+                "время", "число попыток обезвреживания", "требуются очки славы",
+                "радиус полного урона", "внешний радиус урона",
+                "damage inner radius", "damage outer radius"
             };
 
             return allowedLockTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
@@ -16089,6 +16224,7 @@ internal sealed class StudioRuntime
                 "нужно держать рядом", "оставшихся использований", "запускать шаг автоматически",
                 "засчитывать похожие предметы рядом", "засчитывать похожие предметы по классу",
                 "подходящие предметы", "награда", "варианты награды", "опыт навыков", "условия по тегам", " / квесты",
+                "подходящие рецепты", "accepted recipes",
                 "подсказка условия", "автоописание условия",
                 "что открыть после завершения", "tasks to unlock when completed"
             };
@@ -16506,6 +16642,7 @@ internal sealed class StudioRuntime
                || path.Contains("/characters/", StringComparison.Ordinal)
                || path.Contains("/foliage/farming/", StringComparison.Ordinal)
                || path.Contains("/minigames/lockpicking/", StringComparison.Ordinal)
+               || path.Contains("/skills/", StringComparison.Ordinal)
                || path.Contains("/cooking/", StringComparison.Ordinal);
     }
 
@@ -16570,7 +16707,8 @@ internal sealed class StudioRuntime
             "tag dictionary", "query token", "asset user data", "root nodes", "all nodes",
             "action sequence", "attachment sockets", "supported firing modes", "items",
             "mesh slices", "socket overrides", "override materials", "сокет", "сокеты",
-            "переопределение материалов", "переопределение сокетов", "части 3d-модели", "части 3d модели"
+            "переопределение материалов", "переопределение сокетов", "части 3d-модели", "части 3d модели",
+            "корневые узлы", "все узлы"
         };
 
         var allowQuestItemTargets = path.Contains("/quests/", StringComparison.Ordinal)
@@ -16730,7 +16868,8 @@ internal sealed class StudioRuntime
                 "варианты награды", "possible rewards",
                 "опыт навыков за квест", "reward skill experience",
                 "нужно держать рядом", "must be in vicinity",
-                "подходящие предметы", "accepted items"
+                "подходящие предметы", "accepted items",
+                "подходящие рецепты", "accepted recipes"
             };
 
             return allowedQuestTokens.Any(token => label.Contains(token, StringComparison.Ordinal));
@@ -16905,7 +17044,8 @@ internal sealed class StudioRuntime
         var blockedLabelTokens = new[]
         {
             "bytecode", "script", "scriptbytecode", "name map", "namemap", "import", "exports",
-            "query token", "asset user data", "socket", "сокет", "material override", "override materials"
+            "query token", "asset user data", "root nodes", "all nodes", "корневые узлы", "все узлы",
+            "socket", "сокет", "material override", "override materials"
         };
         if (blockedLabelTokens.Any(token => label.Contains(token, StringComparison.Ordinal)))
         {
@@ -17096,6 +17236,30 @@ internal sealed class StudioRuntime
             && (IsVisualModelLabel(label) || IsVisualMaterialLabel(label) || IsVisualTextureLabel(label)))
         {
             return "Внешний вид";
+        }
+
+        if (path.Contains("/items/food/", StringComparison.Ordinal)
+            && IsFoodConsumptionResourceLabel(label))
+        {
+            return "Питательность";
+        }
+
+        if (path.Contains("/items/vehicle/attachments/", StringComparison.Ordinal)
+            && IsVehicleAttachmentClassLabel(label))
+        {
+            return "Совместимость транспорта";
+        }
+
+        if (path.Contains("/fortifications/locks/", StringComparison.Ordinal)
+            && IsLockExplosionRadiusLabel(label))
+        {
+            return "Взрыв замка";
+        }
+
+        if (path.Contains("/quests/", StringComparison.Ordinal)
+            && IsQuestAcceptedRecipesLabel(label))
+        {
+            return "Условия квеста";
         }
 
         if (IsCookingGameplaySurface(relativePath))
@@ -17410,6 +17574,7 @@ internal sealed class StudioRuntime
         }
 
         if (label.Contains("порог процветания", StringComparison.Ordinal)
+            || label.Contains("название уровня процветания", StringComparison.Ordinal)
             || label.Contains("обновление gbc", StringComparison.Ordinal)
             || label.Contains("обновление gsc", StringComparison.Ordinal))
         {
@@ -18069,6 +18234,15 @@ internal sealed class StudioRuntime
             return "Какая модель используется у внешней и внутренней части замка в мини-игре. Ставь только совместимые модели замка, чтобы не сломать визуал и анимацию.";
         }
 
+        if (path.Contains("/fortifications/locks/", StringComparison.Ordinal)
+            && IsLockExplosionRadiusLabel(label))
+        {
+            return label.Contains("внешний", StringComparison.Ordinal)
+                || label.Contains("outer", StringComparison.Ordinal)
+                    ? "Внешний радиус взрывного штрафа при провале. За пределами этого радиуса урон уже не применяется."
+                    : "Радиус зоны полного урона взрывного штрафа при провале. Увеличивай аккуратно, чтобы не сделать замки слишком разрушительными.";
+        }
+
         if (path.Contains("/vehicles/spawningpresets/spawngroups/", StringComparison.Ordinal)
             && label.Contains("доступные варианты транспорта", StringComparison.Ordinal))
         {
@@ -18085,6 +18259,24 @@ internal sealed class StudioRuntime
             && label.Contains("класс детали транспорта", StringComparison.Ordinal))
         {
             return "Какая деталь или узел транспорта входит в этот пресет. Используй совместимые attachment-классы этой же линейки транспорта.";
+        }
+
+        if (path.Contains("/items/vehicle/attachments/", StringComparison.Ordinal)
+            && IsVehicleAttachmentClassLabel(label))
+        {
+            return "Какой blueprint детали транспорта создаёт этот предмет. Меняй на совместимый attachment-класс, чтобы предмет ставился на правильный транспортный слот.";
+        }
+
+        if (path.Contains("/items/food/", StringComparison.Ordinal)
+            && IsFoodConsumptionResourceLabel(label))
+        {
+            return "Какой пищевой GameResource используется при употреблении предмета. Этот ресурс задаёт воду, калории, нутриенты и связанные эффекты еды.";
+        }
+
+        if (path.Contains("/quests/", StringComparison.Ordinal)
+            && IsQuestAcceptedRecipesLabel(label))
+        {
+            return "Какие рецепты засчитываются этим квестовым условием. Добавляй только рецепты той же игровой логики, чтобы шаг корректно завершался.";
         }
 
         if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
@@ -18795,6 +18987,11 @@ internal sealed class StudioRuntime
             || label.Contains("порог золота для уровня", StringComparison.Ordinal))
         {
             return "Сколько денег или золота нужно, чтобы экономика перешла на этот уровень процветания.";
+        }
+
+        if (label.Contains("название уровня процветания", StringComparison.Ordinal))
+        {
+            return "Как этот уровень процветания будет называться в экономической системе. Это текстовое название, сами пороги уровня настраиваются отдельными числовыми полями.";
         }
 
         if (label.Contains("скорость обновления gbc в час", StringComparison.Ordinal)
@@ -20122,6 +20319,30 @@ internal sealed class StudioRuntime
             return (visualPickerKind, visualPickerPrompt);
         }
 
+        if (path.Contains("/items/food/", StringComparison.Ordinal)
+            && IsFoodConsumptionResourceLabel(label))
+        {
+            return (
+                "food-resource-class",
+                "Найди пищевой ресурс, который должен использоваться при употреблении этого предмета.");
+        }
+
+        if (path.Contains("/items/vehicle/attachments/", StringComparison.Ordinal)
+            && IsVehicleAttachmentClassLabel(label))
+        {
+            return (
+                "vehicle-attachment-class",
+                "Найди совместимый blueprint детали транспорта для этого предмета.");
+        }
+
+        if (path.Contains("/quests/", StringComparison.Ordinal)
+            && IsQuestAcceptedRecipesLabel(label))
+        {
+            return (
+                "crafting-recipe-asset",
+                "Найди рецепт, который должен засчитываться этим квестовым условием.");
+        }
+
         if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
             && label.Contains("предметы контейнерного набора", StringComparison.Ordinal))
         {
@@ -20584,6 +20805,12 @@ internal sealed class StudioRuntime
         if (label.Contains("положение точки кривой", StringComparison.Ordinal))
         {
             return (null, null);
+        }
+
+        if (relativePath.Contains("/fortifications/locks/", StringComparison.OrdinalIgnoreCase)
+            && IsLockExplosionRadiusLabel(label))
+        {
+            return ("0", "10000");
         }
 
         if (IsFishingGameplaySurface(relativePath))
@@ -21291,6 +21518,12 @@ internal sealed class StudioRuntime
             return "Готовые наборы награды для этого квеста. Можно копировать удачный вариант и затем отдельно менять деньги, славу и опыт навыков.";
         }
 
+        if (IsQuestAcceptedRecipesLabel(label)
+            && path.Contains("/quests/", StringComparison.Ordinal))
+        {
+            return "Какие рецепты подходят для этого квестового действия. Можно добавить несколько рецептов, и шаг засчитает любой из них.";
+        }
+
         if (label.Contains("подходящие предметы", StringComparison.Ordinal)
             && path.Contains("/quests/", StringComparison.Ordinal))
         {
@@ -21637,6 +21870,17 @@ internal sealed class StudioRuntime
                 true,
                 "quest-asset",
                 "Найди квест, который нужно добавить в этот набор.");
+        }
+
+        if (relativePath.Contains("/quests/", StringComparison.OrdinalIgnoreCase)
+            && IsQuestAcceptedRecipesLabel(label)
+            && (values.Length == 0
+                || values.All(value => value is ObjectPropertyData or SoftObjectPropertyData or SoftObjectPathPropertyData)))
+        {
+            return (
+                true,
+                "crafting-recipe-asset",
+                "Найди рецепт, который должен засчитываться этим квестовым условием.");
         }
 
         if (relativePath.Contains("/quests/", StringComparison.OrdinalIgnoreCase)
@@ -23712,6 +23956,22 @@ internal sealed class StudioRuntime
         var stem = Path.GetFileNameWithoutExtension(relativePath);
         var clean = stem;
         foreach (var prefix in new[] { "BPC_", "BP_", "Vehicle_" })
+        {
+            if (clean.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                clean = clean[prefix.Length..];
+                break;
+            }
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(clean)));
+    }
+
+    private static string ResolveFoodResourceDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        var clean = stem;
+        foreach (var prefix in new[] { "BP_Dish_", "BP_", "DA_" })
         {
             if (clean.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
             {

@@ -57,35 +57,44 @@ function Invoke-SchemaAudit([string]$BaseUrl, [object[]]$Assets, [int]$Throttle)
         $asset = $_
         $baseUrl = $using:BaseUrl
         $uri = "$baseUrl/api/modding/schema?assetId=$([uri]::EscapeDataString([string]$asset.assetId))"
-        try {
-            $schema = Invoke-RestMethod -Uri $uri -TimeoutSec 180
-            $fields = @($schema.fields).Count
-            $lists = @($schema.listTargets).Count
-            [pscustomobject]@{
-                ok = $true
-                assetId = [string]$asset.assetId
-                categoryId = [string]$asset.categoryId
-                displayName = [string]$asset.displayName
-                relativePath = [string]$asset.relativePath
-                fieldCount = $fields
-                listTargetCount = $lists
-                usable = ($fields -gt 0 -or $lists -gt 0)
-                warnings = (@($schema.warnings) -join " | ")
-                error = $null
+        $lastError = $null
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                $schema = Invoke-RestMethod -Uri $uri -TimeoutSec 180
+                $fields = @($schema.fields).Count
+                $lists = @($schema.listTargets).Count
+                [pscustomobject]@{
+                    ok = $true
+                    assetId = [string]$asset.assetId
+                    categoryId = [string]$asset.categoryId
+                    displayName = [string]$asset.displayName
+                    relativePath = [string]$asset.relativePath
+                    fieldCount = $fields
+                    listTargetCount = $lists
+                    usable = ($fields -gt 0 -or $lists -gt 0)
+                    warnings = (@($schema.warnings) -join " | ")
+                    error = $null
+                }
+                return
+            } catch {
+                $lastError = $_.Exception.Message
+                if ($attempt -lt 3) {
+                    Start-Sleep -Seconds 2
+                }
             }
-        } catch {
-            [pscustomobject]@{
-                ok = $false
-                assetId = [string]$asset.assetId
-                categoryId = [string]$asset.categoryId
-                displayName = [string]$asset.displayName
-                relativePath = [string]$asset.relativePath
-                fieldCount = 0
-                listTargetCount = 0
-                usable = $false
-                warnings = ""
-                error = $_.Exception.Message
-            }
+        }
+
+        [pscustomobject]@{
+            ok = $false
+            assetId = [string]$asset.assetId
+            categoryId = [string]$asset.categoryId
+            displayName = [string]$asset.displayName
+            relativePath = [string]$asset.relativePath
+            fieldCount = 0
+            listTargetCount = 0
+            usable = $false
+            warnings = ""
+            error = $lastError
         }
     } -ThrottleLimit $Throttle
 }
