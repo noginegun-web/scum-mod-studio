@@ -13,6 +13,8 @@
       <div>
         <h1>SCUM Студия модов</h1>
         <div id="statusLine" class="muted">Проверка игры и данных...</div>
+        <div id="toolchainStatus" class="toolchain-status"></div>
+        <div id="toolchainInstallHelp" class="toolchain-install-help"></div>
       </div>
       <div class="top-actions">
         <button id="supportAuthorBtn" type="button" class="support-button">
@@ -62,6 +64,8 @@
   </div>
 
   <main class="layout">
+    <section id="studioFlowBar" class="studio-flow" aria-label="Путь сборки мода"></section>
+
     <section class="panel">
       <h2>1) Игровые системы</h2>
 
@@ -114,8 +118,8 @@
       </div>
       <div class="custom-visual-import">
         <label class="custom-visual-file">
-          <span>Cooked файлы</span>
-          <input id="customVisualFiles" type="file" multiple accept=".uasset,.uexp,.ubulk,.uptnl,.fbx,.glb,.gltf,.obj,.blend">
+          <span>Модель или cooked файлы</span>
+          <input id="customVisualFiles" type="file" multiple accept=".uasset,.uexp,.ubulk,.uptnl,.fbx,.glb,.gltf,.dae,.stl,.ply,.obj,.blend,.zip,.rar,.7z">
         </label>
         <label class="custom-visual-file">
           <span>Папка cooked Content</span>
@@ -124,6 +128,175 @@
         <button id="customVisualImportBtn" type="button">Импортировать</button>
         <div id="customVisualImportStatus" class="muted small"></div>
       </div>
+      <div id="modelReplacementWizard" class="model-replacement-wizard" hidden>
+        <div class="model-replacement-title">Автозамена модели</div>
+        <div id="modelWorkflowSteps" class="model-workflow-steps"></div>
+        <div class="model-profile-toolbar" aria-label="Быстрый профиль замены">
+          <button type="button" class="model-profile-btn" data-model-profile="auto">Авто</button>
+          <button type="button" class="model-profile-btn" data-model-profile="two-hand-melee">2H меч</button>
+          <button type="button" class="model-profile-btn" data-model-profile="helmet">Шлем</button>
+          <button type="button" class="model-profile-btn" data-model-profile="armor">Броня</button>
+          <button type="button" class="model-profile-btn" data-model-profile="npc">NPC / зомби</button>
+          <button type="button" class="model-profile-btn" data-model-profile="container">Контейнер</button>
+          <button type="button" class="model-profile-btn" data-model-profile="vehicle">Транспорт</button>
+        </div>
+        <div id="modelCookSummary" class="model-cook-summary"></div>
+        <div id="modelGuidancePanel" class="model-guidance-panel"></div>
+        <div class="model-replacement-section">
+          <div class="model-replacement-section-title">Цель</div>
+          <div class="model-replacement-controls">
+            <label>Что заменить
+              <select id="modelReplacementField"></select>
+            </label>
+            <label>Новая модель
+              <select id="modelReplacementAsset"></select>
+            </label>
+            <button id="modelReplacementRefreshBtn" type="button">Обновить список</button>
+            <button id="modelReplacementApplyBtn" type="button" class="primary">Подставить модель</button>
+          </div>
+        </div>
+        <div id="rawModelCookControls" class="raw-model-cook-controls model-replacement-section" hidden>
+          <div class="model-replacement-section-title">Raw-модель</div>
+          <label>Загруженная модель
+            <select id="rawModelCookSource"></select>
+          </label>
+          <button id="rawModelCookBtn" type="button" class="primary">Подготовить в UE4</button>
+          <button id="vehicleFullReplacementBtn" type="button" hidden>Полная замена транспорта</button>
+        </div>
+        <div class="model-replacement-section">
+          <div class="model-replacement-section-title">Материал</div>
+          <div class="model-material-grid">
+            <label>Режим
+              <select id="modelMaterialMode">
+                <option value="model" selected>Из модели</option>
+                <option value="custom">Создать свой</option>
+                <option value="game">Из игры / импортированный .mi</option>
+              </select>
+            </label>
+            <label>Цвет
+              <input id="modelPaintColor" type="color" value="#ffffff">
+            </label>
+            <label>Окраска, %
+              <input id="modelPaintStrength" type="number" min="0" max="100" step="1" value="0">
+            </label>
+            <label>Металл, %
+              <input id="modelPaintMetallic" type="number" min="0" max="100" step="1" value="0">
+            </label>
+            <label>Шероховатость, %
+              <input id="modelPaintRoughness" type="number" min="0" max="100" step="1" value="50">
+            </label>
+          </div>
+        </div>
+        <div id="modelMaterialReferenceControls" class="model-material-reference model-replacement-section" hidden>
+          <div class="model-replacement-section-title">Материал из игры</div>
+          <label>Поиск .mi / материала
+            <input id="modelMaterialSearch" type="text" placeholder="Например: MI_M1887, wood, metal">
+          </label>
+          <label>Материал для модели
+            <select id="modelMaterialReference"></select>
+          </label>
+        </div>
+        <details class="model-replacement-section model-advanced-fit">
+          <summary>Тонкая подгонка</summary>
+          <div class="model-fit-grid">
+            <label class="inline-check model-fit-check">
+              <input id="modelAutoFit" type="checkbox" checked>
+              <span>Авторазмер</span>
+            </label>
+            <label>Цель, см
+              <input id="modelTargetLongestCm" type="number" min="1" max="50000" step="1" value="95">
+            </label>
+            <label class="model-slider-control">Размер
+              <input id="modelTargetLongestSlider" type="range" min="30" max="3000" step="10" value="950">
+            </label>
+            <label>Масштаб, %
+              <input id="modelFitScale" type="number" min="1" max="1000" step="1" value="100">
+            </label>
+            <label>Лимит треугольников
+              <input id="modelTriangleBudget" type="number" min="0" max="75000" step="500" value="0" title="0 — авто. Для тяжёлых NPC и интернет-моделей программа может упростить mesh перед UE4 cook.">
+            </label>
+            <label>Смещение X, см
+              <input id="modelFitOffsetX" type="number" step="0.1" value="0">
+            </label>
+            <label>Смещение Y, см
+              <input id="modelFitOffsetY" type="number" step="0.1" value="0">
+            </label>
+            <label>Смещение Z, см
+              <input id="modelFitOffsetZ" type="number" step="0.1" value="0">
+            </label>
+            <label>Наклон, град.
+              <input id="modelFitPitch" type="number" step="0.1" value="0">
+            </label>
+            <label>Поворот, град.
+              <input id="modelFitYaw" type="number" step="0.1" value="0">
+            </label>
+            <label>Крен, град.
+              <input id="modelFitRoll" type="number" step="0.1" value="0">
+            </label>
+            <label class="weapon-adapter-control" hidden>Позиция хвата, %
+              <input id="weaponGripAnchorPercent" type="number" min="5" max="95" step="1" value="45" title="0% ближе к концу рукояти, 100% ближе к гарде. Для двухручных мечей обычно 35-55%.">
+            </label>
+            <label class="weapon-adapter-control" hidden>Подогнать толщину рукояти, см
+              <input id="weaponGripDiameterCm" type="number" min="0" max="12" step="0.1" value="0" title="0 — не менять геометрию рукояти. Укажи диаметр только если рукоять слишком толстая для пальцев.">
+            </label>
+            <label class="weapon-adapter-control" hidden>Зона двух рук, см
+              <input id="weaponGripBackReachCm" type="number" min="0" max="60" step="1" value="32" title="Участок рукояти, где должны помещаться обе руки. Модель не растягивается, настройка помогает выбрать центр хвата.">
+            </label>
+            <label class="weapon-adapter-control" hidden>Сдвиг модели к второй руке, см
+              <input id="weaponSecondHandShiftCm" type="number" min="-80" max="80" step="1" value="24" title="Двигает всю модель вдоль рукояти, не растягивая текстуры. Плюс — ближе к поддерживающей руке, минус — обратно к основной руке.">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Коллизия транспорта
+              <select id="vehicleCollisionMode">
+                <option value="visual-query" selected>По форме модели</option>
+                <option value="query-box">Упрощённый box proxy</option>
+                <option value="overlay-block">Overlay BlockAll</option>
+                <option value="visual-only">Только visual</option>
+              </select>
+            </label>
+            <label class="vehicle-adapter-control" hidden>Proxy длина, %
+              <input id="vehicleQueryProxyLength" type="number" min="10" max="200" step="1" value="96">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Proxy ширина, %
+              <input id="vehicleQueryProxyWidth" type="number" min="10" max="200" step="1" value="88">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Proxy высота, %
+              <input id="vehicleQueryProxyHeight" type="number" min="10" max="200" step="1" value="92">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Пилот X
+              <input id="vehicleSeatOffsetX" type="number" step="0.1" value="0">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Пилот Y
+              <input id="vehicleSeatOffsetY" type="number" step="0.1" value="-12">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Пилот Z
+              <input id="vehicleSeatOffsetZ" type="number" step="0.1" value="0">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Пассажир X
+              <input id="vehiclePassengerSeatOffsetX" type="number" step="0.1" value="0">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Пассажир Y
+              <input id="vehiclePassengerSeatOffsetY" type="number" step="0.1" value="-12">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Пассажир Z
+              <input id="vehiclePassengerSeatOffsetZ" type="number" step="0.1" value="-5">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Вход X
+              <input id="vehicleEntryOffsetX" type="number" step="0.1" value="-60">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Вход Y
+              <input id="vehicleEntryOffsetY" type="number" step="0.1" value="100">
+            </label>
+            <label class="vehicle-adapter-control" hidden>Вход Z
+              <input id="vehicleEntryOffsetZ" type="number" step="0.1" value="125">
+            </label>
+          </div>
+        </details>
+        <div id="modelReplacementStatus" class="muted small"></div>
+      </div>
+      <div id="vehicleProfilePanel" class="vehicle-profile-panel" hidden></div>
+      <div id="vehicleModulePlanPanel" class="vehicle-module-plan-panel" hidden></div>
+      <div id="rawModelAnalysisPanel" class="raw-model-analysis-panel" hidden></div>
+      <div id="armorSetPlanPanel" class="armor-set-plan-panel" hidden></div>
       <div id="schemaWarnings" class="warning-list"></div>
 
       <details class="advanced-box">
@@ -156,7 +329,7 @@
               <option value="all" selected>Все точки</option>
               <option value="trader">Только торговцев</option>
               <option value="npc">Только NPC</option>
-              <option value="vehicle">Только транспорт</option>
+              <option value="vehicle" hidden disabled>Только транспорт</option>
               <option value="route">Только маршруты роботов</option>
             </select>
           </label>
@@ -179,17 +352,17 @@
         </div>
       </div>
 
-      <div class="panel-sub">
-        <div class="panel-sub-title">Что можно настроить</div>
+      <details class="panel-sub manual-edit-panel">
+        <summary class="panel-sub-title">Ручные настройки ассета</summary>
         <div id="schemaSections" class="schema-sections"></div>
-      </div>
+      </details>
 
-      <div class="panel-sub">
-        <div class="panel-sub-title">Что можно добавить, убрать и связать</div>
+      <details class="panel-sub manual-edit-panel">
+        <summary class="panel-sub-title">Состав, списки и связи</summary>
         <div id="listTargetRows" class="list-targets"></div>
         <div id="listOpsMeta" class="muted small"></div>
         <div id="listOpsQueue" class="list-op-queue"></div>
-      </div>
+      </details>
 
       <div class="toolbar">
         <button id="stageAssetBtn" type="button">Добавить этот раздел в мод</button>
@@ -202,6 +375,7 @@
 
     <section class="panel">
       <h2>3) Выпустить готовый .pak</h2>
+      <div id="buildReadiness" class="build-readiness"></div>
       <div class="build-grid">
         <label>Имя .pak вручную, если нужно
           <input id="modNameInput" type="text" placeholder="Оставь пустым для автоматического имени">
@@ -210,9 +384,10 @@
         <label><input id="zipCheck" type="checkbox" checked> Сделать архив для отправки</label>
         <label><input id="seedCheck" type="checkbox" checked> Автоматически добавить нужные игровые файлы</label>
       </div>
-      <div class="build-hint small muted">
-        Если поле оставить пустым, программа сама создаст имя вида <code>pakchunk99-WindowsNoEditor_7_P.pak</code>, положит сборку в папку <code>mods</code> и при установке скопирует её в <code>SCUM/Content/Paks/mods</code>.
-      </div>
+      <details class="build-hint small muted">
+        <summary>Имя файла и установка</summary>
+        <div>Если поле оставить пустым, программа сама создаст имя вида <code>pakchunk99-WindowsNoEditor_7_P.pak</code>, положит сборку в папку <code>mods</code> и при установке скопирует её в <code>SCUM/Content/Paks/mods</code>.</div>
+      </details>
       <div class="toolbar">
         <button id="buildBtn" type="button" class="primary">Собрать готовый мод</button>
       </div>

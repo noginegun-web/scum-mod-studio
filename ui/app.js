@@ -28,11 +28,32 @@ const state = {
     schemaLoadToken: 0,
     stagedByAssetId: new Map(),
     showOnlyEditable: false,
-    schemaFieldFilter: ""
+    schemaFieldFilter: "",
+    customVisualModels: [],
+    rawModelImports: [],
+    vehicleProfile: null,
+    vehicleProfileAssetId: "",
+    vehicleProfileLoading: false,
+    vehicleModulePlan: null,
+    vehicleModulePlanKey: "",
+    vehicleModulePlanLoading: false,
+    vehicleModulePlanCookingKey: "",
+    vehicleModulePlanBatchCooking: false,
+    vehicleFullReplacementCooking: false,
+    armorSetPlan: null,
+    armorSetPlanKey: "",
+    armorSetPlanLoading: false,
+    armorSetPlanCookingKey: "",
+    armorSetPlanBatchCooking: false,
+    modelTargetLongestTouched: false,
+    modelProfilePreset: "auto"
   }
 };
 
 let modAssetSearchDebounce = 0;
+let modelMaterialSearchDebounce = 0;
+let modelMaterialOptionsToken = 0;
+const VEHICLE_ADAPTER_CLIENT_VISIBLE = false;
 const SCENE_VIEWBOX_WIDTH = 1000;
 const SCENE_VIEWBOX_HEIGHT = 620;
 const SCENE_VIEWBOX_PADDING = 72;
@@ -1416,6 +1437,13 @@ async function fetchReferenceOptions(pickerKind, term, limit = 12) {
   return api(`/api/modding/reference-options?${query.toString()}`);
 }
 
+async function fetchCustomVisualModels() {
+  const models = await api("/api/custom-visual-assets?kind=model");
+  state.modding.customVisualModels = Array.isArray(models) ? models : [];
+  renderStudioFlowBar();
+  return state.modding.customVisualModels;
+}
+
 function formatCustomVisualKind(kind) {
   return {
     "static-mesh": "модель",
@@ -1423,6 +1451,1038 @@ function formatCustomVisualKind(kind) {
     material: "материал",
     texture: "текстура"
   }[String(kind || "").toLowerCase()] || "ассет";
+}
+
+function formatModelBounds(bounds) {
+  if (!bounds) {
+    return "";
+  }
+
+  const sx = Number(bounds.sizeX);
+  const sy = Number(bounds.sizeY);
+  const sz = Number(bounds.sizeZ);
+  if (![sx, sy, sz].every(Number.isFinite)) {
+    return "";
+  }
+
+  const fmt = (value) => value.toFixed(3).replace(/\.?0+$/, "");
+  return `${fmt(sx)} x ${fmt(sy)} x ${fmt(sz)}`;
+}
+
+function formatCompactInteger(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toLocaleString("ru-RU") : "0";
+}
+
+function formatRawModelPartRole(role) {
+  return {
+    "armor-helmet": "броня: шлем",
+    "armor-vest": "броня: торс/жилет",
+    "armor-arms": "броня: руки",
+    "armor-legs": "броня: ноги",
+    "armor-belt": "броня: пояс",
+    "armor-hands": "броня: кисти/перчатки",
+    "armor-boots": "броня: ботинки",
+    "armor-detail": "броня: деталь",
+    "query-proxy": "query/collision",
+    weapon: "оружейный модуль",
+    engine: "двигатель/ротор",
+    "seat-interior": "салон/посадка",
+    wing: "крыло/аэроповерхность",
+    "tail-control": "хвост/руль",
+    "landing-gear": "шасси/опора",
+    hull: "корпус/chassis",
+    detail: "деталь"
+  }[String(role || "").toLowerCase()] || String(role || "деталь");
+}
+
+function buildArmorSetPlanGroups(parts) {
+  const armorParts = (Array.isArray(parts) ? parts : [])
+    .filter((part) => String(part?.role || "").toLowerCase().startsWith("armor-"));
+  if (!armorParts.length) {
+    return [];
+  }
+
+  const definitions = [
+    {
+      key: "helmet",
+      title: "Шлем",
+      roles: ["armor-helmet"],
+      target: "Слот шлема / UpperHeadSocket",
+      note: "Cook отдельно, запас вокруг головы 3-6%, не менять внутренний component export."
+    },
+    {
+      key: "torso",
+      title: "Торс и жилет",
+      roles: ["armor-vest", "armor-belt"],
+      target: "Armor vest или torso protection",
+      note: "Жилет и пояс лучше вести одним worn visual, чтобы не было щели на талии."
+    },
+    {
+      key: "arms",
+      title: "Руки и плечи",
+      roles: ["armor-arms", "armor-hands"],
+      target: "Куртка/рукава или перчатки",
+      note: "Для анимаций нужны skin weights; статичные детали можно объединять с торсом."
+    },
+    {
+      key: "legs",
+      title: "Ноги",
+      roles: ["armor-legs", "armor-boots"],
+      target: "Pants / boots",
+      note: "Нижнюю броню делить на pants и boots только если части не пересекают колени."
+    },
+    {
+      key: "details",
+      title: "Остальные детали",
+      roles: ["armor-detail"],
+      target: "Ближайший worn slot",
+      note: "Мелкие детали объединяются с ближайшим элементом комплекта."
+    }
+  ];
+
+  return definitions
+    .map((definition) => {
+      const selected = armorParts.filter((part) => definition.roles.includes(String(part.role || "").toLowerCase()));
+      const triangles = selected.reduce((sum, part) => sum + Number(part.triangles || 0), 0);
+      return {
+        ...definition,
+        parts: selected,
+        triangles
+      };
+    })
+    .filter((group) => group.parts.length > 0);
+}
+
+function renderArmorSetPlan(host, parts) {
+  const groups = buildArmorSetPlanGroups(parts);
+  if (!groups.length) {
+    return;
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "armor-set-plan";
+
+  const title = document.createElement("div");
+  title.className = "raw-model-analysis-title";
+  const totalParts = groups.reduce((sum, group) => sum + group.parts.length, 0);
+  title.textContent = `План разборки брони: ${totalParts} частей по ${groups.length} игровым зонам`;
+  panel.appendChild(title);
+
+  const grid = document.createElement("div");
+  grid.className = "armor-set-plan-grid";
+  for (const group of groups) {
+    const card = document.createElement("div");
+    card.className = "armor-set-plan-card";
+
+    const cardTitle = document.createElement("div");
+    cardTitle.className = "vehicle-profile-card-title";
+    cardTitle.textContent = group.title;
+    card.appendChild(cardTitle);
+
+    const meta = document.createElement("div");
+    meta.className = "raw-model-part-meta";
+    meta.textContent = `${group.target} | ${group.parts.length} частей | ${formatCompactInteger(group.triangles)} tris`;
+    card.appendChild(meta);
+
+    appendProfileChips(card, group.parts.map((part) => part.name || "part"), "profile-chip", 10);
+
+    const note = document.createElement("div");
+    note.className = "raw-model-part-recommendation";
+    note.textContent = group.note;
+    card.appendChild(note);
+
+    grid.appendChild(card);
+  }
+
+  panel.appendChild(grid);
+  host.appendChild(panel);
+}
+
+function isArmorSetRawModel(model) {
+  const parts = Array.isArray(model?.parts) ? model.parts : [];
+  return parts.filter((part) => String(part?.role || "").toLowerCase().startsWith("armor-")).length >= 2;
+}
+
+function selectedRawModelImport() {
+  const rawModels = state.modding.rawModelImports || [];
+  const select = el("rawModelCookSource");
+  if (!rawModels.length) {
+    return null;
+  }
+
+  return rawModels.find((model) => model.sourceRelativePath === select?.value) || rawModels[0];
+}
+
+function clearArmorSetPlanPanel() {
+  state.modding.armorSetPlan = null;
+  state.modding.armorSetPlanKey = "";
+  state.modding.armorSetPlanLoading = false;
+  state.modding.armorSetPlanCookingKey = "";
+  renderArmorSetPlanPanel();
+}
+
+function clearVehicleProfilePanel() {
+  state.modding.vehicleProfile = null;
+  state.modding.vehicleProfileAssetId = "";
+  state.modding.vehicleProfileLoading = false;
+  renderVehicleProfilePanel();
+  clearVehicleModulePlanPanel();
+}
+
+function clearVehicleModulePlanPanel() {
+  state.modding.vehicleModulePlan = null;
+  state.modding.vehicleModulePlanKey = "";
+  state.modding.vehicleModulePlanLoading = false;
+  state.modding.vehicleModulePlanCookingKey = "";
+  renderVehicleModulePlanPanel();
+}
+
+async function loadArmorSetPlanForCurrentSelection() {
+  const rawModel = selectedRawModelImport();
+  if (!rawModel?.sourceRelativePath || !isArmorSetRawModel(rawModel)) {
+    clearArmorSetPlanPanel();
+    return;
+  }
+
+  const key = rawModel.sourceRelativePath;
+  if (state.modding.armorSetPlanLoading && state.modding.armorSetPlanKey === key) {
+    return;
+  }
+
+  state.modding.armorSetPlanLoading = true;
+  state.modding.armorSetPlanKey = key;
+  state.modding.armorSetPlan = null;
+  renderArmorSetPlanPanel();
+
+  try {
+    const plan = await api(`/api/modding/armor-set-plan?rawSourceRelativePath=${encodeURIComponent(rawModel.sourceRelativePath)}`);
+    const currentRaw = selectedRawModelImport();
+    if ((currentRaw?.sourceRelativePath || "") !== key) {
+      return;
+    }
+
+    state.modding.armorSetPlan = plan;
+  } catch (error) {
+    state.modding.armorSetPlan = {
+      ok: false,
+      error: error?.message || "План комплекта брони не удалось построить.",
+      entries: [],
+      warnings: []
+    };
+  } finally {
+    if (state.modding.armorSetPlanKey === key) {
+      state.modding.armorSetPlanLoading = false;
+      renderArmorSetPlanPanel();
+    }
+  }
+}
+
+function formatArmorSetModuleRole(role) {
+  return {
+    helmet: "шлем",
+    torso: "бронежилет / торс",
+    arms: "руки / плечи",
+    legs: "ноги",
+    boots: "ботинки / голени",
+    hands: "перчатки / кисти"
+  }[String(role || "").toLowerCase()] || String(role || "часть брони");
+}
+
+async function cookArmorSetPlanEntry(entry) {
+  const rawModel = selectedRawModelImport();
+  if (!rawModel?.sourceRelativePath || !entry?.targetAssetId) {
+    setModelReplacementStatus("Выбери raw-модель комплекта брони и слот из плана.", true);
+    return;
+  }
+
+  const key = `${entry.targetAssetId}|${entry.targetFieldPath || ""}`;
+  state.modding.armorSetPlanCookingKey = key;
+  renderArmorSetPlanPanel();
+  setModelReplacementStatus(`Готовлю часть брони: ${entry.targetDisplayName || formatArmorSetModuleRole(entry.moduleRole)}...`);
+
+  try {
+    const result = await api("/api/modding/armor-set-cook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rawSourceRelativePath: rawModel.sourceRelativePath,
+        targetAssetId: entry.targetAssetId,
+        targetFieldPath: entry.targetFieldPath || ""
+      })
+    });
+
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    if (result.ok === false) {
+      const tail = result.unrealLogTail || result.blenderLogTail || "";
+      const tailPreview = tail ? `\n${tail.split("\n").slice(-4).join("\n")}` : "";
+      setModelReplacementStatus(`${result.error || "Часть брони не удалось приготовить."}${warnings.length ? `\n${warnings.slice(0, 4).join(" ")}` : ""}${tailPreview}`, true);
+      return;
+    }
+
+    await fetchCustomVisualModels();
+    const stagedItem = stageSuggestedAssetEditFromCook(result.suggestedEdit, entry);
+    refreshModelReplacementWizard();
+    const stagedNote = stagedItem
+      ? "Правки safe-полей уже добавлены в мод."
+      : "Cooked mesh добавлен в список моделей; поле можно выбрать вручную.";
+    setModelReplacementStatus(`Часть брони приготовлена. ${stagedNote} ${warnings.slice(0, 3).join(" ")}`);
+  } finally {
+    if (state.modding.armorSetPlanCookingKey === key) {
+      state.modding.armorSetPlanCookingKey = "";
+      renderArmorSetPlanPanel();
+    }
+  }
+}
+
+async function cookArmorSetPlanBatch() {
+  const rawModel = selectedRawModelImport();
+  const plan = state.modding.armorSetPlan;
+  if (!rawModel?.sourceRelativePath || !plan) {
+    setModelReplacementStatus("Выбери raw-модель комплекта брони для batch cook.", true);
+    return;
+  }
+
+  const autoCount = (plan.entries || []).filter((entry) => entry.canAutoCook).length;
+  if (!autoCount) {
+    setModelReplacementStatus("В плане брони нет безопасных слотов для автоматической подготовки.", true);
+    return;
+  }
+
+  state.modding.armorSetPlanBatchCooking = true;
+  renderArmorSetPlanPanel();
+  setModelReplacementStatus(`Готовлю комплект брони по слотам (${autoCount}). Blender/UE4.27 будут работать несколько минут...`);
+
+  try {
+    const result = await api("/api/modding/armor-set-cook-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rawSourceRelativePath: rawModel.sourceRelativePath,
+        maxModules: Math.min(autoCount, 6)
+      })
+    });
+
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    if (result.ok === false && !Array.isArray(result.items)) {
+      setModelReplacementStatus(`${result.error || "Комплект брони не удалось подготовить."}${warnings.length ? ` ${warnings.slice(0, 4).join(" ")}` : ""}`, true);
+      return;
+    }
+
+    await fetchCustomVisualModels();
+    let stagedCount = 0;
+    for (const item of result.items || []) {
+      if (stageSuggestedAssetEditFromCook(item.suggestedEdit, {
+        targetRelativePath: item.targetRelativePath,
+        targetDisplayName: item.targetDisplayName
+      })) {
+        stagedCount += 1;
+      }
+    }
+
+    refreshModelReplacementWizard();
+    const successCount = (result.items || []).filter((item) => item.ok).length;
+    const totalCount = (result.items || []).length;
+    setModelReplacementStatus(`Комплект брони подготовлен: ${successCount}/${totalCount} слотов, staged edits: ${stagedCount}. ${warnings.slice(0, 3).join(" ")}`);
+  } finally {
+    state.modding.armorSetPlanBatchCooking = false;
+    renderArmorSetPlanPanel();
+  }
+}
+
+function renderArmorSetPlanPanel() {
+  const host = el("armorSetPlanPanel");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  if (state.modding.armorSetPlanLoading) {
+    host.hidden = false;
+    const loading = document.createElement("div");
+    loading.className = "vehicle-profile-title";
+    loading.textContent = "Строю план комплекта брони по игровым слотам...";
+    host.appendChild(loading);
+    return;
+  }
+
+  const plan = state.modding.armorSetPlan;
+  if (!plan) {
+    host.hidden = true;
+    return;
+  }
+
+  host.hidden = false;
+  const title = document.createElement("div");
+  title.className = "vehicle-profile-title";
+  title.textContent = `Комплект брони: ${selectedRawModelImport()?.name || "raw model"}`;
+  host.appendChild(title);
+
+  const entries = Array.isArray(plan.entries) ? plan.entries : [];
+  const autoCount = entries.filter((entry) => entry.canAutoCook).length;
+  const summary = document.createElement("div");
+  summary.className = "vehicle-profile-summary";
+  summary.textContent = `слотов: ${entries.length} | можно подготовить автоматически: ${autoCount}`;
+  host.appendChild(summary);
+
+  if (plan.ok === false) {
+    appendProfileList(host, "Ошибка", [plan.error || "План комплекта брони не удалось построить."], 1, "vehicle-profile-warning");
+    appendProfileList(host, "Что сделать", plan.warnings || [], 4, "vehicle-profile-warning");
+    return;
+  }
+
+  appendProfileList(host, "Как программа разложит сет", plan.nextSteps || [], 4);
+  appendProfileList(host, "Предупреждения", plan.warnings || [], 4, "vehicle-profile-warning");
+
+  if (autoCount > 0) {
+    const actions = document.createElement("div");
+    actions.className = "armor-set-plan-actions";
+    const batchButton = document.createElement("button");
+    batchButton.type = "button";
+    batchButton.textContent = state.modding.armorSetPlanBatchCooking
+      ? "Готовлю комплект..."
+      : `Подготовить весь сет (${Math.min(autoCount, 6)})`;
+    batchButton.disabled = state.modding.armorSetPlanBatchCooking || Boolean(state.modding.armorSetPlanCookingKey);
+    batchButton.title = "Готовит шлем, жилет, руки, ноги и ботинки как отдельные cooked assets и добавляет safe staged edits.";
+    batchButton.addEventListener("click", () => {
+      cookArmorSetPlanBatch().catch(showError);
+    });
+    actions.appendChild(batchButton);
+    host.appendChild(actions);
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "armor-set-plan-grid";
+  for (const entry of entries) {
+    const card = document.createElement("div");
+    card.className = `armor-set-plan-card armor-set-plan-entry ${entry.canAutoCook ? "can-cook" : "needs-review"}`;
+
+    const cardTitle = document.createElement("div");
+    cardTitle.className = "vehicle-profile-card-title";
+    cardTitle.textContent = formatArmorSetModuleRole(entry.moduleRole);
+    card.appendChild(cardTitle);
+
+    const meta = document.createElement("div");
+    meta.className = "raw-model-part-meta";
+    meta.textContent = `${entry.targetDisplayName || entry.targetRelativePath || "slot"} | ${entry.targetMeshKind || "mesh"} | ${formatCompactInteger(entry.rawTriangleCount)} tris -> ${formatCompactInteger(entry.targetTriangleCount)} tris`;
+    card.appendChild(meta);
+
+    if (entry.targetFieldLabel || entry.targetFieldPath) {
+      const field = document.createElement("div");
+      field.className = "vehicle-profile-fields";
+      field.textContent = `${entry.targetFieldLabel || "visual field"} ${entry.targetFieldPath ? `(${entry.targetFieldPath})` : ""}`;
+      card.appendChild(field);
+    }
+
+    appendProfileChips(card, entry.rawPartNames || [], "profile-chip", 10);
+
+    const recommendation = document.createElement("div");
+    recommendation.className = "raw-model-part-recommendation";
+    recommendation.textContent = entry.recommendation || "";
+    card.appendChild(recommendation);
+
+    if (entry.canAutoCook) {
+      const actions = document.createElement("div");
+      actions.className = "armor-set-plan-actions";
+      const cookButton = document.createElement("button");
+      cookButton.type = "button";
+      const key = `${entry.targetAssetId}|${entry.targetFieldPath || ""}`;
+      const isCooking = state.modding.armorSetPlanCookingKey === key;
+      cookButton.textContent = isCooking ? "Готовлю..." : "Подготовить слот";
+      cookButton.disabled = isCooking || Boolean(state.modding.armorSetPlanCookingKey) || state.modding.armorSetPlanBatchCooking;
+      cookButton.addEventListener("click", () => {
+        cookArmorSetPlanEntry(entry).catch(showError);
+      });
+      actions.appendChild(cookButton);
+      card.appendChild(actions);
+    }
+
+    grid.appendChild(card);
+  }
+
+  host.appendChild(grid);
+}
+
+function isVehicleAssetContext() {
+  const haystack = [
+    state.modding.selectedAssetId,
+    state.modding.selectedAsset?.relativePath,
+    state.modding.currentSchema?.relativePath,
+    state.modding.currentSchema?.categoryId,
+    state.modding.currentSchema?.categoryName
+  ].filter(Boolean).join(" ").replace(/\\/g, "/").toLowerCase();
+
+  return VEHICLE_ADAPTER_CLIENT_VISIBLE && isVehicleLikeContextText(haystack);
+}
+
+function isVehicleLikeContextText(haystack) {
+  return haystack.includes("/vehicles/")
+    || haystack.includes("vehicle")
+    || haystack.includes("airplane")
+    || haystack.includes("duster")
+    || haystack.includes("kinglet");
+}
+
+async function loadVehicleProfileForCurrentAsset() {
+  const assetId = state.modding.selectedAssetId;
+  if (!VEHICLE_ADAPTER_CLIENT_VISIBLE || !assetId || !isVehicleAssetContext()) {
+    clearVehicleProfilePanel();
+    return;
+  }
+
+  state.modding.vehicleProfileLoading = true;
+  state.modding.vehicleProfileAssetId = assetId;
+  state.modding.vehicleProfile = null;
+  renderVehicleProfilePanel();
+
+  const profile = await api(`/api/modding/vehicle-profile?assetId=${encodeURIComponent(assetId)}`);
+  if (state.modding.selectedAssetId !== assetId) {
+    return;
+  }
+
+  state.modding.vehicleProfile = profile;
+  state.modding.vehicleProfileAssetId = assetId;
+  state.modding.vehicleProfileLoading = false;
+  renderVehicleProfilePanel();
+  loadVehicleModulePlanForCurrentSelection().catch(showError);
+}
+
+async function loadVehicleModulePlanForCurrentSelection() {
+  const assetId = state.modding.selectedAssetId;
+  const rawModel = selectedRawModelImport();
+  if (!assetId || !rawModel?.sourceRelativePath || !isVehicleAssetContext()) {
+    clearVehicleModulePlanPanel();
+    return;
+  }
+
+  const key = `${assetId}|${rawModel.sourceRelativePath}`;
+  if (state.modding.vehicleModulePlanLoading && state.modding.vehicleModulePlanKey === key) {
+    return;
+  }
+
+  state.modding.vehicleModulePlanLoading = true;
+  state.modding.vehicleModulePlanKey = key;
+  state.modding.vehicleModulePlan = null;
+  renderVehicleModulePlanPanel();
+
+  try {
+    const plan = await api(`/api/modding/vehicle-module-plan?assetId=${encodeURIComponent(assetId)}&rawSourceRelativePath=${encodeURIComponent(rawModel.sourceRelativePath)}`);
+    const currentRaw = selectedRawModelImport();
+    const currentKey = `${state.modding.selectedAssetId}|${currentRaw?.sourceRelativePath || ""}`;
+    if (currentKey !== key) {
+      return;
+    }
+
+    state.modding.vehicleModulePlan = plan;
+  } catch (error) {
+    state.modding.vehicleModulePlan = {
+      ok: false,
+      error: error?.message || "План модулей не удалось построить.",
+      displayName: state.modding.selectedAsset?.relativePath || "vehicle",
+      entries: [],
+      warnings: []
+    };
+  } finally {
+    if (state.modding.vehicleModulePlanKey === key) {
+      state.modding.vehicleModulePlanLoading = false;
+      renderVehicleModulePlanPanel();
+    }
+  }
+}
+
+function appendProfileChips(host, items, className = "profile-chip", limit = 24) {
+  const values = (Array.isArray(items) ? items : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .slice(0, limit);
+  if (!values.length) {
+    return;
+  }
+
+  const chipHost = document.createElement("div");
+  chipHost.className = "profile-chip-list";
+  for (const value of values) {
+    const chip = document.createElement("span");
+    chip.className = className;
+    chip.textContent = value;
+    chip.title = value;
+    chipHost.appendChild(chip);
+  }
+  host.appendChild(chipHost);
+}
+
+function appendProfileList(host, titleText, items, limit = 6, className = "") {
+  const values = (Array.isArray(items) ? items : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .slice(0, limit);
+  if (!values.length) {
+    return;
+  }
+
+  const block = document.createElement("div");
+  block.className = className || "vehicle-profile-note";
+  const title = document.createElement("strong");
+  title.textContent = titleText;
+  block.appendChild(title);
+  const list = document.createElement("ul");
+  for (const value of values) {
+    const item = document.createElement("li");
+    item.textContent = value;
+    list.appendChild(item);
+  }
+  block.appendChild(list);
+  host.appendChild(block);
+}
+
+function renderVehicleProfilePanel() {
+  const host = el("vehicleProfilePanel");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  const profile = state.modding.vehicleProfile;
+  if (state.modding.vehicleProfileLoading) {
+    host.hidden = false;
+    const loading = document.createElement("div");
+    loading.className = "vehicle-profile-title";
+    loading.textContent = "Читаю модульный профиль транспорта...";
+    host.appendChild(loading);
+    return;
+  }
+
+  if (!profile) {
+    host.hidden = true;
+    return;
+  }
+
+  host.hidden = false;
+  const title = document.createElement("div");
+  title.className = "vehicle-profile-title";
+  title.textContent = `Профиль транспорта: ${profile.displayName || profile.relativePath || "asset"}`;
+  host.appendChild(title);
+
+  const summary = document.createElement("div");
+  summary.className = "vehicle-profile-summary";
+  const assets = Array.isArray(profile.assets) ? profile.assets : [];
+  const links = Array.isArray(profile.links) ? profile.links : [];
+  summary.textContent = `${profile.profileKind || "vehicle"} | модулей: ${assets.length} | связей: ${links.length}`;
+  host.appendChild(summary);
+
+  if (profile.ok === false) {
+    appendProfileList(host, "Ошибка", [profile.error || "Профиль не удалось построить."], 1, "vehicle-profile-warning");
+    return;
+  }
+
+  appendProfileList(host, "Что важно перед заменой", profile.recommendations || [], 6);
+  appendProfileList(host, "Предупреждения", profile.warnings || [], 4, "vehicle-profile-warning");
+
+  if (Array.isArray(profile.requiredSockets) && profile.requiredSockets.length) {
+    const socketsTitle = document.createElement("strong");
+    socketsTitle.textContent = "Обязательные сокеты";
+    host.appendChild(socketsTitle);
+    appendProfileChips(host, profile.requiredSockets, "profile-chip profile-chip-socket", 40);
+  }
+
+  if (Array.isArray(profile.materialReferences) && profile.materialReferences.length) {
+    const materialTitle = document.createElement("strong");
+    materialTitle.textContent = "Материалы из игры";
+    host.appendChild(materialTitle);
+    appendProfileChips(host, profile.materialReferences, "profile-chip profile-chip-material", 20);
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "vehicle-profile-grid";
+  for (const asset of assets.slice(0, 24)) {
+    const card = document.createElement("div");
+    card.className = "vehicle-profile-card";
+
+    const cardTitle = document.createElement("div");
+    cardTitle.className = "vehicle-profile-card-title";
+    cardTitle.textContent = asset.displayName || asset.relativePath || "asset";
+    card.appendChild(cardTitle);
+
+    const role = document.createElement("div");
+    role.className = "small muted";
+    role.textContent = `${asset.role || "module"} | visual ${asset.visualFieldCount || 0} | query ${asset.queryFieldCount || 0} | sockets ${asset.socketFieldCount || 0}`;
+    card.appendChild(role);
+
+    appendProfileChips(card, asset.requiredSockets || [], "profile-chip profile-chip-socket", 8);
+    appendProfileList(card, "Риски", asset.warnings || [], 2, "vehicle-profile-warning compact");
+    const keyFields = (Array.isArray(asset.keyFields) ? asset.keyFields : []).slice(0, 5);
+    if (keyFields.length) {
+      const fields = document.createElement("div");
+      fields.className = "vehicle-profile-fields";
+      for (const field of keyFields) {
+        const row = document.createElement("div");
+        row.textContent = `${field.kind || "field"}: ${field.label || field.fieldPath || ""}`;
+        row.title = field.currentDisplayValue || field.currentValue || "";
+        fields.appendChild(row);
+      }
+      card.appendChild(fields);
+    }
+
+    grid.appendChild(card);
+  }
+  host.appendChild(grid);
+}
+
+function formatVehicleModuleRole(role) {
+  return {
+    "vehicle-root": "root actor",
+    chassis: "chassis",
+    engine: "engine/propeller",
+    wing: "wing/airfoil",
+    "tail-control": "tail/rudder",
+    "landing-gear": "landing gear",
+    "weapon-mount": "weapon mount",
+    "seat-driver": "driver seat",
+    "seat-passenger": "passenger seat"
+  }[String(role || "").toLowerCase()] || String(role || "module");
+}
+
+function formatVehicleModuleSafety(safety) {
+  return {
+    "candidate-static-visual": "можно готовить StaticMesh",
+    "blocked-skeletal-contract": "блок: skeleton/ABP/sockets",
+    "blocked-query-proxy": "блок: нужен query proxy",
+    "mount-slot-plan": "план посадки",
+    "needs-split": "нужно разделить модель",
+    "needs-optimization": "нужны LOD/упрощение",
+    "needs-field-analysis": "нужно дочитать attachment",
+    "manual-review": "ручная проверка"
+  }[String(safety || "").toLowerCase()] || String(safety || "ручная проверка");
+}
+
+async function cookVehicleModulePlanEntry(entry) {
+  const rawModel = selectedRawModelImport();
+  if (!rawModel?.sourceRelativePath || !entry?.targetAssetId) {
+    setModelReplacementStatus("Выбери raw-модель и модуль из плана.", true);
+    return;
+  }
+
+  const key = `${entry.targetAssetId}|${entry.targetFieldPath || ""}`;
+  state.modding.vehicleModulePlanCookingKey = key;
+  renderVehicleModulePlanPanel();
+  setModelReplacementStatus(`Готовлю модуль ${entry.targetDisplayName || entry.targetRelativePath || "vehicle"} через Blender/UE4.27...`);
+
+  try {
+    const result = await api("/api/modding/vehicle-module-cook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assetId: state.modding.selectedAssetId,
+        rawSourceRelativePath: rawModel.sourceRelativePath,
+        targetAssetId: entry.targetAssetId,
+        targetFieldPath: entry.targetFieldPath || "",
+        materialReference: (entry.materialReferences || [])[0] || ""
+      })
+    });
+
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    if (result.ok === false) {
+      const tail = result.unrealLogTail || result.blenderLogTail || "";
+      const tailPreview = tail ? `\n${tail.split("\n").slice(-4).join("\n")}` : "";
+      setModelReplacementStatus(`${result.error || "Модуль не удалось приготовить."}${warnings.length ? `\n${warnings.slice(0, 4).join(" ")}` : ""}${tailPreview}`, true);
+      return;
+    }
+
+    await fetchCustomVisualModels();
+    const stagedItem = stageSuggestedAssetEditFromCook(result.suggestedEdit, entry);
+    refreshModelReplacementWizard();
+    const stagedNote = stagedItem
+      ? "Правка attachment уже добавлена в мод."
+      : "Cooked mesh добавлен в список моделей; поле attachment нужно выбрать вручную.";
+    setModelReplacementStatus(`Модуль приготовлен. ${stagedNote} ${warnings.slice(0, 3).join(" ")}`);
+  } finally {
+    if (state.modding.vehicleModulePlanCookingKey === key) {
+      state.modding.vehicleModulePlanCookingKey = "";
+      renderVehicleModulePlanPanel();
+    }
+  }
+}
+
+async function cookVehicleModulePlanBatch() {
+  const rawModel = selectedRawModelImport();
+  const plan = state.modding.vehicleModulePlan;
+  if (!rawModel?.sourceRelativePath || !state.modding.selectedAssetId || !plan) {
+    setModelReplacementStatus("Выбери транспортный ассет и raw-модель для batch cook.", true);
+    return;
+  }
+
+  const autoCount = (plan.entries || []).filter((entry) => entry.canAutoCook).length;
+  if (!autoCount) {
+    setModelReplacementStatus("В плане нет безопасных StaticMesh-модулей для batch cook.", true);
+    return;
+  }
+
+  state.modding.vehicleModulePlanBatchCooking = true;
+  renderVehicleModulePlanPanel();
+  setModelReplacementStatus(`Готовлю безопасные модули транспорта (${autoCount}). Это может занять несколько минут...`);
+
+  try {
+    const result = await api("/api/modding/vehicle-module-cook-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assetId: state.modding.selectedAssetId,
+        rawSourceRelativePath: rawModel.sourceRelativePath,
+        maxModules: Math.min(autoCount, 8)
+      })
+    });
+
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    if (result.ok === false && !Array.isArray(result.items)) {
+      setModelReplacementStatus(`${result.error || "Batch cook не удалось выполнить."}${warnings.length ? ` ${warnings.slice(0, 4).join(" ")}` : ""}`, true);
+      return;
+    }
+
+    await fetchCustomVisualModels();
+    let stagedCount = 0;
+    for (const item of result.items || []) {
+      if (stageSuggestedAssetEditFromCook(item.suggestedEdit, {
+        targetRelativePath: item.targetRelativePath,
+        targetDisplayName: item.targetDisplayName
+      })) {
+        stagedCount += 1;
+      }
+    }
+
+    refreshModelReplacementWizard();
+    const successCount = (result.items || []).filter((item) => item.ok).length;
+    const totalCount = (result.items || []).length;
+    setModelReplacementStatus(`Batch cook транспорта готов: ${successCount}/${totalCount} модулей, staged edits: ${stagedCount}. ${warnings.slice(0, 3).join(" ")}`);
+  } finally {
+    state.modding.vehicleModulePlanBatchCooking = false;
+    renderVehicleModulePlanPanel();
+  }
+}
+
+function stageSuggestedAssetEditFromCook(suggestedEdit, entry) {
+  if (!suggestedEdit?.assetId) {
+    return null;
+  }
+
+  const edits = Array.isArray(suggestedEdit.edits)
+    ? suggestedEdit.edits
+        .filter((field) => field?.fieldPath && field.value)
+        .map((field) => ({
+          fieldPath: String(field.fieldPath),
+          value: String(field.value)
+        }))
+    : [];
+  const listEdits = Array.isArray(suggestedEdit.listEdits)
+    ? suggestedEdit.listEdits.map((operation) => ({ ...operation }))
+    : [];
+  if (!edits.length && !listEdits.length) {
+    return null;
+  }
+
+  const existing = state.modding.stagedByAssetId.get(suggestedEdit.assetId) || null;
+  const stagedItem = {
+    assetId: suggestedEdit.assetId,
+    relativePath: entry?.targetRelativePath || existing?.relativePath || suggestedEdit.assetId,
+    displayName: entry?.targetDisplayName || existing?.displayName || suggestedEdit.assetId,
+    sourceMode: existing?.sourceMode || "auto",
+    companionMode: existing?.companionMode || "auto",
+    edits: existing ? mergeFieldEdits(existing.edits, edits) : edits,
+    listEdits: existing ? [...(existing.listEdits || []), ...listEdits] : listEdits
+  };
+
+  state.modding.stagedByAssetId.set(stagedItem.assetId, stagedItem);
+  renderStagedEdits();
+  updateModAssetMeta();
+  return stagedItem;
+}
+
+function renderVehicleModulePlanPanel() {
+  const host = el("vehicleModulePlanPanel");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  if (state.modding.vehicleModulePlanLoading) {
+    host.hidden = false;
+    const loading = document.createElement("div");
+    loading.className = "vehicle-profile-title";
+    loading.textContent = "Собираю план модулей транспорта для выбранной raw-модели...";
+    host.appendChild(loading);
+    return;
+  }
+
+  const plan = state.modding.vehicleModulePlan;
+  if (!plan) {
+    host.hidden = true;
+    return;
+  }
+
+  host.hidden = false;
+  const title = document.createElement("div");
+  title.className = "vehicle-profile-title";
+  title.textContent = `План модульной замены: ${plan.displayName || "vehicle"} + ${selectedRawModelImport()?.name || "raw model"}`;
+  host.appendChild(title);
+
+  const entries = Array.isArray(plan.entries) ? plan.entries : [];
+  const autoCount = entries.filter((entry) => entry.canAutoCook).length;
+  const blockedCount = entries.filter((entry) => String(entry.safetyLevel || "").startsWith("blocked")).length;
+  const summary = document.createElement("div");
+  summary.className = "vehicle-profile-summary";
+  summary.textContent = `${plan.profileKind || "vehicle"} | модулей: ${entries.length} | auto-cook кандидатов: ${autoCount} | заблокировано: ${blockedCount}`;
+  host.appendChild(summary);
+
+  if (plan.ok === false) {
+    appendProfileList(host, "Ошибка", [plan.error || "План не удалось построить."], 1, "vehicle-profile-warning");
+    return;
+  }
+
+  appendProfileList(host, "Следующие шаги", plan.nextSteps || [], 6);
+  appendProfileList(host, "Предупреждения", plan.warnings || [], 5, "vehicle-profile-warning");
+
+  if (autoCount > 0) {
+    const batchActions = document.createElement("div");
+    batchActions.className = "vehicle-module-plan-actions";
+    const batchButton = document.createElement("button");
+    batchButton.type = "button";
+    batchButton.textContent = state.modding.vehicleModulePlanBatchCooking
+      ? "Готовлю безопасные..."
+      : `Подготовить безопасные (${Math.min(autoCount, 8)})`;
+    batchButton.disabled = state.modding.vehicleModulePlanBatchCooking || Boolean(state.modding.vehicleModulePlanCookingKey);
+    batchButton.title = "Автоматически готовит только StaticMesh-модули, которые plan пометил как безопасные для auto-cook, и кладёт staged edits в мод.";
+    batchButton.addEventListener("click", () => {
+      cookVehicleModulePlanBatch().catch(showError);
+    });
+    batchActions.appendChild(batchButton);
+    host.appendChild(batchActions);
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "vehicle-module-plan-grid";
+  for (const entry of entries.slice(0, 32)) {
+    const card = document.createElement("div");
+    card.className = `vehicle-module-plan-card safety-${String(entry.safetyLevel || "manual-review").toLowerCase()}`;
+
+    const cardTitle = document.createElement("div");
+    cardTitle.className = "vehicle-profile-card-title";
+    cardTitle.textContent = entry.targetDisplayName || entry.targetRelativePath || "module";
+    card.appendChild(cardTitle);
+
+    const meta = document.createElement("div");
+    meta.className = "small muted";
+    meta.textContent = `${formatVehicleModuleRole(entry.moduleRole)} | ${formatVehicleModuleSafety(entry.safetyLevel)} | ${entry.targetMeshKind || "unknown"}`;
+    card.appendChild(meta);
+
+    if (entry.targetFieldLabel || entry.targetFieldPath) {
+      const field = document.createElement("div");
+      field.className = "vehicle-profile-fields";
+      field.textContent = `${entry.targetFieldLabel || "field"} ${entry.targetFieldPath ? `(${entry.targetFieldPath})` : ""}`;
+      card.appendChild(field);
+    }
+
+    appendProfileChips(card, entry.rawPartNames || [], "profile-chip", 8);
+    if (entry.rawTriangleCount) {
+      const tris = document.createElement("div");
+      tris.className = "small muted";
+      const triangleBudget = Number(entry.targetTriangleCount || 0);
+      tris.textContent = triangleBudget > 0
+        ? `Raw parts: ${formatCompactInteger(entry.rawTriangleCount)} tris -> budget ${formatCompactInteger(triangleBudget)} | цель ${Math.round(Number(entry.targetLongestCm || 0))} см`
+        : `Raw parts: ${formatCompactInteger(entry.rawTriangleCount)} tris | цель ${Math.round(Number(entry.targetLongestCm || 0))} см`;
+      card.appendChild(tris);
+    }
+    appendProfileChips(card, entry.requiredSockets || [], "profile-chip profile-chip-socket", 6);
+    appendProfileChips(card, entry.materialReferences || [], "profile-chip profile-chip-material", 4);
+
+    const recommendation = document.createElement("div");
+    recommendation.className = "raw-model-part-recommendation";
+    recommendation.textContent = entry.recommendation || entry.replacementStrategy || "";
+    card.appendChild(recommendation);
+
+    if (entry.canAutoCook) {
+      const actions = document.createElement("div");
+      actions.className = "vehicle-module-plan-actions";
+      const cookButton = document.createElement("button");
+      cookButton.type = "button";
+      const key = `${entry.targetAssetId}|${entry.targetFieldPath || ""}`;
+      const isCooking = state.modding.vehicleModulePlanCookingKey === key;
+      cookButton.textContent = isCooking ? "Готовлю..." : "Подготовить модуль";
+      cookButton.disabled = isCooking || Boolean(state.modding.vehicleModulePlanCookingKey) || state.modding.vehicleModulePlanBatchCooking;
+      cookButton.title = entry.replacementStrategy || "Blender/UE4.27 приготовят только выбранные raw parts как отдельный StaticMesh.";
+      cookButton.addEventListener("click", () => {
+        cookVehicleModulePlanEntry(entry).catch(showError);
+      });
+      actions.appendChild(cookButton);
+      card.appendChild(actions);
+    }
+
+    grid.appendChild(card);
+  }
+
+  host.appendChild(grid);
+}
+
+function renderRawModelAnalysisPanel() {
+  const host = el("rawModelAnalysisPanel");
+  if (!host) {
+    return;
+  }
+
+  const model = selectedRawModelImport();
+  if (!model) {
+    host.hidden = true;
+    host.innerHTML = "";
+    renderStudioFlowBar();
+    return;
+  }
+
+  host.hidden = false;
+  host.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "raw-model-analysis-title";
+  const bounds = formatModelBounds(model.bounds);
+  title.textContent = bounds
+    ? `Анализ модели: ${model.name || "raw model"} (${model.format || "MODEL"}, ${bounds})`
+    : `Анализ модели: ${model.name || "raw model"} (${model.format || "MODEL"})`;
+  host.appendChild(title);
+
+  appendProfileList(host, "Автоподготовка", model.adaptationHints || [], 4, "raw-model-analysis-note");
+
+  const parts = Array.isArray(model.parts) ? model.parts : [];
+  if (!parts.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted small";
+    empty.textContent = "Части модели пока не распознаны. Программа пытается разложить FBX/OBJ/GLTF/DAE/STL/PLY на экипировку, NPC/body, корпус, двигатель, крылья, оружие и query/collision.";
+    host.appendChild(empty);
+    return;
+  }
+
+  renderArmorSetPlan(host, parts);
+
+  const table = document.createElement("div");
+  table.className = "raw-model-parts";
+  for (const part of parts.slice(0, 32)) {
+    const row = document.createElement("div");
+    row.className = "raw-model-part-row";
+
+    const name = document.createElement("div");
+    name.className = "raw-model-part-name";
+    name.textContent = part.name || "part";
+    row.appendChild(name);
+
+    const meta = document.createElement("div");
+    meta.className = "raw-model-part-meta";
+    meta.textContent = `${formatRawModelPartRole(part.role)} | ${formatCompactInteger(part.triangles)} tris | ${formatModelBounds(part.bounds)}`;
+    row.appendChild(meta);
+
+    const recommendation = document.createElement("div");
+    recommendation.className = "raw-model-part-recommendation";
+    recommendation.textContent = part.recommendation || "";
+    row.appendChild(recommendation);
+
+    table.appendChild(row);
+  }
+  host.appendChild(table);
+  renderStudioFlowBar();
 }
 
 function setCustomVisualImportStatus(text, isError = false) {
@@ -1443,7 +2503,7 @@ async function importCustomVisualAssets() {
     ...Array.from(folderInput?.files || [])
   ];
   if (!files.length) {
-    setCustomVisualImportStatus("Выбери cooked UE-файлы для импорта.", true);
+    setCustomVisualImportStatus("Выбери cooked UE-файлы или raw-модель для импорта.", true);
     return;
   }
 
@@ -1460,7 +2520,16 @@ async function importCustomVisualAssets() {
 
   const importedCount = Number(result.importedFileCount || 0);
   const assets = Array.isArray(result.assets) ? result.assets : [];
+  const rawModels = Array.isArray(result.rawModels) ? result.rawModels : [];
   const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  if (rawModels.length) {
+    const keyForRawModel = (model) => model.sourceRelativePath || `${model.name || ""}|${model.format || ""}`;
+    const merged = new Map((state.modding.rawModelImports || []).map((model) => [keyForRawModel(model), model]));
+    for (const model of rawModels) {
+      merged.set(keyForRawModel(model), model);
+    }
+    state.modding.rawModelImports = Array.from(merged.values());
+  }
   const parts = [];
 
   if (result.ok === false) {
@@ -1477,17 +2546,1418 @@ async function importCustomVisualAssets() {
     parts.push(preview);
   }
 
+  if (rawModels.length) {
+    const rawPreview = rawModels
+      .slice(0, 3)
+      .map((model) => {
+        const bounds = formatModelBounds(model.bounds);
+        return bounds
+          ? `${model.format || "MODEL"}: ${model.name} (${bounds})`
+          : `${model.format || "MODEL"}: ${model.name}`;
+      })
+      .join("; ");
+    parts.push(`Сырые модели приняты как заготовки: ${rawPreview}`);
+  }
+
   if (warnings.length) {
     parts.push(`Предупреждения: ${warnings.slice(0, 3).join(" ")}`);
   }
 
   setCustomVisualImportStatus(parts.join("\n"), result.ok === false);
+  if (assets.length || rawModels.length) {
+    await fetchCustomVisualModels();
+    refreshModelReplacementWizard();
+    renderRawModelAnalysisPanel();
+    renderStudioFlowBar();
+    loadArmorSetPlanForCurrentSelection().catch(showError);
+    loadVehicleModulePlanForCurrentSelection().catch(showError);
+  }
   if (fileInput) {
     fileInput.value = "";
   }
   if (folderInput) {
     folderInput.value = "";
   }
+}
+
+function isModelReplacementField(field) {
+  const pickerKind = String(field?.referencePickerKind || "").toLowerCase();
+  return field?.editable !== false
+    && (pickerKind === "visual-static-mesh-object"
+      || pickerKind === "visual-static-mesh-asset"
+      || pickerKind === "visual-skeletal-mesh-object"
+      || pickerKind === "visual-skeletal-mesh-asset");
+}
+
+function getModelReplacementFields() {
+  const schema = state.modding.currentSchema;
+  const fields = Array.isArray(schema?.fields) ? schema.fields : [];
+  return fields.filter(isModelReplacementField);
+}
+
+function getModelReplacementContextText(field = null) {
+  return [
+    state.modding.selectedAssetId,
+    state.modding.selectedAsset?.relativePath,
+    state.modding.currentSchema?.relativePath,
+    field?.sourceLabel,
+    field?.label,
+    field?.section,
+    field?.currentValue,
+    field?.currentDisplayValue
+  ].filter(Boolean).join(" ").replace(/\\/g, "/").toLowerCase();
+}
+
+function isVehicleModelReplacementField(field) {
+  const haystack = getModelReplacementContextText(field);
+  return isVehicleLikeContextText(haystack);
+}
+
+function isWeaponModelReplacementField(field) {
+  const haystack = getModelReplacementContextText(field);
+  return haystack.includes("weapon")
+    || haystack.includes("/weapons/")
+    || haystack.includes("new_melee")
+    || haystack.includes("melee")
+    || haystack.includes("katana")
+    || haystack.includes("machete")
+    || haystack.includes("knife")
+    || haystack.includes("sword")
+    || haystack.includes("blade")
+    || haystack.includes("ranged_weapons")
+    || haystack.includes("shotgun")
+    || haystack.includes("rifle")
+    || haystack.includes("pistol")
+    || haystack.includes("оруж");
+}
+
+function getVehicleModelReplacementIssue(field, options = {}) {
+  if (!isVehicleModelReplacementField(field)) {
+    return "";
+  }
+
+  if (!VEHICLE_ADAPTER_CLIENT_VISIBLE) {
+    return "Замена моделей техники временно скрыта: vehicle adapter оставлен только для внутренней доработки.";
+  }
+
+  const haystack = getModelReplacementContextText(field);
+  const pickerKind = String(field?.referencePickerKind || "").toLowerCase();
+  if (haystack.includes("query mesh setup")) {
+    return "QueryMesh транспорта отвечает за трассировку, collision и сервисные проверки. Его нельзя менять общей интернет-моделью; сначала нужен отдельный collision/query proxy.";
+  }
+  if (haystack.includes("destruction effect")) {
+    return "Destruction meshes транспорта должны совпадать с damage regions и материалами оригинала. Общая замена здесь может ломать разрушение и физику.";
+  }
+  if (pickerKind.includes("skeletal")) {
+    return "SkeletalMesh транспорта требует исходный skeleton/ABP/socket contract. Для Duster это отдельный vehicle profile, а не общий raw→skeletal cook.";
+  }
+  if (options.rawCook && getModelMaterialMode() !== "game") {
+    return "Для транспортных StaticMesh-полей используй материал из SCUM/.mi: интернет-материалы могут не иметь shader map в cooked игре.";
+  }
+  return "";
+}
+
+function getModelReferenceValueForField(model, field) {
+  const pickerKind = String(field?.referencePickerKind || "").toLowerCase();
+  const wantsObject = pickerKind.endsWith("-object");
+  return wantsObject ? model.objectReference : model.assetReference;
+}
+
+function getCompatibleModelOptionsForField(field) {
+  const pickerKind = String(field?.referencePickerKind || "").toLowerCase();
+  const wantsSkeletal = pickerKind.includes("skeletal");
+  const wantsStatic = pickerKind.includes("static");
+  return (state.modding.customVisualModels || []).filter((model) => {
+    const kind = String(model.kind || "").toLowerCase();
+    if (wantsSkeletal) {
+      return kind === "skeletal-mesh";
+    }
+    if (wantsStatic) {
+      return kind === "static-mesh";
+    }
+    return kind === "static-mesh" || kind === "skeletal-mesh";
+  });
+}
+
+function getModelFitNumber(id, fallback = 0) {
+  const value = Number(el(id)?.value ?? fallback);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function syncModelTargetLongestSlider(source = "number") {
+  const number = el("modelTargetLongestCm");
+  const slider = el("modelTargetLongestSlider");
+  if (!number || !slider) {
+    return;
+  }
+
+  if (source === "slider") {
+    number.value = slider.value;
+    return;
+  }
+
+  const value = Math.max(Number(slider.min || 30), Math.min(Number(slider.max || 3000), getModelFitNumber("modelTargetLongestCm", 950)));
+  slider.value = String(Math.round(value / 10) * 10);
+}
+
+const vehicleAdapterDefaults = {
+  vehicleCollisionMode: "visual-query",
+  vehicleQueryProxyLength: 96,
+  vehicleQueryProxyWidth: 88,
+  vehicleQueryProxyHeight: 92,
+  vehicleSeatOffsetX: 0,
+  vehicleSeatOffsetY: -12,
+  vehicleSeatOffsetZ: 0,
+  vehiclePassengerSeatOffsetX: 0,
+  vehiclePassengerSeatOffsetY: -12,
+  vehiclePassengerSeatOffsetZ: -5,
+  vehicleEntryOffsetX: -60,
+  vehicleEntryOffsetY: 100,
+  vehicleEntryOffsetZ: 125
+};
+
+function setUntouchedControlValue(id, value) {
+  const input = el(id);
+  if (!input || input.dataset.userTouched === "1") {
+    return;
+  }
+
+  input.value = String(value);
+  input.dataset.adapterDefault = "1";
+}
+
+function syncVehicleAdapterControls(field = null) {
+  const enabled = VEHICLE_ADAPTER_CLIENT_VISIBLE && Boolean(field) && (isVehicleAssetContext() || isVehicleModelReplacementField(field));
+  document.querySelectorAll(".vehicle-adapter-control").forEach((node) => {
+    node.hidden = !enabled;
+  });
+
+  if (!enabled) {
+    return;
+  }
+
+  if (!state.modding.modelTargetLongestTouched) {
+    setUntouchedControlValue("modelTargetLongestCm", inferModelTargetLongestCm(field));
+    syncModelTargetLongestSlider("number");
+  }
+
+  setUntouchedControlValue("modelFitOffsetX", -500);
+  setUntouchedControlValue("modelFitOffsetY", 0);
+  setUntouchedControlValue("modelFitOffsetZ", 70);
+  setUntouchedControlValue("modelFitPitch", 0);
+  setUntouchedControlValue("modelFitYaw", 0);
+  setUntouchedControlValue("modelFitRoll", 0);
+
+  for (const [id, value] of Object.entries(vehicleAdapterDefaults)) {
+    setUntouchedControlValue(id, value);
+  }
+}
+
+function syncWeaponAdapterControls(field = null) {
+  const enabled = Boolean(field) && isWeaponModelReplacementField(field);
+  document.querySelectorAll(".weapon-adapter-control").forEach((node) => {
+    node.hidden = !enabled;
+  });
+
+  if (!enabled) {
+    return;
+  }
+
+  const haystack = getModelReplacementContextText(field);
+  const isTwoHandBlade = haystack.includes("2h")
+    || haystack.includes("katana")
+    || haystack.includes("sword")
+    || haystack.includes("twohand");
+  setUntouchedControlValue("weaponGripAnchorPercent", isTwoHandBlade ? 45 : 55);
+  setUntouchedControlValue("weaponGripDiameterCm", 0);
+  setUntouchedControlValue("weaponGripBackReachCm", isTwoHandBlade ? 32 : 0);
+  setUntouchedControlValue("weaponSecondHandShiftCm", isTwoHandBlade ? 24 : 0);
+}
+
+function isNpcCharacterModelReplacementField(field) {
+  const haystack = getModelReplacementContextText(field);
+  return haystack.includes("npc")
+    || haystack.includes("zombie")
+    || haystack.includes("puppet")
+    || haystack.includes("/characters/zombies")
+    || haystack.includes("/characters/npcs")
+    || haystack.includes("skeletal")
+    || haystack.includes("персонаж")
+    || haystack.includes("зомби");
+}
+
+function isHelmetModelReplacementField(field) {
+  const haystack = getModelReplacementContextText(field);
+  return haystack.includes("helmet")
+    || haystack.includes("headwear")
+    || haystack.includes("upperhead")
+    || haystack.includes("голов")
+    || haystack.includes("шлем");
+}
+
+function isArmorModelReplacementField(field) {
+  const haystack = getModelReplacementContextText(field);
+  if (isHelmetModelReplacementField(field)) {
+    return false;
+  }
+
+  return haystack.includes("vests_armor")
+    || haystack.includes("torso_protection")
+    || haystack.includes("armor_tactical")
+    || haystack.includes("armor_police")
+    || haystack.includes("body armor")
+    || haystack.includes("body_armor")
+    || haystack.includes("armored")
+    || haystack.includes("armoured")
+    || haystack.includes("militarypants")
+    || haystack.includes("underwear_pants")
+    || haystack.includes("jackets_coats")
+    || haystack.includes("gloves")
+    || haystack.includes("footwear")
+    || haystack.includes("boots")
+    || haystack.includes("pants")
+    || haystack.includes("jacket")
+    || haystack.includes("брон")
+    || haystack.includes("жилет")
+    || haystack.includes("куртк")
+    || haystack.includes("штаны")
+    || haystack.includes("перчат")
+    || haystack.includes("ботин");
+}
+
+function isContainerModelReplacementField(field) {
+  const haystack = getModelReplacementContextText(field);
+  return haystack.includes("chest")
+    || haystack.includes("crate")
+    || haystack.includes("container")
+    || haystack.includes("storage")
+    || haystack.includes("wardrobe")
+    || haystack.includes("locker")
+    || haystack.includes("сундук")
+    || haystack.includes("ящик")
+    || haystack.includes("контейнер");
+}
+
+function isTwoHandMeleeModelReplacementField(field) {
+  const haystack = getModelReplacementContextText(field);
+  return haystack.includes("2h")
+    || haystack.includes("katana")
+    || haystack.includes("sword")
+    || haystack.includes("twohand")
+    || haystack.includes("двуруч");
+}
+
+function inferModelCookProfile(field = null) {
+  if (!field) {
+    return "generic";
+  }
+  if (isVehicleModelReplacementField(field)) {
+    return "vehicle";
+  }
+  if (isTwoHandMeleeModelReplacementField(field)) {
+    return "two-hand-melee";
+  }
+  if (isWeaponModelReplacementField(field)) {
+    return "weapon";
+  }
+  if (isHelmetModelReplacementField(field)) {
+    return "helmet";
+  }
+  if (isArmorModelReplacementField(field)) {
+    return "armor";
+  }
+  if (isNpcCharacterModelReplacementField(field)) {
+    return "npc";
+  }
+  if (isContainerModelReplacementField(field)) {
+    return "container";
+  }
+  return "generic";
+}
+
+function setModelControlValue(id, value, markTouched = true) {
+  const input = el(id);
+  if (!input) {
+    return;
+  }
+  input.value = String(value);
+  if (markTouched) {
+    input.dataset.userTouched = "1";
+  }
+}
+
+function setModelMaterialModeValue(mode, markTouched = true) {
+  const select = el("modelMaterialMode");
+  if (!select) {
+    return;
+  }
+  select.value = mode;
+  if (markTouched) {
+    select.dataset.userTouched = "1";
+  }
+  syncModelMaterialControls();
+}
+
+function applyModelCookProfile(profile, options = {}) {
+  const markTouched = options.markTouched !== false;
+  const field = getSelectedModelReplacementField();
+  const resolved = profile === "auto" ? inferModelCookProfile(field) : profile;
+  state.modding.modelProfilePreset = profile;
+  state.modding.modelTargetLongestTouched = markTouched;
+
+  const setNumber = (id, value) => setModelControlValue(id, value, markTouched);
+  switch (resolved) {
+    case "two-hand-melee":
+      setNumber("modelTargetLongestCm", 115);
+      setNumber("modelTriangleBudget", 0);
+      setNumber("modelFitScale", 100);
+      setNumber("modelFitOffsetX", 0);
+      setNumber("modelFitOffsetY", 0);
+      setNumber("modelFitOffsetZ", 0);
+      setNumber("modelFitPitch", 0);
+      setNumber("modelFitYaw", 0);
+      setNumber("modelFitRoll", 0);
+      setNumber("weaponGripAnchorPercent", 45);
+      setNumber("weaponGripDiameterCm", 0);
+      setNumber("weaponGripBackReachCm", 32);
+      setNumber("weaponSecondHandShiftCm", 24);
+      setModelMaterialModeValue("model", markTouched);
+      break;
+    case "helmet":
+      setNumber("modelTargetLongestCm", 32);
+      setNumber("modelTriangleBudget", 0);
+      setNumber("modelFitScale", 100);
+      setNumber("modelFitOffsetX", 0);
+      setNumber("modelFitOffsetY", 0);
+      setNumber("modelFitOffsetZ", 0);
+      setNumber("modelFitPitch", 0);
+      setNumber("modelFitYaw", 0);
+      setNumber("modelFitRoll", 0);
+      setModelMaterialModeValue("model", markTouched);
+      break;
+    case "armor":
+      setNumber("modelTargetLongestCm", 85);
+      setNumber("modelTriangleBudget", 10000);
+      setNumber("modelFitScale", 100);
+      setNumber("modelFitOffsetX", 0);
+      setNumber("modelFitOffsetY", 0);
+      setNumber("modelFitOffsetZ", 0);
+      setNumber("modelFitPitch", 0);
+      setNumber("modelFitYaw", 0);
+      setNumber("modelFitRoll", 0);
+      setModelMaterialModeValue("model", markTouched);
+      break;
+    case "npc":
+      setNumber("modelTargetLongestCm", 180);
+      setNumber("modelTriangleBudget", 12000);
+      setNumber("modelFitScale", 100);
+      setNumber("modelFitOffsetX", 0);
+      setNumber("modelFitOffsetY", 0);
+      setNumber("modelFitOffsetZ", 0);
+      setNumber("modelFitPitch", 0);
+      setNumber("modelFitYaw", 0);
+      setNumber("modelFitRoll", 0);
+      setModelMaterialModeValue("custom", markTouched);
+      setNumber("modelPaintStrength", 100);
+      setNumber("modelPaintMetallic", 0);
+      setNumber("modelPaintRoughness", 62);
+      break;
+    case "container":
+      setNumber("modelTargetLongestCm", 120);
+      setNumber("modelTriangleBudget", 5000);
+      setNumber("modelFitScale", 100);
+      setNumber("modelFitOffsetX", 0);
+      setNumber("modelFitOffsetY", 0);
+      setNumber("modelFitOffsetZ", 0);
+      setNumber("modelFitPitch", 0);
+      setNumber("modelFitYaw", 0);
+      setNumber("modelFitRoll", 0);
+      setModelMaterialModeValue("model", markTouched);
+      break;
+    case "vehicle":
+      setNumber("modelTargetLongestCm", 420);
+      setNumber("modelTriangleBudget", 8000);
+      setModelMaterialModeValue("game", markTouched);
+      break;
+    default:
+      setNumber("modelTargetLongestCm", inferModelTargetLongestCm(field));
+      setNumber("modelTriangleBudget", inferRawModelTriangleBudget(field, selectedRawModelImport()));
+      setModelMaterialModeValue("model", markTouched);
+      break;
+  }
+
+  syncModelTargetLongestSlider("number");
+  syncWeaponAdapterControls(field);
+  syncVehicleAdapterControls(field);
+  syncModelCookProfileControls(field);
+}
+
+function syncModelCookProfileControls(field = null) {
+  const rawModel = selectedRawModelImport();
+  const inferredProfile = inferModelCookProfile(field);
+  const activeProfile = state.modding.modelProfilePreset === "auto"
+    ? inferredProfile
+    : state.modding.modelProfilePreset;
+
+  document.querySelectorAll(".model-profile-btn").forEach((button) => {
+    const profile = button.dataset.modelProfile || "";
+    const isActive = profile === state.modding.modelProfilePreset
+      || (profile !== "auto" && state.modding.modelProfilePreset === "auto" && profile === inferredProfile);
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
+
+  const budgetInput = el("modelTriangleBudget");
+  if (budgetInput && budgetInput.dataset.userTouched !== "1") {
+    budgetInput.value = String(inferRawModelTriangleBudget(field, rawModel));
+  }
+
+  const summary = el("modelCookSummary");
+  if (!summary) {
+    return;
+  }
+
+  const budget = getModelFitNumber("modelTriangleBudget", inferRawModelTriangleBudget(field, rawModel));
+  const materialMode = getModelMaterialMode();
+  const profileName = {
+    "two-hand-melee": "двуручный меч",
+    weapon: "оружие",
+    helmet: "шлем",
+    armor: "броня / одежда",
+    npc: "NPC / зомби",
+    container: "контейнер",
+    vehicle: "транспорт",
+    generic: "универсальный"
+  }[activeProfile] || "универсальный";
+  const materialText = materialMode === "custom"
+    ? "ручная окраска"
+    : materialMode === "game"
+      ? "материал из игры"
+      : "материалы модели";
+  const budgetText = budget > 0 ? `лимит ${budget.toLocaleString("ru-RU")} треугольников` : "оптимизация по необходимости";
+  summary.textContent = `Профиль: ${profileName}. Размер: ${getModelFitNumber("modelTargetLongestCm", inferModelTargetLongestCm(field))} см. Материал: ${materialText}. Геометрия: ${budgetText}.`;
+  renderModelGuidancePanel(field, activeProfile, rawModel, cookedCount);
+  renderModelWorkflowSteps(field);
+}
+
+function renderModelGuidancePanel(field = null, profile = "generic", rawModel = null, cookedCount = 0) {
+  const host = el("modelGuidancePanel");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "model-guidance-title";
+  const body = document.createElement("div");
+  body.className = "model-guidance-body";
+
+  const profileText = {
+    "two-hand-melee": {
+      title: "Двуручный меч",
+      body: "Программа ищет реальную рукоять, ставит Grip на неё, сохраняет двухручные HandsCorrections катаны и двигает всю модель к поддерживающей руке без растяжения текстур."
+    },
+    weapon: {
+      title: "Оружие",
+      body: "Сохраняются игровые поля хвата, сокетов, анимаций и крепления. Raw-модель подгоняется вокруг точки удержания, чтобы игра продолжала использовать родной weapon contract."
+    },
+    helmet: {
+      title: "Шлем",
+      body: "Подгонка идёт под UpperHeadSocket и safe worn mesh fields. Внутренний HeadWear component не трогается, чтобы предмет можно было поднимать и надевать."
+    },
+    armor: {
+      title: "Броня и одежда",
+      body: "Комплект можно разложить по слотам: шлем, торс, руки, ноги, ботинки. Программа подбирает части raw-модели и готовит их с запасом поверх тела."
+    },
+    npc: {
+      title: "NPC / зомби",
+      body: "Raw-модель готовится как SkeletalMesh под skeleton/physics цели. Для интернет-моделей включается упрощение и безопасная окраска, чтобы cook не терял материалы и не ломал анимации."
+    },
+    container: {
+      title: "Контейнер или предмет мира",
+      body: "Pivot и размер подгоняются под grounded/world placement, чтобы модель стояла на земле и сохраняла игровые коллизии/интеракции цели."
+    },
+    vehicle: {
+      title: "Транспорт",
+      body: "Для транспорта используется отдельный contract: visual, query/collision, seats, entry points и sockets должны оставаться согласованными с оригиналом."
+    },
+    generic: {
+      title: "Универсальная модель",
+      body: "Сначала программа безопасно подставляет visual mesh и сохраняет игровые поля цели. Тонкую подгонку открывай только если модель заметно смещена в игре."
+    }
+  }[profile] || {
+    title: "Универсальная модель",
+    body: "Сначала программа безопасно подставляет visual mesh и сохраняет игровые поля цели."
+  };
+
+  title.textContent = profileText.title;
+  const next = !field
+    ? "Выбери игровую систему и visual-поле."
+    : rawModel
+      ? "Нажми «Подготовить в UE4», затем программа сама подставит cooked asset."
+      : cookedCount > 0
+        ? "Выбери cooked-модель и нажми «Подставить модель»."
+        : "Загрузи FBX, OBJ, GLTF, DAE, BLEND или ZIP с моделью.";
+  body.textContent = `${profileText.body} Следующий шаг: ${next}`;
+
+  host.append(title, body);
+}
+
+function renderModelWorkflowSteps(field = null) {
+  const host = el("modelWorkflowSteps");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  const rawModel = selectedRawModelImport();
+  const cookedCount = getCompatibleModelOptionsForField(field).length;
+  const stagedCount = state.modding.stagedByAssetId.size;
+  const steps = [
+    {
+      title: field ? "Цель выбрана" : "Выбери цель",
+      note: field ? field.label || field.fieldPath || "visual field" : "Слот предмета или персонажа",
+      ready: Boolean(field),
+      active: !field
+    },
+    {
+      title: rawModel ? "Raw-модель загружена" : cookedCount ? "Cooked-модель готова" : "Загрузи модель",
+      note: rawModel?.name || (cookedCount ? `${cookedCount} cooked assets` : "FBX / OBJ / GLTF / DAE / ZIP"),
+      ready: Boolean(rawModel || cookedCount),
+      active: Boolean(field) && !rawModel && !cookedCount
+    },
+    {
+      title: stagedCount ? "Правки в моде" : "Подготовь и собери",
+      note: stagedCount ? `${stagedCount} ассетов в очереди` : "Cook / staged edits / PAK",
+      ready: stagedCount > 0,
+      active: Boolean(field) && Boolean(rawModel || cookedCount) && stagedCount === 0
+    }
+  ];
+
+  for (const step of steps) {
+    const node = document.createElement("div");
+    node.className = "model-workflow-step";
+    node.classList.toggle("is-ready", step.ready);
+    node.classList.toggle("is-active", step.active);
+
+    const title = document.createElement("div");
+    title.className = "model-workflow-step-title";
+    title.textContent = step.title;
+    node.appendChild(title);
+
+    const note = document.createElement("div");
+    note.className = "model-workflow-step-note";
+    note.textContent = step.note;
+    note.title = step.note;
+    node.appendChild(note);
+
+    host.appendChild(node);
+  }
+
+  renderStudioFlowBar();
+}
+
+function renderStudioFlowBar() {
+  const host = el("studioFlowBar");
+  if (!host) {
+    return;
+  }
+
+  const selectedAsset = state.modding.selectedAsset || selectedAssetFromCurrentPage();
+  const rawCount = Array.isArray(state.modding.rawModelImports) ? state.modding.rawModelImports.length : 0;
+  const cookedCount = Array.isArray(state.modding.customVisualModels) ? state.modding.customVisualModels.length : 0;
+  const stagedCount = state.modding.stagedByAssetId.size;
+  const pakReady = state.status?.unrealPakFound !== false;
+  const modelReady = rawCount + cookedCount > 0;
+  const steps = [
+    {
+      label: "Система",
+      value: selectedAsset?.displayName || "не выбрана",
+      ready: Boolean(selectedAsset),
+      active: !selectedAsset
+    },
+    {
+      label: "Модель",
+      value: modelReady
+        ? `${rawCount} raw / ${cookedCount} cooked`
+        : "ожидает файл",
+      ready: modelReady,
+      active: Boolean(selectedAsset) && !modelReady
+    },
+    {
+      label: "Изменения",
+      value: stagedCount > 0 ? `${stagedCount} в моде` : "пусто",
+      ready: stagedCount > 0,
+      active: Boolean(selectedAsset) && modelReady && stagedCount === 0
+    },
+    {
+      label: "PAK",
+      value: stagedCount > 0 && pakReady ? "готов к сборке" : pakReady ? "после изменений" : "нет UnrealPak",
+      ready: stagedCount > 0 && pakReady,
+      active: stagedCount > 0 && pakReady
+    }
+  ];
+
+  host.innerHTML = "";
+  for (const step of steps) {
+    const item = document.createElement("div");
+    item.className = "studio-flow-step";
+    item.classList.toggle("is-ready", step.ready);
+    item.classList.toggle("is-active", step.active);
+
+    const label = document.createElement("div");
+    label.className = "studio-flow-label";
+    label.textContent = step.label;
+
+    const value = document.createElement("div");
+    value.className = "studio-flow-value";
+    value.textContent = step.value;
+    value.title = step.value;
+
+    item.append(label, value);
+    host.appendChild(item);
+  }
+}
+
+function inferModelTargetLongestCm(field = null) {
+  const haystack = [
+    state.modding.selectedAssetId,
+    state.modding.selectedAsset?.relativePath,
+    state.modding.currentSchema?.relativePath,
+    field?.label,
+    field?.section,
+    field?.currentValue
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  if (haystack.includes("airplane")
+    || haystack.includes("/planes/")
+    || haystack.includes("/plane_")
+    || haystack.includes("aircraft")
+    || haystack.includes("duster")
+    || haystack.includes("kinglet")) {
+    return 1800;
+  }
+  if (haystack.includes("vehicle") || haystack.includes("/vehicles/") || haystack.includes("transport")) {
+    return 420;
+  }
+  if (haystack.includes("basebuilding")
+    || haystack.includes("fortification")
+    || haystack.includes("building")
+    || haystack.includes("structure")
+    || haystack.includes("wall")
+    || haystack.includes("floor")
+    || haystack.includes("door")
+    || haystack.includes("gate")) {
+    return 300;
+  }
+  if (haystack.includes("chest")
+    || haystack.includes("crate")
+    || haystack.includes("container")
+    || haystack.includes("storage")
+    || haystack.includes("wardrobe")
+    || haystack.includes("locker")
+    || haystack.includes("сундук")
+    || haystack.includes("ящик")
+    || haystack.includes("контейнер")) {
+    return 120;
+  }
+  if (haystack.includes("weapon")
+    || haystack.includes("/weapons/")
+    || haystack.includes("new_melee")
+    || haystack.includes("melee")
+    || haystack.includes("katana")
+    || haystack.includes("machete")
+    || haystack.includes("knife")
+    || haystack.includes("sword")
+    || haystack.includes("ranged_weapons")
+    || haystack.includes("shotgun")
+    || haystack.includes("rifle")
+    || haystack.includes("pistol")
+    || haystack.includes("оруж")) {
+    if (haystack.includes("katana")
+      || haystack.includes("sword")
+      || haystack.includes("2h_")
+      || haystack.includes("twohand")) {
+      return 115;
+    }
+    if (haystack.includes("machete")
+      || haystack.includes("knife")
+      || haystack.includes("1h_")) {
+      return 80;
+    }
+    if (haystack.includes("sawed")
+      || haystack.includes("short")
+      || haystack.includes("обрез")) {
+      return 65;
+    }
+    return 95;
+  }
+  if (haystack.includes("clothing")
+    || haystack.includes("clothes")
+    || haystack.includes("armor")
+    || haystack.includes("vests_armor")
+    || haystack.includes("torso_protection")
+    || haystack.includes("underwear_pants")
+    || haystack.includes("jackets_coats")
+    || haystack.includes("gloves")
+    || haystack.includes("footwear")
+    || haystack.includes("backpack")
+    || haystack.includes("рюкзак")) {
+    return isArmorModelReplacementField(field) ? 85 : 75;
+  }
+  if (haystack.includes("npc")
+    || haystack.includes("zombie")
+    || haystack.includes("puppet")
+    || haystack.includes("/characters/zombies")
+    || haystack.includes("/characters/npcs")
+    || haystack.includes("персонаж")
+    || haystack.includes("зомби")) {
+    return 180;
+  }
+  return getModelKindForReplacementField(field) === "skeletal-mesh" ? 100 : 150;
+}
+
+function inferRawModelTriangleBudget(field = null, rawModel = null) {
+  const parts = Array.isArray(rawModel?.parts) ? rawModel.parts : [];
+  const knownTriangles = parts.reduce((sum, part) => sum + Number(part.triangles || 0), 0);
+  const haystack = [
+    state.modding.selectedAssetId,
+    state.modding.selectedAsset?.relativePath,
+    state.modding.currentSchema?.relativePath,
+    field?.label,
+    field?.section,
+    field?.currentValue
+  ].filter(Boolean).join(" ").replace(/\\/g, "/").toLowerCase();
+
+  if (getModelKindForReplacementField(field) === "skeletal-mesh") {
+    if (isArmorModelReplacementField(field)) {
+      const budget = 10000;
+      return knownTriangles > budget || knownTriangles === 0 ? budget : 0;
+    }
+    if (isNpcCharacterModelReplacementField(field)) {
+      const budget = 12000;
+      return knownTriangles > budget || knownTriangles === 0 ? budget : 0;
+    }
+    return 0;
+  }
+
+  let budget = 6000;
+  if (haystack.includes("airplane")
+    || haystack.includes("vehicle")
+    || haystack.includes("/vehicles/")
+    || haystack.includes("duster")
+    || haystack.includes("kinglet")) {
+    budget = 8000;
+  } else if (haystack.includes("building")
+    || haystack.includes("structure")
+    || haystack.includes("basebuilding")
+    || haystack.includes("wall")
+    || haystack.includes("gate")) {
+    budget = 14000;
+  } else if (haystack.includes("chest")
+    || haystack.includes("crate")
+    || haystack.includes("container")
+    || haystack.includes("storage")) {
+    budget = 5000;
+  } else if (haystack.includes("item")
+    || haystack.includes("gameresources")
+    || haystack.includes("loot")) {
+    budget = 3500;
+  }
+
+  return knownTriangles > budget ? budget : 0;
+}
+
+function setModelFitNumber(id, value) {
+  const input = el(id);
+  if (!input) {
+    return;
+  }
+
+  input.value = String(Number.isFinite(Number(value)) ? value : 0);
+}
+
+function resetModelCookTouchedControls() {
+  [
+    "modelTargetLongestCm",
+    "modelTriangleBudget",
+    "modelFitScale",
+    "modelFitOffsetX",
+    "modelFitOffsetY",
+    "modelFitOffsetZ",
+    "modelFitPitch",
+    "modelFitYaw",
+    "modelFitRoll",
+    "weaponGripAnchorPercent",
+    "weaponGripDiameterCm",
+    "weaponGripBackReachCm",
+    "weaponSecondHandShiftCm",
+    "modelPaintStrength",
+    "modelPaintMetallic",
+    "modelPaintRoughness",
+    "modelMaterialMode"
+  ].forEach((id) => {
+    const input = el(id);
+    if (input) {
+      delete input.dataset.userTouched;
+    }
+  });
+  state.modding.modelTargetLongestTouched = false;
+}
+
+function getModelMaterialMode() {
+  return el("modelMaterialMode")?.value || "model";
+}
+
+function syncModelMaterialControls() {
+  const mode = getModelMaterialMode();
+  const referenceControls = el("modelMaterialReferenceControls");
+  const referenceSearch = el("modelMaterialSearch");
+  const referenceSelect = el("modelMaterialReference");
+  const paintColor = el("modelPaintColor");
+  const paintStrength = el("modelPaintStrength");
+  const paintMetallic = el("modelPaintMetallic");
+  const paintRoughness = el("modelPaintRoughness");
+  const useReference = mode === "game";
+  const useCustomPaint = mode === "custom";
+
+  if (referenceControls) {
+    referenceControls.hidden = !useReference;
+  }
+  if (referenceSearch) {
+    referenceSearch.disabled = !useReference;
+    referenceSearch.placeholder = isVehicleModelReplacementField(getSelectedModelReplacementField())
+      ? "Например: MI_Plane_01_Body_A, cockpit, glass"
+      : "Например: MI_M1887, wood, metal";
+  }
+  if (referenceSelect) {
+    referenceSelect.disabled = !useReference;
+  }
+
+  for (const input of [paintColor, paintStrength, paintMetallic, paintRoughness]) {
+    if (input) {
+      input.disabled = !useCustomPaint;
+    }
+  }
+}
+
+function queueModelMaterialReferenceRefresh() {
+  window.clearTimeout(modelMaterialSearchDebounce);
+  modelMaterialSearchDebounce = window.setTimeout(() => {
+    refreshModelMaterialReferenceOptions().catch(showError);
+  }, 280);
+}
+
+async function refreshModelMaterialReferenceOptions() {
+  const select = el("modelMaterialReference");
+  const search = el("modelMaterialSearch");
+  if (!select || !search || getModelMaterialMode() !== "game") {
+    return;
+  }
+
+  const term = search.value.trim();
+  select.innerHTML = "";
+  if (term.length < 2) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Введи минимум 2 символа для поиска .mi/material";
+    select.appendChild(option);
+    return;
+  }
+
+  const token = ++modelMaterialOptionsToken;
+  const loading = document.createElement("option");
+  loading.value = "";
+  loading.textContent = "Ищу материалы в игре и импортированных ассетах...";
+  select.appendChild(loading);
+
+  const options = await api(`/api/modding/reference-options?pickerKind=visual-material-object&term=${encodeURIComponent(term)}&limit=40`);
+  if (token !== modelMaterialOptionsToken || getModelMaterialMode() !== "game") {
+    return;
+  }
+
+  select.innerHTML = "";
+  const items = Array.isArray(options) ? options : [];
+  if (!items.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Материалы не найдены";
+    select.appendChild(option);
+    return;
+  }
+
+  for (const item of items) {
+    const option = document.createElement("option");
+    option.value = item.value || "";
+    option.textContent = item.label || item.value || "material";
+    select.appendChild(option);
+  }
+}
+
+function getModelFitFields() {
+  const schema = state.modding.currentSchema;
+  const fields = Array.isArray(schema?.fields) ? schema.fields : [];
+  const findField = (...tokens) => fields.find((field) => {
+    const label = String(field.label || "").toLowerCase();
+    return field.editable !== false && tokens.every((token) => label.includes(token));
+  }) || null;
+
+  return {
+    offsetX: findField("смещение крепления", "позиция x"),
+    offsetY: findField("смещение крепления", "позиция y"),
+    offsetZ: findField("смещение крепления", "позиция z"),
+    pitch: findField("смещение крепления", "pitch"),
+    yaw: findField("смещение крепления", "yaw"),
+    roll: findField("смещение крепления", "roll"),
+    scale: findField("масштаб") || findField("scale")
+  };
+}
+
+function seedModelFitControlsFromSchema() {
+  const fitFields = getModelFitFields();
+  const pairs = [
+    ["modelFitOffsetX", fitFields.offsetX],
+    ["modelFitOffsetY", fitFields.offsetY],
+    ["modelFitOffsetZ", fitFields.offsetZ],
+    ["modelFitPitch", fitFields.pitch],
+    ["modelFitYaw", fitFields.yaw],
+    ["modelFitRoll", fitFields.roll]
+  ];
+
+  for (const [id, field] of pairs) {
+    if (!field) {
+      continue;
+    }
+
+    const currentValue = state.modding.currentFieldValues.get(field.fieldPath) ?? field.currentValue ?? "0";
+    setModelFitNumber(id, currentValue);
+  }
+
+  const targetInput = el("modelTargetLongestCm");
+  const replacementField = getSelectedModelReplacementField();
+  if (targetInput && (!state.modding.modelTargetLongestTouched || !targetInput.value)) {
+    targetInput.value = String(inferModelTargetLongestCm(replacementField));
+  }
+  syncModelTargetLongestSlider("number");
+  syncVehicleAdapterControls(replacementField);
+  syncWeaponAdapterControls(replacementField);
+}
+
+function applyModelFitField(field, value, changedLabels) {
+  if (!field) {
+    return;
+  }
+
+  const formatted = String(Number(value).toFixed(3)).replace(/\.?0+$/, "");
+  setCurrentFieldValue(field.fieldPath, formatted, {
+    displayValue: formatted,
+    renderScene: false
+  });
+  changedLabels.push(field.label);
+}
+
+function setModelReplacementStatus(text, isError = false) {
+  const host = el("modelReplacementStatus");
+  if (!host) {
+    return;
+  }
+
+  host.textContent = text || "";
+  host.classList.toggle("status-error", Boolean(isError));
+}
+
+function populateModelReplacementAssets(field) {
+  const modelSelect = el("modelReplacementAsset");
+  if (!modelSelect) {
+    return [];
+  }
+
+  const models = getCompatibleModelOptionsForField(field);
+  modelSelect.innerHTML = "";
+  for (const model of models) {
+    const option = document.createElement("option");
+    option.value = model.targetRelativePath;
+    option.textContent = `${formatCustomVisualKind(model.kind)}: ${model.name}`;
+    modelSelect.appendChild(option);
+  }
+
+  return models;
+}
+
+function getSelectedModelReplacementField() {
+  const fieldSelect = el("modelReplacementField");
+  const fields = getModelReplacementFields();
+  return fields.find((field) => field.fieldPath === fieldSelect?.value) || fields[0] || null;
+}
+
+function getModelKindForReplacementField(field) {
+  const pickerKind = String(field?.referencePickerKind || "").toLowerCase();
+  return pickerKind.includes("skeletal") ? "skeletal-mesh" : "static-mesh";
+}
+
+function populateRawModelCookControls(field) {
+  const host = el("rawModelCookControls");
+  const select = el("rawModelCookSource");
+  const button = el("rawModelCookBtn");
+  const vehicleFullButton = el("vehicleFullReplacementBtn");
+  if (!host || !select || !button) {
+    return;
+  }
+
+  const rawModels = state.modding.rawModelImports || [];
+  host.hidden = rawModels.length === 0 || !field;
+  const previousValue = select.value;
+  select.innerHTML = "";
+  for (const model of rawModels) {
+    const option = document.createElement("option");
+    option.value = model.sourceRelativePath || "";
+    const bounds = formatModelBounds(model.bounds);
+    option.textContent = bounds
+      ? `${model.format || "MODEL"}: ${model.name} (${bounds})`
+      : `${model.format || "MODEL"}: ${model.name}`;
+    select.appendChild(option);
+  }
+  if (rawModels.some((model) => model.sourceRelativePath === previousValue)) {
+    select.value = previousValue;
+  }
+
+  const vehicleIssue = getVehicleModelReplacementIssue(field, { rawCook: true });
+  button.disabled = rawModels.length === 0 || !field || Boolean(vehicleIssue);
+  button.title = vehicleIssue || "Программа сама запустит Blender/UE4.27 в фоне и добавит cooked asset в список моделей.";
+  if (vehicleFullButton) {
+    const showVehicleFull = VEHICLE_ADAPTER_CLIENT_VISIBLE && rawModels.length > 0 && field && isVehicleAssetContext();
+    vehicleFullButton.hidden = !showVehicleFull;
+    vehicleFullButton.disabled = !showVehicleFull || state.modding.vehicleFullReplacementCooking;
+    vehicleFullButton.textContent = state.modding.vehicleFullReplacementCooking
+      ? "Собираю полную замену..."
+      : "Полная замена транспорта";
+    vehicleFullButton.title = "Оставляет оригинальную физику транспорта, готовит новую модель как visual overlay, глушит старые визуальные attachment-модули и сразу собирает/ставит pak.";
+  }
+  syncModelCookProfileControls(field);
+  renderRawModelAnalysisPanel();
+}
+
+async function cookVehicleFullReplacementForCurrentSelection() {
+  if (!VEHICLE_ADAPTER_CLIENT_VISIBLE) {
+    setModelReplacementStatus("Замена моделей техники временно скрыта: vehicle adapter оставлен только для внутренней доработки.", true);
+    return;
+  }
+
+  const select = el("rawModelCookSource");
+  const rawModel = (state.modding.rawModelImports || [])
+    .find((model) => model.sourceRelativePath === select?.value);
+  if (!state.modding.selectedAssetId || !rawModel?.sourceRelativePath || !isVehicleAssetContext()) {
+    setModelReplacementStatus("Выбери транспортный ассет SCUM и загруженную raw-модель.", true);
+    return;
+  }
+
+  state.modding.vehicleFullReplacementCooking = true;
+  populateRawModelCookControls(getSelectedModelReplacementField());
+  setModelReplacementStatus("Готовлю полную замену транспорта: visual overlay, оригинальный physics contract, tiny suppressors, сборка pak и установка в SCUM. Это может занять несколько минут...");
+
+  try {
+    const materialMode = getModelMaterialMode();
+    const materialReference = materialMode === "game"
+      ? (el("modelMaterialReference")?.value || "")
+      : "";
+    const payload = {
+      assetId: state.modding.selectedAssetId,
+      rawSourceRelativePath: rawModel.sourceRelativePath,
+      installToGame: true,
+      modName: "valkyrie_duster_full_replacement",
+      targetLongestCm: getModelFitNumber("modelTargetLongestCm", 1800),
+      targetTriangleCount: getModelFitNumber("modelTriangleBudget", inferRawModelTriangleBudget(getSelectedModelReplacementField(), rawModel)) || 45000,
+      materialMode,
+      materialReference,
+      scalePercent: getModelFitNumber("modelFitScale", 100),
+      offsetX: getModelFitNumber("modelFitOffsetX", -500),
+      offsetY: getModelFitNumber("modelFitOffsetY", 0),
+      offsetZ: getModelFitNumber("modelFitOffsetZ", 70),
+      pitch: getModelFitNumber("modelFitPitch", 0),
+      yaw: getModelFitNumber("modelFitYaw", 0),
+      roll: getModelFitNumber("modelFitRoll", 0),
+      paintColorHex: el("modelPaintColor")?.value || "#ffffff",
+      paintStrengthPercent: materialMode === "custom" ? getModelFitNumber("modelPaintStrength", 0) : 0,
+      metallicPercent: getModelFitNumber("modelPaintMetallic", 0),
+      roughnessPercent: getModelFitNumber("modelPaintRoughness", 50),
+      collisionMode: el("vehicleCollisionMode")?.value || "visual-query",
+      queryProxyLengthPercent: getModelFitNumber("vehicleQueryProxyLength", 96),
+      queryProxyWidthPercent: getModelFitNumber("vehicleQueryProxyWidth", 88),
+      queryProxyHeightPercent: getModelFitNumber("vehicleQueryProxyHeight", 92),
+      seatOffsetX: getModelFitNumber("vehicleSeatOffsetX", 0),
+      seatOffsetY: getModelFitNumber("vehicleSeatOffsetY", -12),
+      seatOffsetZ: getModelFitNumber("vehicleSeatOffsetZ", 0),
+      passengerSeatOffsetX: getModelFitNumber("vehiclePassengerSeatOffsetX", 0),
+      passengerSeatOffsetY: getModelFitNumber("vehiclePassengerSeatOffsetY", -12),
+      passengerSeatOffsetZ: getModelFitNumber("vehiclePassengerSeatOffsetZ", -5)
+    };
+    [
+      ["vehicleEntryOffsetX", "entryOffsetX"],
+      ["vehicleEntryOffsetY", "entryOffsetY"],
+      ["vehicleEntryOffsetZ", "entryOffsetZ"]
+    ].forEach(([inputId, payloadKey]) => {
+      const input = el(inputId);
+      if (input?.dataset.userTouched === "1") {
+        payload[payloadKey] = getModelFitNumber(inputId, 0);
+      }
+    });
+
+    const result = await api("/api/modding/vehicle-full-replacement", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    if (result.ok === false) {
+      setModelReplacementStatus(`${result.error || "Полную замену транспорта не удалось собрать."}${warnings.length ? ` ${warnings.slice(0, 5).join(" ")}` : ""}`, true);
+      return;
+    }
+
+    await fetchCustomVisualModels();
+    let stagedCount = 0;
+    for (const edit of result.suggestedEdits || []) {
+      if (stageSuggestedAssetEditFromCook(edit, {
+        targetDisplayName: state.modding.selectedAsset?.displayName || "vehicle full replacement",
+        targetRelativePath: state.modding.selectedAsset?.relativePath || state.modding.selectedAssetId
+      })) {
+        stagedCount += 1;
+      }
+    }
+
+    refreshModelReplacementWizard();
+    const pakPath = result.buildResult?.installedPakPath || result.buildResult?.outputPakPath || "";
+    const suppressors = Array.isArray(result.suppressorCookResults)
+      ? result.suppressorCookResults.filter((item) => item.ok).length
+      : 0;
+    setModelReplacementStatus(`Полная замена транспорта собрана и установлена. Pak: ${pakPath || "готов"}. Staged edits: ${stagedCount}, suppressors: ${suppressors}. ${warnings.slice(0, 4).join(" ")}`);
+  } finally {
+    state.modding.vehicleFullReplacementCooking = false;
+    populateRawModelCookControls(getSelectedModelReplacementField());
+  }
+}
+
+async function cookSelectedRawModelForReplacement() {
+  const select = el("rawModelCookSource");
+  const button = el("rawModelCookBtn");
+  const field = getSelectedModelReplacementField();
+  const rawModel = (state.modding.rawModelImports || [])
+    .find((model) => model.sourceRelativePath === select?.value);
+
+  if (!field || !rawModel) {
+    setModelReplacementStatus("Выбери игровое поле модели и загруженную raw-модель.", true);
+    return;
+  }
+
+  const vehicleIssue = getVehicleModelReplacementIssue(field, { rawCook: true });
+  if (vehicleIssue) {
+    setModelReplacementStatus(vehicleIssue, true);
+    return;
+  }
+
+  const materialMode = getModelMaterialMode();
+  const materialReference = el("modelMaterialReference")?.value || "";
+  if (materialMode === "game" && !materialReference) {
+    setModelReplacementStatus("Для режима «Из игры / импортированный .mi» найди и выбери материал, который нужно привязать к модели.", true);
+    return;
+  }
+
+  setModelReplacementStatus("Готовлю модель: Blender/UE4.27 будут запущены в фоне. Это может занять несколько минут...");
+  if (button) {
+    button.disabled = true;
+  }
+
+  try {
+    const result = await api("/api/custom-visual-assets/cook-raw", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rawSourceRelativePath: rawModel.sourceRelativePath,
+        assetId: state.modding.selectedAssetId,
+        fieldPath: field.fieldPath,
+        modelKind: getModelKindForReplacementField(field),
+        scalePercent: getModelFitNumber("modelFitScale", 100),
+        offsetX: getModelFitNumber("modelFitOffsetX"),
+        offsetY: getModelFitNumber("modelFitOffsetY"),
+        offsetZ: getModelFitNumber("modelFitOffsetZ"),
+        pitch: getModelFitNumber("modelFitPitch"),
+        yaw: getModelFitNumber("modelFitYaw"),
+        roll: getModelFitNumber("modelFitRoll"),
+        autoFitToTarget: el("modelAutoFit")?.checked !== false,
+        targetLongestCm: getModelFitNumber("modelTargetLongestCm", inferModelTargetLongestCm(field)),
+        paintColorHex: el("modelPaintColor")?.value || "#ffffff",
+        paintStrengthPercent: materialMode === "custom" ? getModelFitNumber("modelPaintStrength", 100) : 0,
+        metallicPercent: getModelFitNumber("modelPaintMetallic"),
+        roughnessPercent: getModelFitNumber("modelPaintRoughness", 50),
+        materialMode,
+        materialReference,
+        targetTriangleCount: getModelFitNumber("modelTriangleBudget", inferRawModelTriangleBudget(field, rawModel)),
+        weaponGripAnchorPercent: getModelFitNumber("weaponGripAnchorPercent", 45),
+        weaponGripDiameterCm: getModelFitNumber("weaponGripDiameterCm", 0),
+        weaponGripBackReachCm: getModelFitNumber("weaponGripBackReachCm", 32),
+        weaponSecondHandShiftCm: getModelFitNumber("weaponSecondHandShiftCm", 24)
+      })
+    });
+
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    if (result.ok === false) {
+      const tail = result.unrealLogTail || result.blenderLogTail || "";
+      const tailPreview = tail ? `\n${tail.split("\n").slice(-4).join("\n")}` : "";
+      setModelReplacementStatus(`${result.error || "Не удалось приготовить модель."}${warnings.length ? `\n${warnings.join(" ")}` : ""}${tailPreview}`, true);
+      return;
+    }
+
+    const cookedAssets = Array.isArray(result.assets) ? result.assets : [];
+    await fetchCustomVisualModels();
+    refreshModelReplacementWizard();
+
+    const cooked = cookedAssets[0];
+    const modelSelect = el("modelReplacementAsset");
+    if (cooked?.targetRelativePath && modelSelect) {
+      modelSelect.value = cooked.targetRelativePath;
+      applyModelReplacement();
+      let stageText = "";
+      try {
+        const stagedItem = stageCurrentAssetEdits();
+        stageText = stagedItem
+          ? " Изменение уже добавлено в мод."
+          : " Модель подставлена, но staged-изменений не найдено.";
+      } catch (error) {
+        stageText = " Модель подставлена; если стадия не появилась, нажми «Сохранить изменения в мод».";
+      }
+      const warningText = warnings.length ? ` Предупреждения: ${warnings.join(" ")}` : "";
+      const paintText = materialMode === "custom"
+        ? " Создан UE4-материал с выбранной окраской."
+        : materialMode === "game"
+          ? " Привязан выбранный .mi/material."
+        : "";
+      const fitText = el("modelAutoFit")?.checked !== false
+        ? ` Размер подогнан под ${getModelFitNumber("modelTargetLongestCm", inferModelTargetLongestCm(field))} см.`
+        : "";
+      setModelReplacementStatus(`Raw-модель приготовлена и подставлена в выбранный ассет.${stageText}${fitText}${paintText}${warningText}`);
+    } else {
+      setModelReplacementStatus("Raw-модель приготовлена. Выбери её в списке новых моделей и нажми «Подставить модель».");
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+function refreshModelReplacementWizard() {
+  const host = el("modelReplacementWizard");
+  const fieldSelect = el("modelReplacementField");
+  const applyBtn = el("modelReplacementApplyBtn");
+  if (!host || !fieldSelect || !applyBtn) {
+    return;
+  }
+
+  const fields = getModelReplacementFields();
+  host.hidden = fields.length === 0;
+  if (!fields.length) {
+    setModelReplacementStatus("");
+    renderRawModelAnalysisPanel();
+    syncVehicleAdapterControls(null);
+    syncWeaponAdapterControls(null);
+    return;
+  }
+
+  const previousField = fieldSelect.value;
+  fieldSelect.innerHTML = "";
+  for (const field of fields) {
+    const option = document.createElement("option");
+    option.value = field.fieldPath;
+    option.textContent = `${field.section || "Внешний вид"}: ${field.label}`;
+    fieldSelect.appendChild(option);
+  }
+
+  if (fields.some((field) => field.fieldPath === previousField)) {
+    fieldSelect.value = previousField;
+  }
+
+  const selectedField = fields.find((field) => field.fieldPath === fieldSelect.value) || fields[0];
+  const materialModeSelect = el("modelMaterialMode");
+  syncVehicleAdapterControls(selectedField);
+  syncWeaponAdapterControls(selectedField);
+
+  const models = populateModelReplacementAssets(selectedField);
+  populateRawModelCookControls(selectedField);
+  syncModelMaterialControls();
+  const fitFields = getModelFitFields();
+  const hasRuntimeFit = Boolean(fitFields.offsetX || fitFields.offsetY || fitFields.offsetZ || fitFields.pitch || fitFields.yaw || fitFields.roll || fitFields.scale);
+  const applyIssue = getVehicleModelReplacementIssue(selectedField);
+  const rawCookIssue = getVehicleModelReplacementIssue(selectedField, { rawCook: true });
+  applyBtn.disabled = models.length === 0 || Boolean(applyIssue);
+  if (applyIssue || rawCookIssue) {
+    setModelReplacementStatus(applyIssue || rawCookIssue, true);
+  } else if (!models.length) {
+    const rawCount = (state.modding.rawModelImports || []).length;
+    setModelReplacementStatus(rawCount > 0
+      ? "Сырые модели сохранены как заготовки. После конвертации в cooked UE4.27 модель появится в списке."
+      : "Загрузи cooked StaticMesh/SkeletalMesh .uasset с companion .uexp, затем выбери его здесь.", false);
+  } else {
+    setModelReplacementStatus(hasRuntimeFit
+      ? `Доступно пользовательских моделей: ${models.length}. Смещение и поворот можно применить сразу к выбранному ассету.`
+      : `Доступно пользовательских моделей: ${models.length}. Масштаб будет использоваться на этапе подготовки/cook модели.`);
+  }
+}
+
+async function refreshModelReplacementModels() {
+  setModelReplacementStatus("Обновляю список пользовательских моделей...");
+  await fetchCustomVisualModels();
+  refreshModelReplacementWizard();
+}
+
+function applyModelReplacement() {
+  const modelSelect = el("modelReplacementAsset");
+  const field = getSelectedModelReplacementField();
+  const model = (state.modding.customVisualModels || [])
+    .find((x) => x.targetRelativePath === modelSelect?.value);
+
+  if (!field || !model) {
+    setModelReplacementStatus("Выбери поле предмета и cooked модель.", true);
+    return;
+  }
+
+  const vehicleIssue = getVehicleModelReplacementIssue(field);
+  if (vehicleIssue) {
+    setModelReplacementStatus(vehicleIssue, true);
+    return;
+  }
+
+  const value = getModelReferenceValueForField(model, field);
+  if (!value) {
+    setModelReplacementStatus("У выбранной модели нет подходящей ссылки для этого поля.", true);
+    return;
+  }
+
+  const displayValue = `Пользовательский ассет: ${model.name}`;
+  setCurrentFieldValue(field.fieldPath, value, {
+    displayValue,
+    renderScene: false
+  });
+
+  const fitFields = getModelFitFields();
+  const changedFitLabels = [];
+  applyModelFitField(fitFields.offsetX, getModelFitNumber("modelFitOffsetX"), changedFitLabels);
+  applyModelFitField(fitFields.offsetY, getModelFitNumber("modelFitOffsetY"), changedFitLabels);
+  applyModelFitField(fitFields.offsetZ, getModelFitNumber("modelFitOffsetZ"), changedFitLabels);
+  applyModelFitField(fitFields.pitch, getModelFitNumber("modelFitPitch"), changedFitLabels);
+  applyModelFitField(fitFields.yaw, getModelFitNumber("modelFitYaw"), changedFitLabels);
+  applyModelFitField(fitFields.roll, getModelFitNumber("modelFitRoll"), changedFitLabels);
+
+  const scalePercent = getModelFitNumber("modelFitScale", 100);
+  if (fitFields.scale) {
+    applyModelFitField(fitFields.scale, scalePercent / 100, changedFitLabels);
+  }
+
+  renderSchemaFields();
+  refreshModelReplacementWizard();
+  const fitNote = changedFitLabels.length
+    ? `Также применены fit-поля: ${changedFitLabels.length}.`
+    : `Масштаб ${scalePercent}% сохранён как параметр подготовки модели и будет применяться при raw→cooked конвертации.`;
+  setModelReplacementStatus(`Модель подставлена. ${fitNote} Профиль рук, крепления и offsets остаются от выбранного предмета, чтобы новая модель безопасно села в игровую логику.`);
 }
 
 async function loadStatus() {
@@ -1511,6 +3981,100 @@ function renderStatusLine(categoryCount = 0) {
   const buildText = status.buildId || "неизвестно";
   el("statusLine").textContent =
     `SCUM: ${scumText} | Сборка игры: ${buildText} | ${pakText} | Разделов в студии: ${categoryCount}`;
+  renderToolchainStatus(status.toolchain);
+  renderStudioFlowBar();
+}
+
+function renderToolchainStatus(toolchain) {
+  const host = el("toolchainStatus");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  if (!toolchain || !Array.isArray(toolchain.steps)) {
+    return;
+  }
+
+  const summary = document.createElement("span");
+  summary.className = `toolchain-chip ${toolchain.readyForRawModelCook ? "toolchain-chip-ready" : "toolchain-chip-warn"}`;
+  summary.textContent = toolchain.summary || "Проверка модкита";
+  host.appendChild(summary);
+
+  for (const step of toolchain.steps) {
+    const chip = document.createElement("span");
+    chip.className = `toolchain-chip ${step.ready ? "toolchain-chip-ready" : "toolchain-chip-warn"}`;
+    chip.title = step.path ? `${step.description}\n${step.path}` : (step.description || "");
+    chip.textContent = `${step.name}: ${step.status}`;
+    host.appendChild(chip);
+  }
+
+  renderToolchainInstallHelp(toolchain.steps);
+}
+
+function renderToolchainInstallHelp(steps) {
+  const host = el("toolchainInstallHelp");
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = "";
+  const missingSteps = (Array.isArray(steps) ? steps : [])
+    .filter((step) => !step.ready && Array.isArray(step.installSteps) && step.installSteps.length > 0);
+  for (const step of missingSteps) {
+    const details = document.createElement("details");
+    details.className = "toolchain-help-card";
+
+    const summary = document.createElement("summary");
+    summary.textContent = step.installTitle || `Как включить: ${step.name}`;
+    details.appendChild(summary);
+
+    const list = document.createElement("ol");
+    for (const installStep of step.installSteps) {
+      const item = document.createElement("li");
+      item.textContent = installStep;
+      list.appendChild(item);
+    }
+    details.appendChild(list);
+
+    const actions = document.createElement("div");
+    actions.className = "toolchain-help-actions";
+    if (step.actionLabel && step.actionUrl) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.textContent = step.actionLabel;
+      action.addEventListener("click", () => {
+        window.open(step.actionUrl, "_blank", "noopener,noreferrer");
+      });
+      actions.appendChild(action);
+    }
+
+    if (step.actionLabel && !step.actionUrl) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.textContent = step.actionLabel;
+      action.addEventListener("click", () => {
+        api("/api/toolchain/open-tools-folder", { method: "POST" }).catch(showError);
+      });
+      actions.appendChild(action);
+    }
+
+    if (step.id !== "pak-build") {
+      const openTools = document.createElement("button");
+      openTools.type = "button";
+      openTools.textContent = "Открыть папку tools";
+      openTools.addEventListener("click", () => {
+        api("/api/toolchain/open-tools-folder", { method: "POST" }).catch(showError);
+      });
+      actions.appendChild(openTools);
+    }
+
+    if (actions.childElementCount) {
+      details.appendChild(actions);
+    }
+
+    host.appendChild(details);
+  }
 }
 
 function renderAppUpdateBanner() {
@@ -1642,14 +4206,21 @@ function renderCategoryChips() {
   const allButton = document.createElement("button");
   allButton.type = "button";
   allButton.className = "category-chip";
-  if (!state.modding.selectedCategoryId) {
-    allButton.classList.add("selected");
-  }
+  allButton.dataset.categoryId = "";
+  const allSelected = !state.modding.selectedCategoryId;
+  allButton.classList.toggle("selected", allSelected);
+  allButton.setAttribute("aria-pressed", allSelected ? "true" : "false");
+  allButton.setAttribute("aria-label", "Показать все разделы");
+  allButton.title = "Показать все безопасные разделы, доступные для моддинга.";
   allButton.textContent = "Все разделы";
   allButton.addEventListener("click", () => {
+    if (!state.modding.selectedCategoryId) {
+      return;
+    }
     state.modding.selectedCategoryId = "";
     el("modCategorySelect").value = "";
     state.modding.page = 1;
+    renderCategoryChips();
     loadModdingAssets().catch(showError);
   });
   host.appendChild(allButton);
@@ -1658,14 +4229,21 @@ function renderCategoryChips() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "category-chip";
-    if (category.categoryId === state.modding.selectedCategoryId) {
-      button.classList.add("selected");
-    }
+    button.dataset.categoryId = category.categoryId;
+    const selected = category.categoryId === state.modding.selectedCategoryId;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+    button.setAttribute("aria-label", `Категория: ${category.name}`);
+    button.title = category.description || category.name;
     button.textContent = `${category.name} (${category.assetCount})`;
     button.addEventListener("click", () => {
+      if (state.modding.selectedCategoryId === category.categoryId) {
+        return;
+      }
       state.modding.selectedCategoryId = category.categoryId;
       el("modCategorySelect").value = category.categoryId;
       state.modding.page = 1;
+      renderCategoryChips();
       loadModdingAssets().catch(showError);
     });
     host.appendChild(button);
@@ -1679,10 +4257,15 @@ async function loadModdingCategories() {
     renderStatusLine(state.modding.categories.length);
   }
   if (!state.modding.selectedCategoryId) {
-    if (state.modding.categories.some((x) => x.categoryId === "body-effects")) {
-      state.modding.selectedCategoryId = "body-effects";
-    } else if (state.modding.categories.some((x) => x.categoryId === "crafting-recipes")) {
-      state.modding.selectedCategoryId = "crafting-recipes";
+    const preferredCategory = [
+      "weapons-items",
+      "npc-encounters",
+      "vehicles",
+      "crafting-recipes",
+      "body-effects"
+    ].find((categoryId) => state.modding.categories.some((x) => x.categoryId === categoryId));
+    if (preferredCategory) {
+      state.modding.selectedCategoryId = preferredCategory;
     }
   }
   renderCategorySelect();
@@ -1720,6 +4303,7 @@ function makeAssetFlag(text, extraClass = "") {
 function renderSelectedAssetPreview() {
   const host = el("selectedAssetPreview");
   host.innerHTML = "";
+  renderStudioFlowBar();
 
   const asset = state.modding.selectedAsset;
   if (!asset) {
@@ -1803,6 +4387,7 @@ function renderModAssetRows() {
     host.appendChild(empty);
     renderSelectedAssetPreview();
     updateModAssetMeta();
+    renderStudioFlowBar();
     renderModPaging();
     return;
   }
@@ -1811,9 +4396,11 @@ function renderModAssetRows() {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "asset-list-item";
-    if (asset.assetId === state.modding.selectedAssetId) {
+    const selected = asset.assetId === state.modding.selectedAssetId;
+    if (selected) {
       card.classList.add("selected");
     }
+    card.setAttribute("aria-pressed", selected ? "true" : "false");
 
     const title = document.createElement("strong");
     title.className = "asset-list-item-title";
@@ -1854,6 +4441,7 @@ function renderModAssetRows() {
 
   renderSelectedAssetPreview();
   updateModAssetMeta();
+  renderStudioFlowBar();
   renderModPaging();
 }
 
@@ -1888,6 +4476,7 @@ async function loadModdingAssets() {
   state.modding.page = Math.max(1, toIntSafe(payload?.page, state.modding.page));
   state.modding.pageSize = Math.max(40, toIntSafe(payload?.pageSize, state.modding.pageSize));
 
+  renderCategoryChips();
   syncSelectedAssetWithVisibleList();
   renderModAssetRows();
   syncSchemaAfterAssetListChange();
@@ -1905,6 +4494,7 @@ function clearSchemaView() {
   state.modding.currentSceneFilterKind = "all";
   state.modding.currentSceneSearch = "";
   state.modding.currentSceneFocusMode = "all";
+  state.modding.modelTargetLongestTouched = false;
   state.modding.schemaFieldFilter = "";
   el("schemaAssetTitle").textContent = "Раздел не выбран";
   el("schemaAssetSummary").textContent = "";
@@ -1912,6 +4502,8 @@ function clearSchemaView() {
   el("schemaWarnings").innerHTML = "";
   el("schemaSections").innerHTML = "";
   el("listTargetRows").innerHTML = "";
+  syncVehicleAdapterControls(null);
+  syncWeaponAdapterControls(null);
   if (el("schemaFieldFilter")) {
     el("schemaFieldFilter").value = "";
   }
@@ -1930,6 +4522,9 @@ function clearSchemaView() {
   renderCurrentListOps();
   renderSceneEditor();
   renderSelectedAssetPreview();
+  clearVehicleProfilePanel();
+  renderRawModelAnalysisPanel();
+  refreshModelReplacementWizard();
 }
 
 function showDeferredSchemaView(asset) {
@@ -1945,6 +4540,7 @@ function showDeferredSchemaView(asset) {
   state.modding.currentSceneSearch = "";
   state.modding.currentSceneFocusMode = "all";
   state.modding.schemaFieldFilter = "";
+  clearVehicleProfilePanel();
 
   el("schemaAssetTitle").textContent = asset?.displayName || "Раздел выбран";
   el("schemaAssetSummary").textContent = asset?.summary || "";
@@ -1961,6 +4557,7 @@ function showDeferredSchemaView(asset) {
   clearScenePanelContent();
   renderCurrentListOps();
   renderSelectedAssetPreview();
+  refreshModelReplacementWizard();
 }
 
 function clearScenePanelContent() {
@@ -3615,6 +6212,7 @@ async function loadSelectedAssetSchema() {
     state.modding.currentFieldDisplayValues.set(field.fieldPath, field.currentDisplayValue || referenceValueToReadableName(field.currentValue));
     state.modding.currentOriginalValues.set(field.fieldPath, field.currentValue);
   }
+  seedModelFitControlsFromSchema();
 
   renderSchemaWarnings(schema.warnings || []);
   setSchemaMeta(describeSchemaMeta(schema));
@@ -3624,13 +6222,17 @@ async function loadSelectedAssetSchema() {
   renderSchemaFields();
   renderListTargets();
   renderSelectedAssetPreview();
+  refreshModelReplacementModels().catch(showError);
+  loadVehicleProfileForCurrentAsset().catch(showError);
 }
 
 function renderStagedEdits() {
   const host = el("stagedList");
   host.innerHTML = "";
+  renderStudioFlowBar();
 
   const staged = Array.from(state.modding.stagedByAssetId.values());
+  renderBuildReadiness();
   if (!staged.length) {
     el("stagedMeta").textContent = "В мод пока ничего не сохранено.";
     renderSelectedAssetPreview();
@@ -3666,6 +6268,33 @@ function renderStagedEdits() {
   }
 
   renderSelectedAssetPreview();
+}
+
+function renderBuildReadiness() {
+  const host = el("buildReadiness");
+  if (!host) {
+    return;
+  }
+
+  const stagedCount = state.modding.stagedByAssetId.size;
+  host.innerHTML = "";
+  host.classList.toggle("ready", stagedCount > 0);
+
+  const title = document.createElement("div");
+  title.className = "build-readiness-title";
+  title.textContent = stagedCount > 0
+    ? "Мод готов к сборке"
+    : "Добавь хотя бы одно изменение";
+  host.appendChild(title);
+
+  const note = document.createElement("div");
+  note.className = "build-readiness-note";
+  const installText = el("installCheck")?.checked ? "установка включена" : "только файл";
+  const zipText = el("zipCheck")?.checked ? "zip включён" : "без zip";
+  note.textContent = stagedCount > 0
+    ? `${stagedCount} разделов в очереди | ${installText} | ${zipText}`
+    : "Выбери систему, измени безопасные поля или приготовь модель, затем добавь результат в мод.";
+  host.appendChild(note);
 }
 
 function stageCurrentAssetEdits() {
@@ -3770,6 +6399,7 @@ async function previewStagedAssetEdits(stagedItem) {
     state.modding.currentFieldDisplayValues.set(field.fieldPath, field.currentDisplayValue || referenceValueToReadableName(field.currentValue));
     state.modding.currentOriginalValues.set(field.fieldPath, field.currentValue);
   }
+  seedModelFitControlsFromSchema();
 
   renderSchemaWarnings(schema.warnings || []);
   setSchemaMeta(describeSchemaMeta(schema));
@@ -3778,6 +6408,8 @@ async function previewStagedAssetEdits(stagedItem) {
   renderSchemaFields();
   renderListTargets();
   renderSelectedAssetPreview();
+  refreshModelReplacementModels().catch(showError);
+  loadVehicleProfileForCurrentAsset().catch(showError);
 }
 
 function logBuild(text) {
@@ -3931,6 +6563,7 @@ function setupActions() {
   el("modCategorySelect").addEventListener("change", () => {
     state.modding.selectedCategoryId = el("modCategorySelect").value;
     state.modding.page = 1;
+    renderCategoryChips();
     loadModdingAssets().catch(showError);
   });
 
@@ -3948,6 +6581,13 @@ function setupActions() {
     }
 
     syncSchemaAfterAssetListChange();
+  });
+  ["installCheck", "zipCheck", "seedCheck"].forEach((id) => {
+    const input = el(id);
+    if (!input) {
+      return;
+    }
+    input.addEventListener("change", renderBuildReadiness);
   });
 
   el("modPrevBtn").addEventListener("click", () => {
@@ -3968,6 +6608,95 @@ function setupActions() {
 
   el("loadSchemaBtn").addEventListener("click", () => loadSelectedAssetSchema().catch(showError));
   el("customVisualImportBtn").addEventListener("click", () => importCustomVisualAssets().catch(showError));
+  el("modelReplacementField").addEventListener("change", () => {
+    state.modding.modelProfilePreset = "auto";
+    resetModelCookTouchedControls();
+    refreshModelReplacementWizard();
+  });
+  document.querySelectorAll(".model-profile-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      resetModelCookTouchedControls();
+      applyModelCookProfile(button.dataset.modelProfile || "auto");
+      refreshModelReplacementWizard();
+    });
+  });
+  el("modelTargetLongestCm").addEventListener("input", () => {
+    state.modding.modelTargetLongestTouched = true;
+    syncModelTargetLongestSlider("number");
+    syncModelCookProfileControls(getSelectedModelReplacementField());
+  });
+  el("modelTargetLongestSlider").addEventListener("input", () => {
+    state.modding.modelTargetLongestTouched = true;
+    syncModelTargetLongestSlider("slider");
+    syncModelCookProfileControls(getSelectedModelReplacementField());
+  });
+  [
+    "modelTriangleBudget",
+    "modelFitOffsetX",
+    "modelFitOffsetY",
+    "modelFitOffsetZ",
+    "modelFitPitch",
+    "modelFitYaw",
+    "modelFitRoll",
+    "weaponGripAnchorPercent",
+    "weaponGripDiameterCm",
+    "weaponGripBackReachCm",
+    "weaponSecondHandShiftCm",
+    "vehicleCollisionMode",
+    "vehicleQueryProxyLength",
+    "vehicleQueryProxyWidth",
+    "vehicleQueryProxyHeight",
+    "vehicleSeatOffsetX",
+    "vehicleSeatOffsetY",
+    "vehicleSeatOffsetZ",
+    "vehiclePassengerSeatOffsetX",
+    "vehiclePassengerSeatOffsetY",
+    "vehiclePassengerSeatOffsetZ",
+    "vehicleEntryOffsetX",
+    "vehicleEntryOffsetY",
+    "vehicleEntryOffsetZ"
+  ].forEach((id) => {
+    const input = el(id);
+    if (!input) {
+      return;
+    }
+    input.addEventListener("input", () => {
+      input.dataset.userTouched = "1";
+      syncModelCookProfileControls(getSelectedModelReplacementField());
+    });
+    input.addEventListener("change", () => {
+      input.dataset.userTouched = "1";
+      syncModelCookProfileControls(getSelectedModelReplacementField());
+    });
+  });
+  el("modelMaterialMode").addEventListener("change", () => {
+    if (el("modelMaterialMode").value === "custom" && getModelFitNumber("modelPaintStrength") <= 0) {
+      setModelFitNumber("modelPaintStrength", 100);
+    }
+    syncModelMaterialControls();
+    if (el("modelMaterialMode").value === "game") {
+      refreshModelMaterialReferenceOptions().catch(showError);
+    }
+    syncModelCookProfileControls(getSelectedModelReplacementField());
+    refreshModelReplacementWizard();
+  });
+  el("modelMaterialSearch").addEventListener("input", queueModelMaterialReferenceRefresh);
+  el("modelReplacementRefreshBtn").addEventListener("click", () => refreshModelReplacementModels().catch(showError));
+  el("rawModelCookSource").addEventListener("change", () => {
+    renderRawModelAnalysisPanel();
+    syncModelCookProfileControls(getSelectedModelReplacementField());
+    loadArmorSetPlanForCurrentSelection().catch(showError);
+    loadVehicleModulePlanForCurrentSelection().catch(showError);
+  });
+  el("rawModelCookBtn").addEventListener("click", () => cookSelectedRawModelForReplacement().catch(showError));
+  el("vehicleFullReplacementBtn").addEventListener("click", () => cookVehicleFullReplacementForCurrentSelection().catch(showError));
+  el("modelReplacementApplyBtn").addEventListener("click", () => {
+    try {
+      applyModelReplacement();
+    } catch (error) {
+      showError(error);
+    }
+  });
   el("schemaFieldFilter").addEventListener("input", () => {
     state.modding.schemaFieldFilter = el("schemaFieldFilter").value;
     renderSceneEditor();

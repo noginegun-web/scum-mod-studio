@@ -6,7 +6,7 @@ param(
     [string]$PackTitle = "SCUM Mod Studio",
     [string]$PackAuthors = "SCUM Mod Studio",
     [string]$OutputRoot = "",
-    [string]$RepoUrl = "",
+    [string]$RepoUrl = "https://github.com/noginegun-web/scum-mod-studio-releases",
     [string]$GithubToken = "",
     [string]$ReleaseNotesPath = "",
     [string]$UnrealPakSource = "",

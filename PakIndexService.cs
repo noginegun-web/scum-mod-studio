@@ -35,12 +35,7 @@ internal static class PakIndexService
         string cryptoPath,
         Action<string>? log)
     {
-        var cacheRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ScumPakWizard",
-            "cache");
-        Directory.CreateDirectory(cacheRoot);
-        var cachePath = Path.Combine(cacheRoot, "pak-index.json");
+        var cachePath = GetCachePath();
 
         var pakFiles = Directory
             .EnumerateFiles(scum.PaksPath, "*.pak", SearchOption.TopDirectoryOnly)
@@ -107,6 +102,109 @@ internal static class PakIndexService
         SaveCache(cachePath, toCache);
 
         return new PakIndex(files);
+    }
+
+    public static PakIndex? TryLoadCachedIndex(ScumInstallation scum)
+    {
+        var cached = TryLoadCache(GetCachePath());
+        if (cached is null)
+        {
+            return null;
+        }
+
+        if (!string.Equals(cached.ScumRoot, scum.RootPath, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(cached.BuildId ?? string.Empty, scum.BuildId ?? string.Empty, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return new PakIndex(cached.Files);
+    }
+
+    public static List<string> SearchCachedIndexPaths(
+        ScumInstallation scum,
+        IReadOnlyList<string> terms,
+        int maxMatches)
+    {
+        maxMatches = Math.Clamp(maxMatches, 1, 50000);
+        var normalizedTerms = terms
+            .Select(term => (term ?? string.Empty).Trim().ToLowerInvariant())
+            .Where(term => term.Length >= 2)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (normalizedTerms.Count == 0)
+        {
+            return [];
+        }
+
+        var cachePath = GetCachePath();
+        if (!File.Exists(cachePath))
+        {
+            return [];
+        }
+
+        string json;
+        try
+        {
+            json = File.ReadAllText(cachePath);
+        }
+        catch
+        {
+            return [];
+        }
+
+        if (!string.IsNullOrWhiteSpace(scum.BuildId)
+            && !json.Contains($"\"BuildId\":\"{scum.BuildId}\"", StringComparison.Ordinal))
+        {
+            return [];
+        }
+
+        var result = new List<string>(Math.Min(maxMatches, 1024));
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var term in normalizedTerms.OrderByDescending(term => term.Length))
+        {
+            var index = 0;
+            while (result.Count < maxMatches)
+            {
+                index = json.IndexOf(term, index, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                {
+                    break;
+                }
+
+                var startQuote = json.LastIndexOf('"', index);
+                var endQuote = json.IndexOf('"', index);
+                if (startQuote >= 0 && endQuote > startQuote)
+                {
+                    var candidate = json[(startQuote + 1)..endQuote];
+                    if (candidate.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                        && candidate.Contains('/', StringComparison.Ordinal)
+                        && seen.Add(candidate))
+                    {
+                        result.Add(candidate);
+                    }
+                }
+
+                index += Math.Max(term.Length, 1);
+            }
+
+            if (result.Count >= maxMatches)
+            {
+                break;
+            }
+        }
+
+        return result;
+    }
+
+    private static string GetCachePath()
+    {
+        var cacheRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ScumPakWizard",
+            "cache");
+        Directory.CreateDirectory(cacheRoot);
+        return Path.Combine(cacheRoot, "pak-index.json");
     }
 
     private static List<PakFileStamp> BuildPakFileStamps(List<string> pakFiles)

@@ -53,16 +53,64 @@ function Get-ModAssets([string]$BaseUrl) {
 }
 
 function Invoke-SchemaAudit([string]$BaseUrl, [object[]]$Assets, [int]$Throttle) {
-    $Assets | ForEach-Object -Parallel {
-        $asset = $_
-        $baseUrl = $using:BaseUrl
-        $uri = "$baseUrl/api/modding/schema?assetId=$([uri]::EscapeDataString([string]$asset.assetId))"
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $Assets | ForEach-Object -Parallel {
+            $asset = $_
+            $baseUrl = $using:BaseUrl
+            $uri = "$baseUrl/api/modding/schema?assetId=$([uri]::EscapeDataString([string]$asset.assetId))"
+            $lastError = $null
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                try {
+                    $schema = Invoke-RestMethod -Uri $uri -TimeoutSec 180
+                    $fields = @($schema.fields).Count
+                    $lists = @($schema.listTargets).Count
+                    [pscustomobject]@{
+                        ok = $true
+                        assetId = [string]$asset.assetId
+                        categoryId = [string]$asset.categoryId
+                        displayName = [string]$asset.displayName
+                        relativePath = [string]$asset.relativePath
+                        fieldCount = $fields
+                        listTargetCount = $lists
+                        usable = ($fields -gt 0 -or $lists -gt 0)
+                        warnings = (@($schema.warnings) -join " | ")
+                        error = $null
+                    }
+                    return
+                } catch {
+                    $lastError = $_.Exception.Message
+                    if ($attempt -lt 3) {
+                        Start-Sleep -Seconds 2
+                    }
+                }
+            }
+
+            [pscustomobject]@{
+                ok = $false
+                assetId = [string]$asset.assetId
+                categoryId = [string]$asset.categoryId
+                displayName = [string]$asset.displayName
+                relativePath = [string]$asset.relativePath
+                fieldCount = 0
+                listTargetCount = 0
+                usable = $false
+                warnings = ""
+                error = $lastError
+            }
+        } -ThrottleLimit $Throttle
+        return
+    }
+
+    foreach ($asset in $Assets) {
+        $uri = "$BaseUrl/api/modding/schema?assetId=$([uri]::EscapeDataString([string]$asset.assetId))"
         $lastError = $null
+        $succeeded = $false
         for ($attempt = 1; $attempt -le 3; $attempt++) {
             try {
                 $schema = Invoke-RestMethod -Uri $uri -TimeoutSec 180
                 $fields = @($schema.fields).Count
                 $lists = @($schema.listTargets).Count
+                $succeeded = $true
                 [pscustomobject]@{
                     ok = $true
                     assetId = [string]$asset.assetId
@@ -75,13 +123,17 @@ function Invoke-SchemaAudit([string]$BaseUrl, [object[]]$Assets, [int]$Throttle)
                     warnings = (@($schema.warnings) -join " | ")
                     error = $null
                 }
-                return
+                break
             } catch {
                 $lastError = $_.Exception.Message
                 if ($attempt -lt 3) {
                     Start-Sleep -Seconds 2
                 }
             }
+        }
+
+        if ($succeeded) {
+            continue
         }
 
         [pscustomobject]@{
@@ -96,7 +148,7 @@ function Invoke-SchemaAudit([string]$BaseUrl, [object[]]$Assets, [int]$Throttle)
             warnings = ""
             error = $lastError
         }
-    } -ThrottleLimit $Throttle
+    }
 }
 
 Invoke-Step "dotnet build" {
@@ -169,16 +221,19 @@ try {
         Write-Host "Visible assets: $($script:assets.Count)"
     }
 
-    $auditTargets = if ($FullAssetAudit) {
-        $script:assets
+    $auditTargets = @()
+    if ($FullAssetAudit) {
+        $auditTargets = @($script:assets)
     } else {
-        $script:assets | Group-Object categoryId | ForEach-Object {
-            $_.Group | Select-Object -First ([math]::Max(1, $SchemaSampleSize))
+        $perCategory = [int][math]::Max(1, $SchemaSampleSize)
+        foreach ($group in @($script:assets | Group-Object categoryId)) {
+            $auditTargets += @($group.Group | Select-Object -First $perCategory)
         }
     }
 
     Invoke-Step "schema audit" {
-        $audit = @(Invoke-SchemaAudit $baseUrl $auditTargets $AuditThrottle)
+        Write-Host "Audit targets: $($auditTargets.Count)"
+        $audit = @(Invoke-SchemaAudit -BaseUrl $baseUrl -Assets @($auditTargets) -Throttle $AuditThrottle)
         $empty = @($audit | Where-Object { $_.ok -and -not $_.usable })
         $errors = @($audit | Where-Object { -not $_.ok })
 

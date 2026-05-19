@@ -5,6 +5,8 @@ namespace ScumPakWizard;
 
 internal static class CryptoKeyWriter
 {
+    private static readonly object WriteLock = new();
+
     public static string Write(string outputRoot, string aesKeyHex)
     {
         var normalized = NormalizeHex(aesKeyHex);
@@ -37,7 +39,12 @@ internal static class CryptoKeyWriter
                        "SecondaryEncryptionKeys": []
                      }
                      """;
-        File.WriteAllText(cryptoPath, json, new UTF8Encoding(false));
+        lock (WriteLock)
+        {
+            Directory.CreateDirectory(outputRoot);
+            File.WriteAllText(cryptoPath, json, new UTF8Encoding(false));
+        }
+
         return cryptoPath;
     }
 

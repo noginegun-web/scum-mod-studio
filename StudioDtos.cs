@@ -33,6 +33,25 @@ internal sealed record StudioFeatureDto(
     string Description,
     int AssetCount);
 
+internal sealed record StudioToolchainStepDto(
+    string Id,
+    string Name,
+    string Status,
+    bool Ready,
+    string? Path,
+    string Description,
+    string? InstallTitle = null,
+    List<string>? InstallSteps = null,
+    string? ActionLabel = null,
+    string? ActionUrl = null,
+    bool CanAutoInstall = false);
+
+internal sealed record StudioToolchainStatusDto(
+    bool ReadyForCookedMods,
+    bool ReadyForRawModelCook,
+    string Summary,
+    List<StudioToolchainStepDto> Steps);
+
 internal sealed record StudioStatusDto(
     string ScumRoot,
     string ScumPaks,
@@ -43,6 +62,7 @@ internal sealed record StudioStatusDto(
     int PresetAssetCount,
     bool ScumFound,
     bool UnrealPakFound,
+    StudioToolchainStatusDto Toolchain,
     List<string> Warnings);
 
 internal sealed record StudioResearchOwnerHintDto(
@@ -170,12 +190,83 @@ internal sealed record StudioCustomVisualAssetDto(
     string ObjectReference,
     string AssetReference);
 
+internal sealed record StudioModelBoundsDto(
+    double MinX,
+    double MinY,
+    double MinZ,
+    double MaxX,
+    double MaxY,
+    double MaxZ,
+    double SizeX,
+    double SizeY,
+    double SizeZ);
+
+internal sealed record StudioRawModelImportDto(
+    string Name,
+    string Format,
+    string SourceRelativePath,
+    long SizeBytes,
+    string Status,
+    List<string> AdaptationHints,
+    StudioModelBoundsDto? Bounds = null,
+    List<StudioRawModelPartDto>? Parts = null);
+
+internal sealed record StudioRawModelPartDto(
+    string Name,
+    string Role,
+    int Vertices,
+    int Triangles,
+    StudioModelBoundsDto Bounds,
+    string Recommendation);
+
 internal sealed record StudioCustomVisualImportResultDto(
     bool Ok,
     string? Error,
     int ImportedFileCount,
     List<StudioCustomVisualAssetDto> Assets,
-    List<string> Warnings);
+    List<string> Warnings,
+    List<StudioRawModelImportDto>? RawModels = null);
+
+internal sealed record StudioRawModelCookRequestDto(
+    string RawSourceRelativePath,
+    string? AssetId,
+    string? FieldPath,
+    string? ModelKind,
+    double? ScalePercent,
+    double? OffsetX,
+    double? OffsetY,
+    double? OffsetZ,
+    double? Pitch,
+    double? Yaw,
+    double? Roll,
+    bool? AutoFitToTarget = null,
+    double? TargetLongestCm = null,
+    string? PaintColorHex = null,
+    double? PaintStrengthPercent = null,
+    double? MetallicPercent = null,
+    double? RoughnessPercent = null,
+    string? MaterialMode = null,
+    string? MaterialReference = null,
+    List<string>? RawPartNames = null,
+    int? TargetTriangleCount = null,
+    string? CollisionMode = null,
+    double? QueryProxyLengthPercent = null,
+    double? QueryProxyWidthPercent = null,
+    double? QueryProxyHeightPercent = null,
+    double? WeaponGripAnchorPercent = null,
+    double? WeaponGripDiameterCm = null,
+    double? WeaponGripBackReachCm = null,
+    double? WeaponSecondHandShiftCm = null);
+
+internal sealed record StudioRawModelCookResultDto(
+    bool Ok,
+    string? Error,
+    string? CookedTargetRelativePath,
+    List<StudioCustomVisualAssetDto> Assets,
+    List<string> Warnings,
+    string? UnrealLogTail = null,
+    string? BlenderLogTail = null,
+    StudioAssetEditDto? SuggestedEdit = null);
 
 internal sealed record StudioModAssetSchemaDto(
     string AssetId,
@@ -232,6 +323,319 @@ internal sealed record StudioFieldDiscoveryReportDto(
     int HiddenListCandidateCount,
     List<StudioFieldDiscoveryCandidateDto> Fields,
     List<StudioListDiscoveryCandidateDto> Lists,
+    List<string> Warnings);
+
+internal sealed record StudioReplacementContractFieldDto(
+    string FieldPath,
+    string Label,
+    string Kind,
+    string CurrentValue,
+    string CurrentDisplayValue,
+    bool Exposed,
+    string Visibility,
+    string? ReferencePickerKind);
+
+internal sealed record StudioReplacementContractAssetDto(
+    string AssetId,
+    string RelativePath,
+    string DisplayName,
+    string Role,
+    int VisualFieldCount,
+    int MeshFieldCount,
+    int MaterialFieldCount,
+    int TextureFieldCount,
+    int AnimationFieldCount,
+    int PhysicsFieldCount,
+    int CollisionFieldCount,
+    int SocketFieldCount,
+    int AttachmentFieldCount,
+    int SkinFieldCount,
+    int IconFieldCount,
+    List<string> RequiredSockets,
+    List<string> MaterialReferences,
+    List<string> TextureReferences,
+    List<StudioReplacementContractFieldDto> KeyFields,
+    List<string> Warnings);
+
+internal sealed record StudioReplacementContractLinkDto(
+    string FromAssetId,
+    string ToAssetId,
+    string Label,
+    string FieldPath,
+    string Reference,
+    string Kind);
+
+internal sealed record StudioReplacementContractDto(
+    bool Ok,
+    string? Error,
+    string AssetId,
+    string RelativePath,
+    string DisplayName,
+    string DomainKind,
+    string ReplacementStrategy,
+    List<StudioReplacementContractAssetDto> Assets,
+    List<StudioReplacementContractLinkDto> Links,
+    List<string> RequiredSockets,
+    List<string> MaterialReferences,
+    List<string> TextureReferences,
+    List<string> Warnings,
+    List<string> Recommendations);
+
+internal sealed record StudioWeaponContractFieldDto(
+    string FieldPath,
+    string Label,
+    string Kind,
+    string CurrentValue,
+    string CurrentDisplayValue,
+    bool Exposed,
+    string Visibility,
+    string? ReferencePickerKind);
+
+internal sealed record StudioWeaponContractAssetDto(
+    string AssetId,
+    string RelativePath,
+    string DisplayName,
+    string Role,
+    int MeshFieldCount,
+    int FirstPersonFieldCount,
+    int HandsFieldCount,
+    int SocketFieldCount,
+    int MaterialFieldCount,
+    int SkinFieldCount,
+    int IconFieldCount,
+    List<string> RequiredSockets,
+    List<string> MaterialReferences,
+    List<StudioWeaponContractFieldDto> KeyFields,
+    List<string> Warnings);
+
+internal sealed record StudioWeaponContractLinkDto(
+    string FromAssetId,
+    string ToAssetId,
+    string Label,
+    string FieldPath,
+    string Reference);
+
+internal sealed record StudioWeaponContractDto(
+    bool Ok,
+    string? Error,
+    string AssetId,
+    string RelativePath,
+    string DisplayName,
+    string ProfileKind,
+    List<StudioWeaponContractAssetDto> Assets,
+    List<StudioWeaponContractLinkDto> Links,
+    List<string> RequiredSockets,
+    List<string> MaterialReferences,
+    List<string> Warnings,
+    List<string> Recommendations);
+
+internal sealed record StudioVehicleProfileFieldDto(
+    string FieldPath,
+    string Label,
+    string Kind,
+    string CurrentValue,
+    string CurrentDisplayValue);
+
+internal sealed record StudioVehicleProfileAssetDto(
+    string AssetId,
+    string RelativePath,
+    string DisplayName,
+    string Role,
+    int VisualFieldCount,
+    int QueryFieldCount,
+    int SkeletalFieldCount,
+    int StaticFieldCount,
+    int MaterialFieldCount,
+    int SocketFieldCount,
+    int SlotFieldCount,
+    int MountFieldCount,
+    List<string> RequiredSockets,
+    List<string> MaterialReferences,
+    List<StudioVehicleProfileFieldDto> KeyFields,
+    List<string> Warnings);
+
+internal sealed record StudioVehicleProfileLinkDto(
+    string FromAssetId,
+    string ToAssetId,
+    string Label,
+    string FieldPath,
+    string Reference);
+
+internal sealed record StudioVehicleProfileDto(
+    bool Ok,
+    string? Error,
+    string AssetId,
+    string RelativePath,
+    string DisplayName,
+    string ProfileKind,
+    List<StudioVehicleProfileAssetDto> Assets,
+    List<StudioVehicleProfileLinkDto> Links,
+    List<string> RequiredSockets,
+    List<string> MaterialReferences,
+    List<string> Warnings,
+    List<string> Recommendations);
+
+internal sealed record StudioVehicleModulePlanEntryDto(
+    string ModuleRole,
+    string TargetAssetId,
+    string TargetRelativePath,
+    string TargetDisplayName,
+    string TargetFieldPath,
+    string TargetFieldLabel,
+    string TargetCurrentValue,
+    string TargetCurrentDisplayValue,
+    string TargetMeshKind,
+    string ReplacementStrategy,
+    string SafetyLevel,
+    bool CanAutoCook,
+    List<string> RawPartNames,
+    int RawTriangleCount,
+    int TargetTriangleCount,
+    StudioModelBoundsDto? RawBounds,
+    double TargetLongestCm,
+    List<string> RequiredSockets,
+    List<string> MaterialReferences,
+    string Recommendation);
+
+internal sealed record StudioVehicleModulePlanDto(
+    bool Ok,
+    string? Error,
+    string AssetId,
+    string RawSourceRelativePath,
+    string DisplayName,
+    string ProfileKind,
+    StudioModelBoundsDto? RawBounds,
+    List<StudioVehicleModulePlanEntryDto> Entries,
+    List<string> Warnings,
+    List<string> NextSteps);
+
+internal sealed record StudioVehicleModuleCookRequestDto(
+    string AssetId,
+    string RawSourceRelativePath,
+    string TargetAssetId,
+    string? TargetFieldPath = null,
+    string? MaterialReference = null);
+
+internal sealed record StudioVehicleModuleCookBatchRequestDto(
+    string AssetId,
+    string RawSourceRelativePath,
+    int? MaxModules = null);
+
+internal sealed record StudioVehicleModuleCookBatchItemDto(
+    string TargetAssetId,
+    string TargetRelativePath,
+    string TargetDisplayName,
+    string TargetFieldPath,
+    string SafetyLevel,
+    bool Ok,
+    string? Error,
+    string? CookedTargetRelativePath,
+    StudioAssetEditDto? SuggestedEdit,
+    List<string> Warnings);
+
+internal sealed record StudioVehicleModuleCookBatchResultDto(
+    bool Ok,
+    string? Error,
+    List<StudioVehicleModuleCookBatchItemDto> Items,
+    List<StudioAssetEditDto> SuggestedEdits,
+    List<string> Warnings);
+
+internal sealed record StudioVehicleFullReplacementRequestDto(
+    string AssetId,
+    string RawSourceRelativePath,
+    bool? InstallToGame = null,
+    string? ModName = null,
+    double? TargetLongestCm = null,
+    int? TargetTriangleCount = null,
+    string? MaterialMode = null,
+    string? MaterialReference = null,
+    double? ScalePercent = null,
+    double? OffsetX = null,
+    double? OffsetY = null,
+    double? OffsetZ = null,
+    double? Pitch = null,
+    double? Yaw = null,
+    double? Roll = null,
+    string? PaintColorHex = null,
+    double? PaintStrengthPercent = null,
+    double? MetallicPercent = null,
+    double? RoughnessPercent = null,
+    string? CollisionMode = null,
+    double? QueryProxyLengthPercent = null,
+    double? QueryProxyWidthPercent = null,
+    double? QueryProxyHeightPercent = null,
+    double? SeatOffsetX = null,
+    double? SeatOffsetY = null,
+    double? SeatOffsetZ = null,
+    double? PassengerSeatOffsetX = null,
+    double? PassengerSeatOffsetY = null,
+    double? PassengerSeatOffsetZ = null,
+    double? EntryOffsetX = null,
+    double? EntryOffsetY = null,
+    double? EntryOffsetZ = null);
+
+internal sealed record StudioVehicleFullReplacementResultDto(
+    bool Ok,
+    string? Error,
+    StudioBuildResultDto? BuildResult,
+    StudioRawModelCookResultDto? BodyCookResult,
+    List<StudioRawModelCookResultDto> SuppressorCookResults,
+    List<StudioAssetEditDto> SuggestedEdits,
+    List<string> Warnings);
+
+internal sealed record StudioArmorSetPlanEntryDto(
+    string ModuleRole,
+    string TargetAssetId,
+    string TargetRelativePath,
+    string TargetDisplayName,
+    string TargetFieldPath,
+    string TargetFieldLabel,
+    string TargetCurrentValue,
+    string TargetCurrentDisplayValue,
+    string TargetMeshKind,
+    bool CanAutoCook,
+    List<string> RawPartNames,
+    int RawTriangleCount,
+    int TargetTriangleCount,
+    double TargetLongestCm,
+    string Recommendation);
+
+internal sealed record StudioArmorSetPlanDto(
+    bool Ok,
+    string? Error,
+    string RawSourceRelativePath,
+    StudioModelBoundsDto? RawBounds,
+    List<StudioArmorSetPlanEntryDto> Entries,
+    List<string> Warnings,
+    List<string> NextSteps);
+
+internal sealed record StudioArmorSetCookRequestDto(
+    string RawSourceRelativePath,
+    string TargetAssetId,
+    string? TargetFieldPath = null);
+
+internal sealed record StudioArmorSetCookBatchRequestDto(
+    string RawSourceRelativePath,
+    int? MaxModules = null);
+
+internal sealed record StudioArmorSetCookBatchItemDto(
+    string ModuleRole,
+    string TargetAssetId,
+    string TargetRelativePath,
+    string TargetDisplayName,
+    string TargetFieldPath,
+    string TargetMeshKind,
+    bool Ok,
+    string? Error,
+    string? CookedTargetRelativePath,
+    StudioAssetEditDto? SuggestedEdit,
+    List<string> Warnings);
+
+internal sealed record StudioArmorSetCookBatchResultDto(
+    bool Ok,
+    string? Error,
+    List<StudioArmorSetCookBatchItemDto> Items,
+    List<StudioAssetEditDto> SuggestedEdits,
     List<string> Warnings);
 
 internal sealed record StudioFieldEditDto(

@@ -1,9 +1,12 @@
 using System.Globalization;
 using System.Collections;
+using System.Diagnostics.CodeAnalysis;
+using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Xml.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Http;
@@ -18,7 +21,7 @@ namespace ScumPakWizard;
 internal sealed class StudioRuntime
 {
     private const string DefaultAesKeyHex = "0x0B1F4E543FB798EFC5BD861BB405BE7081CD03698EA9BA06469462A3B113CA81";
-    private const int ModAssetsCatalogCacheFormatVersion = 22;
+    private const int ModAssetsCatalogCacheFormatVersion = 25;
     private const string DataTableRowAssetPrefix = "datatable-row::";
     private const string ItemSpawningParametersLaneId = "item-spawning-parameters";
     private const string ItemSpawningCooldownGroupsLaneId = "item-spawning-cooldown-groups";
@@ -31,6 +34,7 @@ internal sealed class StudioRuntime
     private const string WeaponSyntheticFieldPrefix = "weapon-field:";
     private const string WeaponClipSyntheticFieldPrefix = "weapon-clip-field:";
     private const string AmmunitionSyntheticFieldPrefix = "ammo-field:";
+    private const string VehicleSyntheticFieldPrefix = "vehicle-field:";
     private const string GameEventMarkerSyntheticFieldPrefix = "gameevent-marker:";
     private const string WorldEventManagerSyntheticFieldPrefix = "worldevent-manager:";
     private const string VectorComponentFieldTokenPrefix = "/vc:";
@@ -43,6 +47,7 @@ internal sealed class StudioRuntime
     private const string SyntheticRecipeAllowedTypesTargetPrefix = "synthetic:recipe-allowed-types:";
     private const string SyntheticWorldEventManagerEventTypesTargetPath = "synthetic:worldevent-manager-event-types";
     private const string QuestManagerAssetId = "game::scum/content/conz_files/quests/questmangerdata.uasset";
+    private const string RawModelSupportedExtensionsText = ".fbx/.obj/.glb/.gltf/.dae/.stl/.ply/.blend или архивы .zip/.rar/.7z";
 
     private static readonly string[] KnownUnstableCatalogAssetSuffixes =
     [
@@ -194,6 +199,20 @@ internal sealed class StudioRuntime
         new("ETraderType::TradesEverything", "Скупщик всего")
     ];
 
+    private static readonly List<StudioModFieldOptionDto> CurrencyTypeOptions =
+    [
+        new("ECurrencyType::Normal", "Обычная валюта"),
+        new("ECurrencyType::Gold", "Золото")
+    ];
+
+    private static readonly List<StudioModFieldOptionDto> BankCardTypeOptions =
+    [
+        new("EBankCardType::None", "Не требуется"),
+        new("EBankCardType::Starter", "Стартовая карта"),
+        new("EBankCardType::Classic", "Классическая карта"),
+        new("EBankCardType::Gold", "Золотая карта")
+    ];
+
     private static readonly List<StudioModFieldOptionDto> FoodCookLevelOptions =
     [
         new("EFoodCookLevel::Raw", "Сырым"),
@@ -288,6 +307,8 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _bodyEffectSymptomReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _encounterCharacterPresetReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _encounterClassReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _encounterSpawnAmountCurveReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _economyCurveReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _cargoDropEncounterClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _cargoDropContainerClassReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _guardedZoneDropshipClassReferenceOptionsCache;
@@ -330,7 +351,11 @@ internal sealed class StudioRuntime
     private List<StudioReferenceOptionDto>? _visualMaterialSoftReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualTextureObjectReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _visualTextureSoftReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _itemHandsCorrectionsReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _itemFirstPersonAnimationsReferenceOptionsCache;
+    private List<StudioReferenceOptionDto>? _itemAttachmentSocketMountTypeReferenceOptionsCache;
     private List<CustomVisualAssetInfo>? _customVisualAssetCache;
+    private readonly Dictionary<string, BlendRawModelAnalysis> _blendRawModelAnalysisCache = new(StringComparer.OrdinalIgnoreCase);
     private List<StudioReferenceOptionDto>? _ammoItemReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _ammoProjectileReferenceOptionsCache;
     private List<StudioReferenceOptionDto>? _genericGameplayReferenceOptionsCache;
@@ -508,6 +533,12 @@ internal sealed class StudioRuntime
             warnings.Add("UnrealPak.exe не найден. Сборка .pak будет недоступна, пока он не появится в Engine\\Binaries\\Win64 внутри папки программы.");
         }
 
+        var toolchain = BuildToolchainStatus();
+        if (!toolchain.ReadyForRawModelCook)
+        {
+            warnings.Add("Полный импорт raw-моделей в игру требует UE4.27 cook toolchain. Программа уже принимает и анализирует модели, но cooked .uasset создаётся только через легальный UE4.27 pipeline.");
+        }
+
         return new StudioStatusDto(
             _scum.RootPath,
             _scum.PaksPath,
@@ -518,7 +549,356 @@ internal sealed class StudioRuntime
             _presetFiles.Count,
             HasUsableScumInstallation(),
             HasUsableUnrealPak(),
+            toolchain,
             warnings);
+    }
+
+    private StudioToolchainStatusDto BuildToolchainStatus()
+    {
+        var toolsRoot = GetToolsRoot();
+        var steps = new List<StudioToolchainStepDto>
+        {
+            new(
+                "raw-model-analysis",
+                "Анализ raw-моделей",
+                "Встроено",
+                true,
+                null,
+                "Программа сама читает габариты OBJ/GLTF/GLB/DAE/STL/PLY/ASCII FBX и готовит fit-профиль."),
+            new(
+                "cooked-asset-import",
+                "Импорт cooked ассетов",
+                "Встроено",
+                true,
+                GetWritableCustomVisualAssetRoot(),
+                "Cooked .uasset/.uexp/.ubulk можно загрузить прямо в программу и выбрать в мастере замены модели.")
+        };
+
+        var unrealPakReady = HasUsableUnrealPak();
+        steps.Add(new StudioToolchainStepDto(
+            "pak-build",
+            "Сборка PAK",
+            unrealPakReady ? "Готово" : "Не найден UnrealPak",
+            unrealPakReady,
+            unrealPakReady ? _unrealPakPath : null,
+            "Финальный мод собирается в PAK через UnrealPak.",
+            "Как включить сборку PAK",
+            [
+                "Обычно UnrealPak уже лежит в поставке программы или в совместимом UE4.27 toolchain.",
+                $"Если у тебя есть UE4.27, положи его папку в {Path.Combine(toolsRoot, "UE_4.27")} или задай переменную SCUM_MOD_STUDIO_UE427.",
+                "После этого перезапусти программу или нажми проверку статуса."
+            ],
+            "Открыть папку tools",
+            null));
+
+        var ueEditorCmd = FindUnrealEditorCmdPath();
+        steps.Add(new StudioToolchainStepDto(
+            "ue4-cook",
+            "Raw → cooked UE4.27",
+            string.IsNullOrWhiteSpace(ueEditorCmd) ? "Требуется UE4.27 cook toolchain" : "Готово",
+            !string.IsNullOrWhiteSpace(ueEditorCmd),
+            ueEditorCmd,
+            "Для полной автоматической подготовки FBX/OBJ/GLTF в игровые .uasset нужен UE4Editor-Cmd 4.27 или совместимый SCUM devkit/toolchain.",
+            "Как подключить UE4.27 cook toolchain",
+            [
+                "Вариант 1: установить Unreal Engine 4.27 через Epic Games Launcher, затем программа найдёт стандартный путь C:\\Program Files\\Epic Games\\UE_4.27.",
+                $"Вариант 2: положить легальную копию UE_4.27 в {Path.Combine(toolsRoot, "UE_4.27")}.",
+                "Вариант 3: задать переменную окружения SCUM_MOD_STUDIO_UE427 на корень UE4.27.",
+                "Из-за лицензии Epic программа не будет тайно распространять Unreal Editor; она может только использовать уже подключённый легальный toolchain."
+            ],
+            "Открыть страницу Unreal Engine",
+            "https://www.unrealengine.com/download"));
+
+        var blenderPath = FindBlenderExecutablePath();
+        steps.Add(new StudioToolchainStepDto(
+            "blend-conversion",
+            ".blend → FBX",
+            string.IsNullOrWhiteSpace(blenderPath) ? "Опционально" : "Готово",
+            !string.IsNullOrWhiteSpace(blenderPath),
+            blenderPath,
+            "Blender запускается программой в фоне для .blend/.obj/.glb/.gltf/.dae/.stl/.ply и для нормализации модели перед UE4 cook.",
+            "Как включить импорт моделей через Blender",
+            [
+                "Установи Blender обычным способом или положи portable Blender в папку tools\\blender рядом с программой.",
+                "После установки программа найдёт blender.exe сама; клиенту не нужно открывать Blender или нажимать кнопки внутри него.",
+                "Для уже готового FBX Blender не обязателен, UE4.27 будет запущен напрямую."
+            ],
+            "Открыть Blender",
+            "https://www.blender.org/download/"));
+
+        var readyForCookedMods = HasUsableScumInstallation() && unrealPakReady;
+        var readyForRawModelCook = readyForCookedMods && !string.IsNullOrWhiteSpace(ueEditorCmd);
+        var summary = readyForRawModelCook
+            ? "Полный pipeline готов: raw модель можно подготовить, cook-нуть и добавить в PAK."
+            : readyForCookedMods
+                ? "Cooked-моды готовы. Для полной автоматической подготовки raw-моделей нужен подключённый UE4.27 cook toolchain."
+                : "Нужно найти SCUM и UnrealPak, чтобы собирать моды.";
+
+        return new StudioToolchainStatusDto(
+            readyForCookedMods,
+            readyForRawModelCook,
+            summary,
+            steps);
+    }
+
+    public void OpenToolsFolder()
+    {
+        var toolsRoot = GetToolsRoot();
+        Directory.CreateDirectory(toolsRoot);
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = toolsRoot,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // The folder still exists; UI will keep showing the path if Explorer cannot open.
+        }
+    }
+
+    private string GetToolsRoot()
+    {
+        return Path.Combine(_runtimePaths.AppRoot, "tools");
+    }
+
+    private string GetCookScratchRoot()
+    {
+        var overrideRoot = Environment.GetEnvironmentVariable("SCUM_MOD_STUDIO_COOK_TEMP");
+        if (!string.IsNullOrWhiteSpace(overrideRoot))
+        {
+            var configured = Path.GetFullPath(overrideRoot);
+            Directory.CreateDirectory(configured);
+            return configured;
+        }
+
+        var appScratch = Path.Combine(_runtimePaths.AppRoot, ".smscook");
+        var tempScratch = Path.Combine(Path.GetTempPath(), "smscook");
+        var candidates = new[] { appScratch, tempScratch };
+        foreach (var candidate in candidates
+                     .Select(Path.GetFullPath)
+                     .OrderByDescending(GetAvailableFreeBytesForPath))
+        {
+            try
+            {
+                Directory.CreateDirectory(candidate);
+                return candidate;
+            }
+            catch
+            {
+                // Try the next candidate; the final failure will surface below.
+            }
+        }
+
+        Directory.CreateDirectory(tempScratch);
+        return tempScratch;
+    }
+
+    private static long GetAvailableFreeBytesForPath(string path)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(path);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return -1;
+            }
+
+            return new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private string? FindUnrealEditorCmdPath()
+    {
+        var candidates = new List<string>();
+        void AddCandidate(string? root)
+        {
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return;
+            }
+
+            candidates.Add(Path.Combine(root, "Engine", "Binaries", "Win64", "UE4Editor-Cmd.exe"));
+            candidates.Add(Path.Combine(root, "UE4Editor-Cmd.exe"));
+        }
+
+        AddCandidate(Environment.GetEnvironmentVariable("SCUM_MOD_STUDIO_UE427"));
+        AddCandidate(Environment.GetEnvironmentVariable("UE4_27_ROOT"));
+        AddCandidate(Environment.GetEnvironmentVariable("UNREAL_ENGINE_4_27_PATH"));
+        AddCandidate(Path.Combine(_runtimePaths.AppRoot, "tools", "UE_4.27"));
+        AddCandidate(Path.Combine(_runtimePaths.WorkspaceRoot, "tools", "UE_4.27"));
+        AddCandidate(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Epic Games", "UE_4.27"));
+        AddCandidate(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Epic Games", "UE_4.27"));
+
+        return candidates
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(Path.GetFullPath)
+            .FirstOrDefault(File.Exists);
+    }
+
+    private string? FindOptionalToolExecutable(string folderName, string exeName)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(_runtimePaths.AppRoot, "tools", folderName, exeName),
+            Path.Combine(_runtimePaths.WorkspaceRoot, "tools", folderName, exeName),
+            Path.Combine(_runtimePaths.AppRoot, "tools", exeName),
+            Path.Combine(_runtimePaths.WorkspaceRoot, "tools", exeName)
+        };
+
+        return candidates
+            .Select(Path.GetFullPath)
+            .FirstOrDefault(File.Exists);
+    }
+
+    private string? FindBlenderExecutablePath()
+    {
+        var candidates = new List<string?>();
+        void AddCandidate(string? path)
+        {
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                candidates.Add(path);
+            }
+        }
+
+        AddCandidate(Environment.GetEnvironmentVariable("SCUM_MOD_STUDIO_BLENDER"));
+        AddCandidate(Environment.GetEnvironmentVariable("BLENDER_EXE"));
+        AddCandidate(FindOptionalToolExecutable("blender", "blender.exe"));
+        foreach (var portableBlender in EnumerateToolExecutables("blender", "blender.exe"))
+        {
+            AddCandidate(portableBlender);
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        AddBlenderProgramFilesCandidates(programFiles, candidates);
+        AddBlenderProgramFilesCandidates(programFilesX86, candidates);
+        AddCandidate(FindExecutableOnPath("blender.exe"));
+
+        return candidates
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.GetFullPath(path!))
+            .FirstOrDefault(File.Exists);
+    }
+
+    private IEnumerable<string> EnumerateToolExecutables(string folderName, string exeName)
+    {
+        foreach (var toolsRoot in new[]
+                 {
+                     Path.Combine(_runtimePaths.AppRoot, "tools", folderName),
+                     Path.Combine(_runtimePaths.WorkspaceRoot, "tools", folderName)
+                 })
+        {
+            if (!Directory.Exists(toolsRoot))
+            {
+                continue;
+            }
+
+            foreach (var exe in Directory.EnumerateFiles(toolsRoot, exeName, SearchOption.AllDirectories))
+            {
+                yield return exe;
+            }
+        }
+    }
+
+    private static void AddBlenderProgramFilesCandidates(string root, List<string?> candidates)
+    {
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return;
+        }
+
+        var blenderRoot = Path.Combine(root, "Blender Foundation");
+        if (!Directory.Exists(blenderRoot))
+        {
+            return;
+        }
+
+        foreach (var exe in Directory.EnumerateFiles(blenderRoot, "blender.exe", SearchOption.AllDirectories))
+        {
+            candidates.Add(exe);
+        }
+    }
+
+    private static string? FindExecutableOnPath(string exeName)
+    {
+        var pathValue = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(pathValue))
+        {
+            return null;
+        }
+
+        foreach (var segment in pathValue.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                var candidate = Path.Combine(segment, exeName);
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+            catch
+            {
+                // PATH can contain malformed entries; ignore and keep scanning.
+            }
+        }
+
+        return null;
+    }
+
+    private static string? FindExternalRawArchiveExtractor()
+    {
+        var candidates = new[]
+        {
+            FindExecutableOnPath("tar.exe"),
+            FindExecutableOnPath("bsdtar.exe"),
+            FindExecutableOnPath("7z.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "7-Zip", "7z.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "7-Zip", "7z.exe")
+        };
+
+        return candidates
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.GetFullPath(path!))
+            .FirstOrDefault(File.Exists);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // best-effort cleanup
+        }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch
+        {
+            // best-effort cleanup
+        }
     }
 
     private bool HasUsableScumInstallation()
@@ -772,9 +1152,9 @@ internal sealed class StudioRuntime
             return GetWeaponBulletClassReferenceOptions(term, limit);
         }
 
-        if (!string.IsNullOrWhiteSpace(term) && TryBuildFastCustomVisualReferenceOptions(normalizedPicker, term, limit, out var customVisualOptions))
+        if (!string.IsNullOrWhiteSpace(term) && TryBuildFastVisualReferenceOptions(normalizedPicker, term, limit, out var fastVisualOptions))
         {
-            return customVisualOptions;
+            return fastVisualOptions;
         }
 
         List<StudioReferenceOptionDto> allOptions;
@@ -794,6 +1174,10 @@ internal sealed class StudioRuntime
                     _encounterCharacterPresetReferenceOptionsCache ??= BuildEncounterCharacterPresetReferenceOptions(),
                 "encounter-class" =>
                     _encounterClassReferenceOptionsCache ??= BuildEncounterClassReferenceOptions(),
+                "encounter-spawn-amount-curve" or "spawn-amount-curve" =>
+                    _encounterSpawnAmountCurveReferenceOptionsCache ??= BuildEncounterSpawnAmountCurveReferenceOptions(),
+                "economy-curve" or "economy-curve-float" =>
+                    _economyCurveReferenceOptionsCache ??= BuildEconomyCurveReferenceOptions(),
                 "cargo-drop-encounter-class" =>
                     _cargoDropEncounterClassReferenceOptionsCache ??= BuildCargoDropEncounterClassReferenceOptions(),
                 "cargo-drop-container-class" =>
@@ -904,6 +1288,12 @@ internal sealed class StudioRuntime
                     _visualTextureObjectReferenceOptionsCache ??= BuildVisualTextureObjectReferenceOptions(),
                 "visual-texture-asset" or "visual-icon-asset" =>
                     _visualTextureSoftReferenceOptionsCache ??= BuildVisualTextureSoftReferenceOptions(),
+                "item-hands-corrections" or "hands-corrections-data" =>
+                    _itemHandsCorrectionsReferenceOptionsCache ??= BuildItemHandsCorrectionsReferenceOptions(),
+                "item-first-person-animations" or "first-person-animations-data" =>
+                    _itemFirstPersonAnimationsReferenceOptionsCache ??= BuildItemFirstPersonAnimationsReferenceOptions(),
+                "item-attachment-socket-mount-type" or "attachment-socket-mount-type" =>
+                    _itemAttachmentSocketMountTypeReferenceOptionsCache ??= BuildItemAttachmentSocketMountTypeReferenceOptions(),
                 "generic-gameplay-asset" or "generic-gameplay-reference" or "gameplay-asset" or "gameplay-reference" =>
                     _genericGameplayReferenceOptionsCache ??= BuildGenericGameplayReferenceOptions(),
                 _ => []
@@ -997,6 +1387,173 @@ internal sealed class StudioRuntime
             .Take(limit)
             .ToList();
         return options.Count > 0;
+    }
+
+    private bool TryBuildFastVisualReferenceOptions(
+        string normalizedPicker,
+        string term,
+        int limit,
+        out List<StudioReferenceOptionDto> options)
+    {
+        options = [];
+        var kind = ResolveCustomVisualKindFromPicker(normalizedPicker);
+        if (string.IsNullOrWhiteSpace(kind))
+        {
+            return false;
+        }
+
+        var objectReference = normalizedPicker.EndsWith("-object", StringComparison.OrdinalIgnoreCase)
+                              || normalizedPicker.Equals("visual-icon-object", StringComparison.OrdinalIgnoreCase);
+        var trimmed = term.Trim();
+        var searchTerms = ExpandReferenceSearchTerms(normalizedPicker, trimmed).ToList();
+        var normalizedTerms = searchTerms
+            .Select(NormalizeLooseSearch)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var result = new Dictionary<string, StudioReferenceOptionDto>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var asset in GetCustomVisualAssetCatalog().Where(asset =>
+                     asset.Kind.Equals(kind, StringComparison.OrdinalIgnoreCase)))
+        {
+            var value = objectReference ? asset.ObjectReference : asset.AssetReference;
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            var option = new StudioReferenceOptionDto(
+                value,
+                PrefixReferenceOptionLabel("Пользовательский ассет", asset.DisplayName));
+            if (MatchesReferenceSearch(option, searchTerms, normalizedTerms))
+            {
+                result[value] = option;
+            }
+        }
+
+        foreach (var relativePath in EnumerateFastReferenceSearchPaths(searchTerms))
+        {
+            var normalizedPath = PathUtil.NormalizeRelative(relativePath);
+            if (!TryBuildFastGameVisualReferenceOption(
+                    kind,
+                    objectReference,
+                    normalizedPath,
+                    out var option))
+            {
+                continue;
+            }
+
+            if (MatchesReferenceSearch(option, searchTerms, normalizedTerms))
+            {
+                result[option.Value] = option;
+            }
+        }
+
+        options = result.Values
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToList();
+        return true;
+    }
+
+    private IEnumerable<string> EnumerateFastReferenceSearchPaths(IReadOnlyList<string> searchTerms)
+    {
+        if (HasUsableScumInstallation())
+        {
+            var cachedMatches = PakIndexService.SearchCachedIndexPaths(_scum, searchTerms, maxMatches: 1024);
+            if (cachedMatches.Count > 0 || _pakIndexCache is null)
+            {
+                return cachedMatches;
+            }
+        }
+
+        if (_pakIndexCache is not null)
+        {
+            var normalizedTerms = searchTerms
+                .Select(term => (term ?? string.Empty).Trim())
+                .Where(term => term.Length >= 2)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (normalizedTerms.Count == 0)
+            {
+                return [];
+            }
+
+            return _pakIndexCache.GetAllRelativePaths()
+                .Where(path => normalizedTerms.Any(term => path.Contains(term, StringComparison.OrdinalIgnoreCase)))
+                .Take(1024)
+                .ToList();
+        }
+
+        return [];
+    }
+
+    private static bool TryBuildFastGameVisualReferenceOption(
+        string kind,
+        bool objectReference,
+        string relativePath,
+        out StudioReferenceOptionDto option)
+    {
+        option = null!;
+        var normalizedPath = PathUtil.NormalizeRelative(relativePath);
+        string className;
+        string label;
+
+        switch (kind)
+        {
+            case "static-mesh":
+                if (!IsVisualStaticMeshAssetCandidate(normalizedPath))
+                {
+                    return false;
+                }
+
+                className = "StaticMesh";
+                label = PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(normalizedPath, "SM_"));
+                break;
+            case "skeletal-mesh":
+                if (!IsVisualSkeletalMeshAssetCandidate(normalizedPath))
+                {
+                    return false;
+                }
+
+                className = "SkeletalMesh";
+                label = PrefixReferenceOptionLabel("Модель", ResolveVisualAssetDisplayName(normalizedPath, "SK_"));
+                break;
+            case "material":
+                if (!IsVisualMaterialAssetCandidate(normalizedPath))
+                {
+                    return false;
+                }
+
+                className = Path.GetFileNameWithoutExtension(normalizedPath).StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+                    ? "MaterialInstanceConstant"
+                    : "Material";
+                label = PrefixReferenceOptionLabel("Материал", ResolveVisualAssetDisplayName(normalizedPath, "MI_", "M_", "MAT_"));
+                break;
+            case "texture":
+                if (!IsVisualTextureAssetCandidate(normalizedPath))
+                {
+                    return false;
+                }
+
+                className = "Texture2D";
+                label = PrefixReferenceOptionLabel("Текстура", ResolveVisualAssetDisplayName(normalizedPath, "T_", "TX_", "TEX_", "ICO_", "ICON_"));
+                break;
+            default:
+                return false;
+        }
+
+        var value = objectReference
+            ? BuildGameObjectReferenceFromRelativePath(normalizedPath, "/Script/Engine", className)
+            : BuildSoftGameAssetReferenceFromRelativePath(normalizedPath);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        option = new StudioReferenceOptionDto(value, label);
+        return true;
     }
 
     private static string ResolveCustomVisualKindFromPicker(string normalizedPicker)
@@ -2361,6 +2918,205 @@ internal sealed class StudioRuntime
             assetInfo => PrefixReferenceOptionLabel("Ресурс еды", ResolveFoodResourceDisplayName(assetInfo.RelativePath)));
     }
 
+    private List<StudioReferenceOptionDto> BuildItemHandsCorrectionsReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            relativePath =>
+                relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && relativePath.Contains("/data/handscorrections/", StringComparison.OrdinalIgnoreCase),
+            "/Script/SCUM",
+            "HandsCorrectionsData",
+            assetInfo => PrefixReferenceOptionLabel(
+                "Положение рук",
+                ResolveItemHandlingDataDisplayName(assetInfo.RelativePath, "DA_HandsCorrections_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildItemFirstPersonAnimationsReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            relativePath =>
+                relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && relativePath.Contains("/data/itemfirstpersonanimations/", StringComparison.OrdinalIgnoreCase),
+            "/Script/SCUM",
+            "ItemFirstPersonAnimationsDataAsset",
+            assetInfo => PrefixReferenceOptionLabel(
+                "Анимации от первого лица",
+                ResolveItemHandlingDataDisplayName(assetInfo.RelativePath, "DA_")));
+    }
+
+    private List<StudioReferenceOptionDto> BuildItemAttachmentSocketMountTypeReferenceOptions()
+    {
+        var nativeOptions = new List<StudioReferenceOptionDto>
+        {
+            new("class:AttachmentSocketMountTypePrisonerHand", "Способ крепления: в руке персонажа")
+        };
+
+        var blueprintOptions = BuildBlueprintReferenceOptions(
+            relativePath =>
+                relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && relativePath.Contains("/items/weapons/attachmentsockets/", StringComparison.OrdinalIgnoreCase)
+                && Path.GetFileNameWithoutExtension(relativePath).Contains("mounttype", StringComparison.OrdinalIgnoreCase),
+            assetInfo => PrefixReferenceOptionLabel(
+                "Способ крепления",
+                ResolveAttachmentSocketMountTypeDisplayName(assetInfo.RelativePath)));
+
+        return nativeOptions
+            .Concat(blueprintOptions)
+            .GroupBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(option => option.Label, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(option => option.Value, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string ResolveItemHandlingDataDisplayName(string relativePath, string prefix)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        if (stem.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            stem = stem[prefix.Length..];
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(stem)));
+    }
+
+    private static string ResolveAttachmentSocketMountTypeDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        foreach (var prefix in new[] { "BP_MountType", "BP_" })
+        {
+            if (stem.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                stem = stem[prefix.Length..];
+                break;
+            }
+        }
+
+        stem = NormalizeAttachmentSocketMountTypeStem(stem);
+        var label = NormalizeLocalizedLabel(LocalizeAssetStem(stem));
+        label = LocalizeAttachmentSocketMountTypeLabel(label);
+        return CapitalizeFirst(label);
+    }
+
+    private static string NormalizeAttachmentSocketMountTypeStem(string stem)
+    {
+        var normalized = stem.Replace('-', '_');
+        var replacements = new (string From, string To)[]
+        {
+            ("weaponmagazine", "weapon_magazine_"),
+            ("weaponholster", "weapon_holster_"),
+            ("weaponsuppressor", "weapon_suppressor_"),
+            ("weaponflashlight", "weapon_flashlight_"),
+            ("weaponlasersight", "weapon_laser_sight_"),
+            ("weaponreddotsight", "weapon_red_dot_sight"),
+            ("weaponscope", "weapon_scope_"),
+            ("weaponsights", "weapon_sights_"),
+            ("weaponpso", "weapon_pso_"),
+            ("weaponak", "weapon_ak_"),
+            ("weaponm", "weapon_m"),
+            ("weapon_handgun_ironsight", "weapon_handgun_iron_sight"),
+            ("bowstabilizer", "bow_stabilizer"),
+            ("bowsilencer", "bow_silencer"),
+            ("compoundbowsight", "compound_bow_sight"),
+            ("dicecharmrail", "dice_charm_rail"),
+            ("dannymachete", "danny_machete"),
+            ("handgunholster", "handgun_holster"),
+            ("knifeholster", "knife_holster"),
+            ("headlamp", "head_lamp"),
+            ("improvisedflashlight", "improvised_flashlight"),
+            ("improvisedlasersight", "improvised_laser_sight"),
+            ("improvisedrail", "improvised_rail"),
+            ("prisonerhandleft", "prisoner_hand_left"),
+            ("prisonerhand", "prisoner_hand"),
+            ("weaponghillie", "weapon_ghillie"),
+            ("weaverrail", "weaver_rail"),
+            ("ironsight", "iron_sight"),
+            ("foldingsights", "folding_sights"),
+            ("reddotsight", "red_dot_sight"),
+            ("lasersight", "laser_sight"),
+            ("deserteagle", "desert_eagle"),
+            ("tommygun", "tommy_gun"),
+            ("carbonwolf", "carbon_wolf")
+        };
+
+        foreach (var (from, to) in replacements)
+        {
+            normalized = normalized.Replace(from, to, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return Regex.Replace(normalized, "_+", "_").Trim('_');
+    }
+
+    private static string LocalizeAttachmentSocketMountTypeLabel(string label)
+    {
+        var localized = label;
+        var replacements = new (string From, string To)[]
+        {
+            ("prisoner hand left", "левая рука персонажа"),
+            ("prisoner hand", "рука персонажа"),
+            ("handgun holster", "кобура пистолета"),
+            ("knife holster", "ножны"),
+            ("weapon holster rifle", "крепление винтовки на теле"),
+            ("weapon holster melee", "крепление холодного оружия на теле"),
+            ("weapon holster bow", "крепление лука на теле"),
+            ("weapon holster chainsaw", "крепление бензопилы на теле"),
+            ("weapon holster sledge", "крепление кувалды на теле"),
+            ("weapon magazine", "магазин оружия"),
+            ("weapon handgun", "пистолет"),
+            ("weapon suppressor", "глушитель оружия"),
+            ("weapon flashlight", "фонарь оружия"),
+            ("weapon laser sight", "лазерный прицел оружия"),
+            ("weapon red dot sight", "коллиматорный прицел оружия"),
+            ("weapon scope", "оптический прицел оружия"),
+            ("weapon sights", "прицельные приспособления оружия"),
+            ("weapon pso", "прицел PSO оружия"),
+            ("weapon ghillie", "камуфляж оружия"),
+            ("bow silencer", "демпфер лука"),
+            ("bow stabilizer", "стабилизатор лука"),
+            ("compound bow sight", "прицел блочного лука"),
+            ("dice charm rail", "планка брелока-кубика"),
+            ("head lamp", "налобный фонарь"),
+            ("improvised flashlight", "самодельный фонарь"),
+            ("improvised laser sight", "самодельный лазерный прицел"),
+            ("improvised rail", "самодельная планка"),
+            ("weaver rail", "планка Weaver"),
+            ("iron sight", "механический прицел"),
+            ("folding sights", "складные прицельные"),
+            ("laser sight", "лазерный прицел"),
+            ("red dot sight", "коллиматорный прицел"),
+            ("desert eagle", "Desert Eagle"),
+            ("tommy gun", "Tommy Gun"),
+            ("bayonet", "штык"),
+            ("suppressor", "глушитель"),
+            ("magazine", "магазин"),
+            ("weapon", "оружие"),
+            ("handgun", "пистолет"),
+            ("holster", "кобура"),
+            ("machete", "мачете"),
+            ("sight", "прицел"),
+            ("rear", "задний"),
+            ("front", "передний"),
+            ("rifle", "винтовка"),
+            ("melee", "холодное оружие"),
+            ("chainsaw", "бензопила"),
+            ("sledge", "кувалда"),
+            ("bow", "лук"),
+            ("rail", "планка")
+        };
+
+        foreach (var (from, to) in replacements)
+        {
+            localized = localized.Replace(from, to, StringComparison.OrdinalIgnoreCase);
+        }
+
+        localized = localized
+            .Replace("пистолет кобура", "кобура пистолета", StringComparison.OrdinalIgnoreCase)
+            .Replace("нож кобура", "ножны", StringComparison.OrdinalIgnoreCase)
+            .Replace("оружие пистолет", "пистолет", StringComparison.OrdinalIgnoreCase);
+
+        return NormalizeLocalizedLabel(localized);
+    }
+
     private List<StudioReferenceOptionDto> BuildVisualStaticMeshObjectReferenceOptions()
     {
         return MergeCustomVisualReferenceOptions(
@@ -2510,6 +3266,34 @@ internal sealed class StudioRuntime
         return _customVisualAssetCache ??= BuildCustomVisualAssetCatalog();
     }
 
+    public List<StudioCustomVisualAssetDto> GetCustomVisualAssets(string? kind)
+    {
+        var normalizedKind = (kind ?? string.Empty).Trim().ToLowerInvariant();
+        var allowedKinds = normalizedKind switch
+        {
+            "model" or "models" or "mesh" or "meshes" => new HashSet<string>(
+                ["static-mesh", "skeletal-mesh"],
+                StringComparer.OrdinalIgnoreCase),
+            "static-mesh" or "skeletal-mesh" or "material" or "texture" => new HashSet<string>(
+                [normalizedKind],
+                StringComparer.OrdinalIgnoreCase),
+            _ => null
+        };
+
+        return GetCustomVisualAssetCatalog()
+            .Where(asset => allowedKinds is null || allowedKinds.Contains(asset.Kind))
+            .Select(asset => new StudioCustomVisualAssetDto(
+                asset.DisplayName,
+                asset.Kind,
+                asset.TargetRelativePath,
+                asset.ObjectReference,
+                asset.AssetReference))
+            .OrderBy(asset => asset.Kind, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(asset => asset.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(asset => asset.TargetRelativePath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     public async Task<StudioCustomVisualImportResultDto> ImportCustomVisualAssetsAsync(IFormFileCollection files)
     {
         var warnings = new List<string>();
@@ -2517,7 +3301,7 @@ internal sealed class StudioRuntime
         {
             return new StudioCustomVisualImportResultDto(
                 false,
-                "Выбери cooked UE-файлы .uasset/.uexp/.ubulk/.uptnl.",
+                $"Выбери cooked UE-файлы .uasset/.uexp/.ubulk/.uptnl или модель {RawModelSupportedExtensionsText}.",
                 0,
                 [],
                 warnings);
@@ -2525,9 +3309,12 @@ internal sealed class StudioRuntime
 
         var customRoot = GetWritableCustomVisualAssetRoot();
         var importRoot = Path.Combine(customRoot, "Imported");
+        var rawImportRoot = Path.Combine(customRoot, "RawImports");
         Directory.CreateDirectory(importRoot);
+        Directory.CreateDirectory(rawImportRoot);
 
         var importedFiles = new List<string>();
+        var rawModels = new List<StudioRawModelImportDto>();
         foreach (var file in files)
         {
             if (file.Length <= 0)
@@ -2542,11 +3329,40 @@ internal sealed class StudioRuntime
             }
 
             var extension = Path.GetExtension(safeRelativePath);
+            if (IsRawModelArchiveExtension(extension))
+            {
+                await ImportRawModelArchivePackageAsync(
+                    file,
+                    safeRelativePath,
+                    rawImportRoot,
+                    warnings,
+                    rawModels);
+                continue;
+            }
+
+            if (IsRawModelUploadExtension(extension))
+            {
+                var rawDestinationPath = Path.GetFullPath(Path.Combine(rawImportRoot, safeRelativePath));
+                if (!IsPathInsideDirectory(rawDestinationPath, rawImportRoot))
+                {
+                    warnings.Add($"Файл пропущен: небезопасный путь {file.FileName}");
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(rawDestinationPath) ?? rawImportRoot);
+                await using (var rawStream = File.Create(rawDestinationPath))
+                {
+                    await file.CopyToAsync(rawStream);
+                }
+
+                EnsureRawModelSidecars(rawDestinationPath, extension, warnings);
+                rawModels.Add(BuildRawModelImportDto(rawImportRoot, rawDestinationPath, file.Length, extension));
+                continue;
+            }
+
             if (!IsAllowedCustomVisualUploadExtension(extension))
             {
-                warnings.Add(IsRawModelUploadExtension(extension)
-                    ? $"Сырые модели {extension} нужно сначала импортировать и cook в Unreal Engine 4.27 под Windows: {file.FileName}"
-                    : $"Файл пропущен: поддерживаются только .uasset/.uexp/.ubulk/.uptnl ({file.FileName})");
+                warnings.Add($"Файл пропущен: поддерживаются .uasset/.uexp/.ubulk/.uptnl, архивы и модели {RawModelSupportedExtensionsText} ({file.FileName})");
                 continue;
             }
 
@@ -2563,11 +3379,11 @@ internal sealed class StudioRuntime
             importedFiles.Add(destinationPath);
         }
 
-        if (importedFiles.Count == 0)
+        if (importedFiles.Count == 0 && rawModels.Count == 0)
         {
             return new StudioCustomVisualImportResultDto(
                 false,
-                "Не удалось импортировать ни одного cooked UE-файла.",
+                "Не удалось импортировать ни одного файла модели.",
                 0,
                 [],
                 warnings);
@@ -2611,12 +3427,7397 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (rawModels.Count > 0)
+        {
+            warnings.Add("Сырые модели сохранены. Открой ассет с visual-полем, выбери raw-модель в мастере замены и нажми «Подготовить в UE4».");
+        }
+
         return new StudioCustomVisualImportResultDto(
             true,
             null,
-            importedFiles.Count,
+            importedFiles.Count + rawModels.Count,
             assets,
+            warnings,
+            rawModels);
+    }
+
+    private async Task ImportRawModelArchivePackageAsync(
+        IFormFile file,
+        string safeRelativePath,
+        string rawImportRoot,
+        List<string> warnings,
+        List<StudioRawModelImportDto> rawModels)
+    {
+        var packageName = NormalizeUnrealAssetName(
+            Path.GetFileNameWithoutExtension(safeRelativePath),
+            "ModelPackage");
+        var packageRoot = Path.GetFullPath(Path.Combine(rawImportRoot, packageName));
+        if (!IsPathInsideDirectory(packageRoot, rawImportRoot))
+        {
+            warnings.Add($"Zip-пакет пропущен: небезопасное имя {file.FileName}");
+            return;
+        }
+
+        Directory.CreateDirectory(packageRoot);
+        var extractedFiles = new List<string>();
+
+        async Task ExtractExternalArchiveFileAsync(string archivePath, string prefix, int depth)
+        {
+            if (depth >= 3)
+            {
+                warnings.Add($"Вложенный архив пропущен: слишком глубокая вложенность {Path.GetFileName(archivePath)}");
+                return;
+            }
+
+            var extractor = FindExternalRawArchiveExtractor();
+            if (string.IsNullOrWhiteSpace(extractor))
+            {
+                warnings.Add($"Архив {Path.GetFileName(archivePath)} не распакован: не найден tar.exe/bsdtar или 7z.exe. Установи 7-Zip или оставь модель не внутри .rar/.7z.");
+                return;
+            }
+
+            var scratchRoot = Path.Combine(packageRoot, "_archive_scratch", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(scratchRoot);
+            try
+            {
+                ProcessRunResult result;
+                if (Path.GetFileName(extractor).Equals("7z.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    result = ProcessRunner.Run(
+                        extractor,
+                        $"x -y -o\"{scratchRoot}\" \"{archivePath}\"",
+                        packageRoot,
+                        _ => { },
+                        timeoutMs: 5 * 60 * 1000);
+                }
+                else
+                {
+                    result = ProcessRunner.Run(
+                        extractor,
+                        $"-xf \"{archivePath}\" -C \"{scratchRoot}\"",
+                        packageRoot,
+                        _ => { },
+                        timeoutMs: 5 * 60 * 1000);
+                }
+
+                if (result.ExitCode != 0)
+                {
+                    var tail = string.IsNullOrWhiteSpace(result.StdErrTail) ? result.StdOutTail : result.StdErrTail;
+                    warnings.Add($"Архив {Path.GetFileName(archivePath)} не удалось распаковать: {tail}");
+                    return;
+                }
+
+                foreach (var extractedPath in Directory.EnumerateFiles(scratchRoot, "*", SearchOption.AllDirectories))
+                {
+                    var relative = PathUtil.NormalizeRelative(Path.GetRelativePath(scratchRoot, extractedPath));
+                    var displayName = string.IsNullOrWhiteSpace(prefix)
+                        ? relative
+                        : $"{prefix}/{relative}";
+                    if (!TryGetSafeCustomVisualUploadPath(displayName, out var safeEntryRelativePath))
+                    {
+                        warnings.Add($"Файл в архиве пропущен: небезопасный путь {displayName}");
+                        continue;
+                    }
+
+                    var extension = Path.GetExtension(safeEntryRelativePath);
+                    if (IsRawModelArchiveExtension(extension))
+                    {
+                        await ExtractExternalArchiveFileAsync(extractedPath, Path.Combine(
+                            Path.GetDirectoryName(safeEntryRelativePath) ?? string.Empty,
+                            Path.GetFileNameWithoutExtension(safeEntryRelativePath)), depth + 1);
+                        continue;
+                    }
+
+                    if (!IsRawModelUploadExtension(extension) && !IsRawModelSidecarUploadExtension(extension))
+                    {
+                        continue;
+                    }
+
+                    var destinationPath = Path.GetFullPath(Path.Combine(packageRoot, safeEntryRelativePath));
+                    if (!IsPathInsideDirectory(destinationPath, packageRoot))
+                    {
+                        warnings.Add($"Файл в архиве пропущен: небезопасный путь {displayName}");
+                        continue;
+                    }
+
+                    Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? packageRoot);
+                    File.Copy(extractedPath, destinationPath, overwrite: true);
+                    extractedFiles.Add(destinationPath);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or TimeoutException)
+            {
+                warnings.Add($"Архив {Path.GetFileName(archivePath)} не удалось распаковать: {ex.Message}");
+            }
+            finally
+            {
+                TryDeleteDirectory(scratchRoot);
+            }
+        }
+
+        async Task ExtractArchiveEntriesAsync(ZipArchive sourceArchive, string prefix, int depth)
+        {
+            foreach (var entry in sourceArchive.Entries)
+            {
+                if (string.IsNullOrWhiteSpace(entry.Name) || entry.Length <= 0)
+                {
+                    continue;
+                }
+
+                var displayEntryName = string.IsNullOrWhiteSpace(prefix)
+                    ? entry.FullName
+                    : $"{prefix}/{entry.FullName}";
+                if (!TryGetSafeCustomVisualUploadPath(displayEntryName, out var safeEntryRelativePath))
+                {
+                    warnings.Add($"Файл в zip пропущен: небезопасный путь {displayEntryName}");
+                    continue;
+                }
+
+                var extension = Path.GetExtension(safeEntryRelativePath);
+                if (IsRawModelArchiveExtension(extension))
+                {
+                    if (depth >= 3)
+                    {
+                        warnings.Add($"Вложенный архив пропущен: слишком глубокая вложенность {displayEntryName}");
+                        continue;
+                    }
+
+                    try
+                    {
+                        await using var nestedSource = entry.Open();
+                        using var nestedStream = new MemoryStream();
+                        await nestedSource.CopyToAsync(nestedStream);
+                        nestedStream.Position = 0;
+                        var nestedDirectory = Path.GetDirectoryName(safeEntryRelativePath);
+                        var nestedStem = Path.GetFileNameWithoutExtension(safeEntryRelativePath);
+                        var nestedPrefix = string.IsNullOrWhiteSpace(nestedDirectory)
+                            ? nestedStem
+                            : Path.Combine(nestedDirectory, nestedStem);
+                        if (extension.Equals(".zip", StringComparison.OrdinalIgnoreCase))
+                        {
+                            using var nestedArchive = new ZipArchive(nestedStream, ZipArchiveMode.Read, leaveOpen: false);
+                            await ExtractArchiveEntriesAsync(nestedArchive, nestedPrefix, depth + 1);
+                        }
+                        else
+                        {
+                            var nestedArchivePath = Path.Combine(
+                                packageRoot,
+                                "_nested_archives",
+                                Guid.NewGuid().ToString("N") + extension.ToLowerInvariant());
+                            Directory.CreateDirectory(Path.GetDirectoryName(nestedArchivePath) ?? packageRoot);
+                            await File.WriteAllBytesAsync(nestedArchivePath, nestedStream.ToArray());
+                            await ExtractExternalArchiveFileAsync(nestedArchivePath, nestedPrefix, depth + 1);
+                            TryDeleteFile(nestedArchivePath);
+                        }
+                    }
+                    catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+                    {
+                        warnings.Add($"Вложенный архив {displayEntryName} не удалось прочитать: {ex.Message}");
+                    }
+
+                    continue;
+                }
+
+                if (!IsRawModelUploadExtension(extension) && !IsRawModelSidecarUploadExtension(extension))
+                {
+                    continue;
+                }
+
+                var destinationPath = Path.GetFullPath(Path.Combine(packageRoot, safeEntryRelativePath));
+                if (!IsPathInsideDirectory(destinationPath, packageRoot))
+                {
+                    warnings.Add($"Файл в zip пропущен: небезопасный путь {displayEntryName}");
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationPath) ?? packageRoot);
+                await using var source = entry.Open();
+                await using var destination = File.Create(destinationPath);
+                await source.CopyToAsync(destination);
+                extractedFiles.Add(destinationPath);
+            }
+        }
+
+        try
+        {
+            await using var uploadStream = file.OpenReadStream();
+            var extension = Path.GetExtension(safeRelativePath);
+            if (extension.Equals(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                using var archive = new ZipArchive(uploadStream, ZipArchiveMode.Read, leaveOpen: false);
+                await ExtractArchiveEntriesAsync(archive, string.Empty, 0);
+            }
+            else
+            {
+                var archivePath = Path.Combine(packageRoot, "_source_archive", Path.GetFileName(safeRelativePath));
+                Directory.CreateDirectory(Path.GetDirectoryName(archivePath) ?? packageRoot);
+                await using (var archiveFile = File.Create(archivePath))
+                {
+                    await uploadStream.CopyToAsync(archiveFile);
+                }
+
+                await ExtractExternalArchiveFileAsync(archivePath, string.Empty, 0);
+                TryDeleteFile(archivePath);
+            }
+        }
+        catch (InvalidDataException ex)
+        {
+            warnings.Add($"Архив {file.FileName} не удалось прочитать: {ex.Message}");
+            return;
+        }
+
+        var rawModelFiles = extractedFiles
+            .Where(path => IsRawModelUploadExtension(Path.GetExtension(path)))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (rawModelFiles.Count == 0)
+        {
+            warnings.Add($"В архиве {file.FileName} не найдено модели {RawModelSupportedExtensionsText}.");
+            return;
+        }
+
+        foreach (var modelPath in rawModelFiles)
+        {
+            EnsureRawModelSidecars(modelPath, Path.GetExtension(modelPath), warnings);
+            rawModels.Add(BuildRawModelImportDto(
+                rawImportRoot,
+                modelPath,
+                new FileInfo(modelPath).Length,
+                Path.GetExtension(modelPath)));
+        }
+
+        var sidecarCount = extractedFiles.Count - rawModelFiles.Count;
+        if (sidecarCount > 0)
+        {
+            warnings.Add($"Архив {file.FileName}: модель и {sidecarCount} файлов текстур/материалов сохранены вместе, чтобы UE4 мог подтянуть материалы при импорте.");
+        }
+
+        TryDeleteDirectory(Path.Combine(packageRoot, "_archive_scratch"));
+        TryDeleteDirectory(Path.Combine(packageRoot, "_nested_archives"));
+        TryDeleteDirectory(Path.Combine(packageRoot, "_source_archive"));
+    }
+
+    private StudioRawModelImportDto BuildRawModelImportDto(
+        string rawImportRoot,
+        string rawDestinationPath,
+        long sizeBytes,
+        string extension)
+    {
+        BlendRawModelAnalysis? blenderAnalysis = null;
+        if (TryGetBlenderRawModelAnalysis(rawDestinationPath, extension, out var analyzedRawModel))
+        {
+            blenderAnalysis = analyzedRawModel;
+        }
+
+        var bounds = blenderAnalysis?.Bounds
+                     ?? (TryAnalyzeRawModelBounds(rawDestinationPath, extension, out var modelBounds)
+                         ? modelBounds
+                         : null);
+        var hints = new List<string>
+        {
+            "Сохранить масштаб и pivot относительно похожего предмета.",
+            "Добавить socket с тем же именем, что указан у предмета.",
+            "После cook выбрать созданный StaticMesh или SkeletalMesh в мастере замены модели."
+        };
+        if (bounds is not null)
+        {
+            hints.Insert(0, $"Габариты модели: X {bounds.SizeX:0.###}, Y {bounds.SizeY:0.###}, Z {bounds.SizeZ:0.###} в единицах исходного файла.");
+        }
+
+        if (blenderAnalysis is not null)
+        {
+            hints.Add($"Blender-анализ: mesh-частей {blenderAnalysis.Parts.Count}, armature {blenderAnalysis.ArmatureCount}, bones {blenderAnalysis.BoneCount}, materials {blenderAnalysis.MaterialCount}.");
+            if (blenderAnalysis.ArmatureCount > 0 || blenderAnalysis.HumanoidScore >= 5)
+            {
+                hints.Add("Модель похожа на персонажа/NPC или комплект экипировки: для замены тела/одежды нужен SkeletalMesh-профиль, SCUM skeleton contract, physics asset и проверка skin/body clearance.");
+            }
+        }
+        else if (extension.Equals(".blend", StringComparison.OrdinalIgnoreCase))
+        {
+            hints.Add("Для глубокого анализа .blend нужен Blender. Если он подключён в tools\\blender, программа сама запустит его в фоне и прочитает части/кости/материалы.");
+        }
+
+        var parts = blenderAnalysis?.Parts
+                    ?? (TryAnalyzeRawModelParts(rawDestinationPath, extension, out var modelParts)
+                        ? modelParts
+                        : []);
+        if (parts.Count > 0)
+        {
+            var humanoidParts = parts.Count(part => part.Role.StartsWith("humanoid-", StringComparison.OrdinalIgnoreCase));
+            var armorParts = parts.Count(part => part.Role.StartsWith("armor-", StringComparison.OrdinalIgnoreCase));
+            hints.Add(armorParts > 0
+                ? $"Найдено частей модели: {parts.Count}, деталей экипировки: {armorParts}. Комплект можно разнести по игровым слотам: шлем, бронежилет/торс, руки, ноги и пояс."
+                : humanoidParts > 0
+                    ? $"Найдено частей модели: {parts.Count}, humanoid/NPC-кандидатов: {humanoidParts}. Это можно использовать для адаптации персонажа, одежды или тела NPC."
+                    : $"Найдено частей модели: {parts.Count}. Программа сможет использовать это для автосборки модульного профиля транспорта или предмета.");
+        }
+
+        return new StudioRawModelImportDto(
+            Path.GetFileNameWithoutExtension(rawDestinationPath),
+            extension.TrimStart('.').ToUpperInvariant(),
+            PathUtil.NormalizeRelative(Path.GetRelativePath(rawImportRoot, rawDestinationPath)),
+            sizeBytes,
+            "Сырая модель принята. Для игры её нужно конвертировать в cooked UE4.27 asset.",
+            hints,
+            bounds,
+            parts);
+    }
+
+    private static void EnsureRawModelSidecars(string rawModelPath, string extension, List<string> warnings)
+    {
+        if (extension.Equals(".obj", StringComparison.OrdinalIgnoreCase))
+        {
+            EnsureObjMaterialSidecar(rawModelPath, warnings);
+        }
+    }
+
+    private static bool TryConvertAsciiFbxToObjForBlender(
+        string fbxPath,
+        string outputDirectory,
+        string assetName,
+        List<string> warnings,
+        out string objPath)
+    {
+        objPath = string.Empty;
+        if (!IsAsciiFbxFile(fbxPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var text = File.ReadAllText(fbxPath);
+            var geometryBlocks = FindAsciiFbxGeometryBlocks(text).ToList();
+            if (geometryBlocks.Count == 0)
+            {
+                warnings.Add($"ASCII FBX {Path.GetFileName(fbxPath)} не удалось конвертировать: mesh geometry не найдена.");
+                return false;
+            }
+
+            Directory.CreateDirectory(outputDirectory);
+            objPath = Path.Combine(outputDirectory, $"{assetName}_ascii_fbx.obj");
+            var materialName = InferAsciiFbxMaterialName(fbxPath);
+            var mtlPath = Path.Combine(outputDirectory, $"{assetName}_ascii_fbx.mtl");
+
+            var obj = new StringBuilder();
+            obj.AppendLine("# Generated by SCUM Mod Studio from ASCII FBX for Blender compatibility.");
+            obj.AppendLine($"mtllib {Path.GetFileName(mtlPath)}");
+            obj.AppendLine($"usemtl {materialName}");
+
+            var vertexOffset = 1;
+            var uvOffset = 1;
+            var meshCount = 0;
+            var faceCount = 0;
+
+            foreach (var block in geometryBlocks)
+            {
+                var vertices = ParseAsciiFbxDoubleArray(block.Body, "Vertices");
+                var polygonIndices = ParseAsciiFbxIntArray(block.Body, "PolygonVertexIndex");
+                if (vertices.Count < 9 || polygonIndices.Count < 3)
+                {
+                    continue;
+                }
+
+                var uvs = ParseAsciiFbxDoubleArray(block.Body, "UV");
+                var uvIndices = ParseAsciiFbxIntArray(block.Body, "UVIndex");
+                var vertexCount = vertices.Count / 3;
+                obj.AppendLine();
+                obj.AppendLine($"o {SanitizeObjName(block.Name, meshCount)}");
+                for (var i = 0; i + 2 < vertices.Count; i += 3)
+                {
+                    obj.AppendLine(FormattableString.Invariant($"v {vertices[i]:0.########} {vertices[i + 1]:0.########} {vertices[i + 2]:0.########}"));
+                }
+
+                var uvCount = uvs.Count / 2;
+                for (var i = 0; i + 1 < uvs.Count; i += 2)
+                {
+                    obj.AppendLine(FormattableString.Invariant($"vt {uvs[i]:0.########} {1d - uvs[i + 1]:0.########}"));
+                }
+
+                var currentFace = new List<(int Vertex, int Uv)>();
+                var polygonVertexCursor = 0;
+                foreach (var rawIndex in polygonIndices)
+                {
+                    var endOfPolygon = rawIndex < 0;
+                    var vertexIndex = endOfPolygon ? -rawIndex - 1 : rawIndex;
+                    var uvIndex = polygonVertexCursor < uvIndices.Count
+                        ? uvIndices[polygonVertexCursor]
+                        : polygonVertexCursor;
+                    polygonVertexCursor++;
+
+                    if (vertexIndex >= 0 && vertexIndex < vertexCount)
+                    {
+                        currentFace.Add((vertexIndex, uvIndex));
+                    }
+
+                    if (!endOfPolygon)
+                    {
+                        continue;
+                    }
+
+                    if (currentFace.Count >= 3)
+                    {
+                        obj.Append("f");
+                        foreach (var point in currentFace)
+                        {
+                            var v = vertexOffset + point.Vertex;
+                            if (uvCount > 0 && point.Uv >= 0 && point.Uv < uvCount)
+                            {
+                                obj.Append(FormattableString.Invariant($" {v}/{uvOffset + point.Uv}"));
+                            }
+                            else
+                            {
+                                obj.Append(FormattableString.Invariant($" {v}"));
+                            }
+                        }
+
+                        obj.AppendLine();
+                        faceCount++;
+                    }
+
+                    currentFace.Clear();
+                }
+
+                vertexOffset += vertexCount;
+                uvOffset += uvCount;
+                meshCount++;
+            }
+
+            if (meshCount == 0 || faceCount == 0)
+            {
+                warnings.Add($"ASCII FBX {Path.GetFileName(fbxPath)} не удалось конвертировать: валидных faces не найдено.");
+                objPath = string.Empty;
+                return false;
+            }
+
+            File.WriteAllText(objPath, obj.ToString(), new UTF8Encoding(false));
+            File.WriteAllText(mtlPath, BuildAsciiFbxFallbackMtl(fbxPath, mtlPath, materialName, warnings), new UTF8Encoding(false));
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or FormatException)
+        {
+            warnings.Add($"ASCII FBX {Path.GetFileName(fbxPath)} не удалось конвертировать автоматически: {ex.Message}");
+            objPath = string.Empty;
+            return false;
+        }
+    }
+
+    private static bool IsAsciiFbxFile(string fbxPath)
+    {
+        if (!File.Exists(fbxPath)
+            || !Path.GetExtension(fbxPath).Equals(".fbx", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        Span<byte> header = stackalloc byte[32];
+        using var stream = File.OpenRead(fbxPath);
+        var read = stream.Read(header);
+        var text = Encoding.ASCII.GetString(header[..read]);
+        return !text.StartsWith("Kaydara FBX Binary", StringComparison.OrdinalIgnoreCase)
+            && (text.Contains("FBX", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("; FBX", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IEnumerable<(string Name, string Body)> FindAsciiFbxGeometryBlocks(string text)
+    {
+        foreach (Match match in Regex.Matches(text, @"(?:Geometry|Model)\s*:\s*(?:(?:[^,""]+,\s*)?)""(?:(?:Geometry|Model)::)?(?<name>[^""]+)""\s*,\s*""Mesh""\s*\{", RegexOptions.IgnoreCase))
+        {
+            var openIndex = text.IndexOf('{', match.Index);
+            if (openIndex < 0)
+            {
+                continue;
+            }
+
+            var depth = 0;
+            for (var i = openIndex; i < text.Length; i++)
+            {
+                if (text[i] == '{')
+                {
+                    depth++;
+                }
+                else if (text[i] == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        yield return (match.Groups["name"].Value, text[(openIndex + 1)..i]);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    private static List<double> ParseAsciiFbxDoubleArray(string block, string arrayName)
+    {
+        var values = ExtractAsciiFbxArrayText(block, arrayName);
+        if (string.IsNullOrWhiteSpace(values))
+        {
+            return [];
+        }
+
+        return Regex.Matches(values, @"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+            .Select(match => double.Parse(match.Value, CultureInfo.InvariantCulture))
+            .ToList();
+    }
+
+    private static List<int> ParseAsciiFbxIntArray(string block, string arrayName)
+    {
+        var values = ExtractAsciiFbxArrayText(block, arrayName);
+        if (string.IsNullOrWhiteSpace(values))
+        {
+            return [];
+        }
+
+        return Regex.Matches(values, @"[-+]?\d+")
+            .Select(match => int.Parse(match.Value, CultureInfo.InvariantCulture))
+            .ToList();
+    }
+
+    private static string ExtractAsciiFbxArrayText(string block, string arrayName)
+    {
+        var match = Regex.Match(
+            block,
+            $@"\b{Regex.Escape(arrayName)}\s*:\s*\*\d+\s*\{{\s*a\s*:\s*(?<values>.*?)\r?\n\s*\}}",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        if (match.Success)
+        {
+            return match.Groups["values"].Value;
+        }
+
+        match = Regex.Match(
+            block,
+            $@"(?m)^\s*{Regex.Escape(arrayName)}\s*:\s*(?<values>.*?)(?=^\s*[A-Za-z_][A-Za-z0-9_ ]*\s*:|^\s*\}})",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Singleline);
+        return match.Success ? match.Groups["values"].Value : string.Empty;
+    }
+
+    private static string InferAsciiFbxMaterialName(string fbxPath)
+    {
+        var directory = Path.GetDirectoryName(fbxPath) ?? string.Empty;
+        var baseColor = FindBestSidecarTexture(directory, ["basecolor", "base_color", "albedo", "diffuse", "color", "col"]);
+        var stem = baseColor is null
+            ? "Material"
+            : Path.GetFileNameWithoutExtension(baseColor);
+        foreach (var suffix in new[] { "_base_color", "_basecolor", "_albedo", "_diffuse", "_color", "_col" })
+        {
+            if (stem.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                stem = stem[..^suffix.Length];
+                break;
+            }
+        }
+
+        return SanitizeMtlToken(stem);
+    }
+
+    private static string SanitizeObjName(string value, int fallbackIndex)
+    {
+        var normalized = Regex.Replace(value.Trim(), @"[^\w.-]+", "_");
+        return string.IsNullOrWhiteSpace(normalized)
+            ? $"AsciiFbxMesh_{fallbackIndex}"
+            : normalized;
+    }
+
+    private static string BuildAsciiFbxFallbackMtl(string fbxPath, string mtlPath, string materialName, List<string> warnings)
+    {
+        var directory = Path.GetDirectoryName(fbxPath) ?? string.Empty;
+        var baseColor = FindBestSidecarTexture(directory, ["basecolor", "base_color", "albedo", "diffuse", "color", "col"]);
+        var normal = FindBestSidecarTexture(directory, ["normal", "normaldx", "normal_directx", "normalgl", "normal_open_gl", "nrm"]);
+        var roughness = FindBestSidecarTexture(directory, ["roughness", "rough", "rgh"]);
+        var metallic = FindBestSidecarTexture(directory, ["metallic", "metal", "met"]);
+        var materialDirectory = Path.GetDirectoryName(mtlPath) ?? string.Empty;
+
+        string? CopyTextureNearMtl(string? texturePath)
+        {
+            if (string.IsNullOrWhiteSpace(texturePath) || !File.Exists(texturePath))
+            {
+                return null;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(materialDirectory);
+                var destination = Path.Combine(materialDirectory, Path.GetFileName(texturePath));
+                if (!Path.GetFullPath(texturePath).Equals(Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Copy(texturePath, destination, overwrite: true);
+                }
+
+                return Path.GetFileName(destination).Replace(" ", "\\ ");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                warnings.Add($"ASCII FBX texture sidecar не удалось скопировать для OBJ bridge: {Path.GetFileName(texturePath)} ({ex.Message})");
+                return BuildMtlRelativeTexturePath(mtlPath, texturePath);
+            }
+        }
+
+        var builder = new StringBuilder();
+        builder.AppendLine("# Generated by SCUM Mod Studio from ASCII FBX sidecar textures.");
+        builder.AppendLine($"newmtl {SanitizeMtlToken(materialName)}");
+        builder.AppendLine("Ka 1.000000 1.000000 1.000000");
+        builder.AppendLine("Kd 1.000000 1.000000 1.000000");
+        builder.AppendLine("Ks 0.000000 0.000000 0.000000");
+        builder.AppendLine("Ns 64.000000");
+        if (baseColor is not null)
+        {
+            builder.AppendLine($"map_Kd {CopyTextureNearMtl(baseColor)}");
+        }
+
+        if (normal is not null)
+        {
+            builder.AppendLine($"map_Bump {CopyTextureNearMtl(normal)}");
+        }
+
+        if (roughness is not null)
+        {
+            builder.AppendLine($"map_Pr {CopyTextureNearMtl(roughness)}");
+        }
+
+        if (metallic is not null)
+        {
+            builder.AppendLine($"map_Pm {CopyTextureNearMtl(metallic)}");
+        }
+
+        return builder.ToString();
+    }
+
+    private static void EnsureObjMaterialSidecar(string objPath, List<string> warnings)
+    {
+        try
+        {
+            if (!File.Exists(objPath))
+            {
+                return;
+            }
+
+            var directory = Path.GetDirectoryName(objPath) ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                return;
+            }
+
+            var lines = File.ReadAllLines(objPath);
+            var mtllibLineIndex = Array.FindIndex(lines, line => line.TrimStart().StartsWith("mtllib ", StringComparison.OrdinalIgnoreCase));
+            var materialLibrary = mtllibLineIndex >= 0
+                ? lines[mtllibLineIndex].Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1)
+                : null;
+            if (string.IsNullOrWhiteSpace(materialLibrary))
+            {
+                materialLibrary = $"{Path.GetFileNameWithoutExtension(objPath)}.mtl";
+            }
+
+            var materialPath = Path.GetFullPath(Path.Combine(directory, materialLibrary.Replace('/', Path.DirectorySeparatorChar)));
+            if (!IsPathInsideDirectory(materialPath, directory) || File.Exists(materialPath))
+            {
+                return;
+            }
+
+            var materialNames = lines
+                .Where(line => line.TrimStart().StartsWith("usemtl ", StringComparison.OrdinalIgnoreCase))
+                .Select(line => line.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1))
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (materialNames.Count == 0)
+            {
+                materialNames.Add("Material");
+            }
+
+            var baseColor = FindBestSidecarTexture(directory, ["basecolor", "base_color", "albedo", "diffuse", "color", "col"]);
+            var normal = FindBestSidecarTexture(directory, ["normal", "normalgl", "normal_open_gl", "nrm"]);
+            var roughness = FindBestSidecarTexture(directory, ["roughness", "rough", "rgh"]);
+            var metallic = FindBestSidecarTexture(directory, ["metallic", "metal", "met"]);
+            var ao = FindBestSidecarTexture(directory, ["ao", "ambientocclusion", "mixed_ao"]);
+            if (baseColor is null && normal is null && roughness is null && metallic is null && ao is null)
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(materialPath) ?? directory);
+            var builder = new StringBuilder();
+            builder.AppendLine("# Generated by SCUM Mod Studio because OBJ referenced a missing material library.");
+            foreach (var materialName in materialNames)
+            {
+                builder.AppendLine($"newmtl {SanitizeMtlToken(materialName!)}");
+                builder.AppendLine("Ka 1.000000 1.000000 1.000000");
+                builder.AppendLine("Kd 1.000000 1.000000 1.000000");
+                builder.AppendLine("Ks 0.000000 0.000000 0.000000");
+                builder.AppendLine("Ns 64.000000");
+                if (baseColor is not null)
+                {
+                    builder.AppendLine($"map_Kd {BuildMtlRelativeTexturePath(materialPath, baseColor)}");
+                }
+                if (normal is not null)
+                {
+                    builder.AppendLine($"map_Bump {BuildMtlRelativeTexturePath(materialPath, normal)}");
+                }
+                if (roughness is not null)
+                {
+                    builder.AppendLine($"map_Pr {BuildMtlRelativeTexturePath(materialPath, roughness)}");
+                }
+                if (metallic is not null)
+                {
+                    builder.AppendLine($"map_Pm {BuildMtlRelativeTexturePath(materialPath, metallic)}");
+                }
+                if (ao is not null)
+                {
+                    builder.AppendLine($"map_Ka {BuildMtlRelativeTexturePath(materialPath, ao)}");
+                }
+                builder.AppendLine();
+            }
+
+            File.WriteAllText(materialPath, builder.ToString(), new UTF8Encoding(false));
+            if (mtllibLineIndex < 0)
+            {
+                var objText = File.ReadAllText(objPath);
+                File.WriteAllText(objPath, $"mtllib {Path.GetFileName(materialPath)}{Environment.NewLine}{objText}", new UTF8Encoding(false));
+            }
+
+            warnings.Add($"Для OBJ {Path.GetFileName(objPath)} создан отсутствующий material sidecar {Path.GetFileName(materialPath)} по найденным текстурам.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            warnings.Add($"OBJ material sidecar не удалось создать для {Path.GetFileName(objPath)}: {ex.Message}");
+        }
+    }
+
+    private static string SanitizeMtlToken(string value)
+    {
+        var token = Regex.Replace(value.Trim(), @"\s+", "_");
+        return string.IsNullOrWhiteSpace(token) ? "Material" : token;
+    }
+
+    private static string BuildMtlRelativeTexturePath(string materialPath, string texturePath)
+    {
+        var materialDirectory = Path.GetDirectoryName(materialPath) ?? string.Empty;
+        return PathUtil.NormalizeRelative(Path.GetRelativePath(materialDirectory, texturePath)).Replace(" ", "\\ ");
+    }
+
+    private static string? FindBestSidecarTexture(string modelDirectory, IReadOnlyList<string> tokens)
+    {
+        var searchRoots = BuildRawModelTextureSearchRoots(modelDirectory);
+        var normalizedTokens = tokens
+            .Select(NormalizeTextureSearchToken)
+            .Where(token => !string.IsNullOrWhiteSpace(token))
+            .ToList();
+        var textureExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr"
+        };
+
+        return searchRoots
+            .Where(Directory.Exists)
+            .SelectMany(root => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            .Where(path => textureExtensions.Contains(Path.GetExtension(path)))
+            .Select(path => new
+            {
+                Path = path,
+                Name = NormalizeTextureSearchToken(Path.GetFileNameWithoutExtension(path)),
+                Length = new FileInfo(path).Length
+            })
+            .Where(item => normalizedTokens.Any(token => item.Name.Contains(token, StringComparison.Ordinal)))
+            .OrderByDescending(item => normalizedTokens.Any(token => item.Name.EndsWith(token, StringComparison.Ordinal)))
+            .ThenByDescending(item => item.Length)
+            .Select(item => item.Path)
+            .FirstOrDefault();
+    }
+
+    private static List<string> BuildRawModelTextureSearchRoots(string modelDirectory)
+    {
+        var roots = new List<string>();
+        var current = string.IsNullOrWhiteSpace(modelDirectory)
+            ? null
+            : new DirectoryInfo(modelDirectory);
+        for (var depth = 0; current is not null && depth < 5; depth++, current = current.Parent)
+        {
+            if (current.Name.Equals("RawImports", StringComparison.OrdinalIgnoreCase)
+                || current.Name.Equals("custom-assets", StringComparison.OrdinalIgnoreCase)
+                || current.Name.Equals("Imported", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            roots.Add(current.FullName);
+            roots.Add(Path.Combine(current.FullName, "textures"));
+            roots.Add(Path.Combine(current.FullName, "Textures"));
+            roots.Add(Path.Combine(current.FullName, "materials"));
+            roots.Add(Path.Combine(current.FullName, "Materials"));
+        }
+
+        return roots
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string NormalizeTextureSearchToken(string value)
+    {
+        var chars = value
+            .ToLowerInvariant()
+            .Where(char.IsLetterOrDigit)
+            .ToArray();
+        return new string(chars);
+    }
+
+    private static int CopyRawModelTextureSidecarsForCook(string rawModelPath, string destinationDirectory, List<string> warnings)
+    {
+        try
+        {
+            var sourceDirectory = Path.GetDirectoryName(rawModelPath);
+            if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
+            {
+                return 0;
+            }
+
+            var searchRoots = BuildRawModelTextureSearchRoots(sourceDirectory);
+
+            var textureExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr"
+            };
+
+            Directory.CreateDirectory(destinationDirectory);
+            var copied = 0;
+            var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var texturePath in searchRoots
+                         .Where(Directory.Exists)
+                         .SelectMany(root => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+                         .Where(path => textureExtensions.Contains(Path.GetExtension(path)))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var destinationName = Path.GetFileName(texturePath);
+                if (!usedNames.Add(destinationName))
+                {
+                    destinationName = $"{Path.GetFileNameWithoutExtension(texturePath)}_{copied:00}{Path.GetExtension(texturePath)}";
+                    usedNames.Add(destinationName);
+                }
+
+                var destinationPath = Path.Combine(destinationDirectory, destinationName);
+                if (!Path.GetFullPath(texturePath).Equals(Path.GetFullPath(destinationPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Copy(texturePath, destinationPath, overwrite: true);
+                    copied++;
+                }
+            }
+
+            if (copied > 0)
+            {
+                warnings.Add($"Sidecar PBR-текстуры скопированы рядом с FBX для UE4 import: {copied}.");
+            }
+
+            return copied;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            warnings.Add($"Sidecar PBR-текстуры не удалось скопировать для UE4 import: {ex.Message}");
+            return 0;
+        }
+    }
+
+    public StudioRawModelCookResultDto CookRawModelAsset(StudioRawModelCookRequestDto request)
+    {
+        var warnings = new List<string>();
+        if (request is null || string.IsNullOrWhiteSpace(request.RawSourceRelativePath))
+        {
+            return new StudioRawModelCookResultDto(false, "Выбери raw-модель, которую нужно подготовить.", null, [], warnings);
+        }
+
+        if (!TryResolveRawModelImportPath(request.RawSourceRelativePath, out var rawModelPath)
+            || !File.Exists(rawModelPath))
+        {
+            return new StudioRawModelCookResultDto(false, "Raw-модель не найдена в папке импортов программы.", null, [], warnings);
+        }
+
+        var extension = Path.GetExtension(rawModelPath);
+        if (!IsRawModelUploadExtension(extension))
+        {
+            return new StudioRawModelCookResultDto(false, $"Формат {extension} не поддерживается для автоматической подготовки модели.", null, [], warnings);
+        }
+
+        var ueEditorCmd = FindUnrealEditorCmdPath();
+        if (string.IsNullOrWhiteSpace(ueEditorCmd) || !File.Exists(ueEditorCmd))
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Для этой кнопки нужен установленный Unreal Engine 4.27. Программа сама запустит UE4, но сам редактор должен быть установлен легально.",
+                null,
+                [],
+                warnings);
+        }
+
+        var modelKind = NormalizeRawCookModelKind(request.ModelKind);
+        var importAsSkeletal = modelKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase);
+        var paint = RawModelPaintOptions.FromRequest(request);
+        var fit = RawModelFitOptions.FromRequest(request, modelKind);
+        var transform = RawModelTransformOptions.FromRequest(request);
+        var weaponRig = RawModelWeaponRigOptions.FromRequest(request, modelKind);
+        var externalMaterial = RawModelExternalMaterialReference.FromRequest(request, warnings);
+        var rawPartNames = NormalizeRawPartNameFilter(request.RawPartNames);
+        if (rawPartNames.Count == 0
+            && TryInferRawPartNamesForTarget(rawModelPath, extension, request, out var inferredRawPartNames, out var inferredPartGroup))
+        {
+            rawPartNames = inferredRawPartNames;
+            warnings.Add($"Программа сама выбрала части raw-модели для слота «{inferredPartGroup}»: {string.Join(", ", rawPartNames.Take(10))}.");
+        }
+        var isVehicleRawCook = IsVehicleRawCookRequest(request);
+        var staticWeaponAdapter = !importAsSkeletal && IsWeaponRawCookRequest(request);
+        var vehicleVisualOverlay = isVehicleRawCook && IsVehicleVisualOverlayCookRequest(request);
+        var vehicleQueryProxy = isVehicleRawCook && IsVehicleQueryProxyCookRequest(request);
+        var vehicleFullRig = isVehicleRawCook && importAsSkeletal && IsVehicleFullSkeletalCookRequest(request);
+        var placement = RawModelPlacementOptions.FromRequest(request, modelKind, staticWeaponAdapter, isVehicleRawCook, vehicleVisualOverlay, vehicleQueryProxy);
+        var queryProxy = RawModelQueryProxyOptions.FromRequest(request, vehicleQueryProxy);
+        var allowSkeletalOptimization = vehicleFullRig
+            || placement.Profile.Equals("npc-character", StringComparison.OrdinalIgnoreCase)
+            || placement.Profile.Equals("wearable-contract", StringComparison.OrdinalIgnoreCase);
+        var optimization = RawModelOptimizationOptions.FromRequest(request, importAsSkeletal, rawPartNames.Count > 0, allowSkeletalOptimization);
+        if (isVehicleRawCook && importAsSkeletal && !weaponRig.Enabled && !vehicleFullRig)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Транспортное SkeletalMesh-поле нельзя безопасно заменить общей raw-моделью без vehicle full replacement режима. Для самолёта/машины нужен тот же skeleton/physics/socket contract, query/collision meshes, mount slots, материалы и damage regions.",
+                null,
+                [],
+                warnings);
+        }
+
+        if (isVehicleRawCook && !externalMaterial.Enabled && !vehicleVisualOverlay && !vehicleQueryProxy)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Для транспортных StaticMesh-полей выбери режим материала «Из игры / импортированный .mi» и cooked MaterialInstance из SCUM. Материалы из интернет-модели могут не иметь shader map в cooked SCUM и уже приводили к fatal/runtime errors.",
+                null,
+                [],
+                warnings);
+        }
+
+        if (isVehicleRawCook)
+        {
+            warnings.Add(vehicleFullRig
+                ? "Транспортный cook идёт в full replacement режиме: модель готовится как root SkeletalMesh под skeleton/physics contract цели, а материалы интернет-модели не используются в игре напрямую."
+                : vehicleVisualOverlay
+                    ? "Транспортный cook идёт в visual overlay режиме: оригинальный physics SkeletalMesh остаётся на месте, а новая модель готовится как отдельный StaticMesh-слой с собственными cooked материалами."
+                    : vehicleQueryProxy
+                        ? queryProxy.UseBoxProxy
+                            ? "Транспортный cook идёт в query-proxy режиме: Blender создаст простой grounded box proxy вместо полной интернет-геометрии."
+                            : "Транспортный cook идёт в query-proxy режиме: Blender создаст упрощённую grounded копию модели, чтобы query/collision форма совпадала с visual."
+                        : "Транспортный cook идёт в безопасном режиме: геометрия готовится как StaticMesh, а материалы интернет-модели не используются в игре напрямую.");
+        }
+        if (rawPartNames.Count > 0)
+        {
+            warnings.Add($"Raw cook ограничен выбранными частями модели: {string.Join(", ", rawPartNames.Take(8))}.");
+            if (!importAsSkeletal)
+            {
+                warnings.Add("Для StaticMesh-модуля pivot будет пересчитан в центр выбранных raw parts, чтобы attachment не наследовал глобальное смещение всей исходной модели.");
+            }
+        }
+        if (optimization.Enabled)
+        {
+            warnings.Add($"Blender упростит выбранный модуль до бюджета примерно {optimization.TargetTriangleCount:N0} triangles перед UE4 cook.");
+        }
+
+        var needsBlender = importAsSkeletal
+                           || fit.AutoFit
+                           || paint.Enabled
+                           || transform.HasTransform
+                           || rawPartNames.Count > 0
+                           || optimization.Enabled
+                           || staticWeaponAdapter
+                           || vehicleVisualOverlay
+                           || vehicleQueryProxy
+                           || !extension.Equals(".fbx", StringComparison.OrdinalIgnoreCase);
+        var blenderPath = FindBlenderExecutablePath();
+        if (needsBlender && (string.IsNullOrWhiteSpace(blenderPath) || !File.Exists(blenderPath)))
+        {
+            var reason = importAsSkeletal
+                    ? "Для оружейного SkeletalMesh нужна автоматическая подготовка skeleton/skin через Blender."
+                    : fit.AutoFit
+                        ? "Для автоматической подгонки размера модели нужен Blender."
+                : paint.Enabled
+                    ? "Для автоматической окраски модели нужен Blender."
+                : $"Для {extension} нужен установленный Blender.";
+            return new StudioRawModelCookResultDto(
+                false,
+                $"{reason} После установки программа будет запускать его сама в фоне.",
+                null,
+                [],
+                warnings);
+        }
+
+        if (weaponRig.Enabled)
+        {
+            warnings.Add("Выбрано skeletal-поле оружия. Программа подготовит skeleton/skin через Blender, чтобы UE4 cook создал настоящий SkeletalMesh, а не невидимый StaticMesh.");
+        }
+        else if (staticWeaponAdapter)
+        {
+            warnings.Add($"Выбрано StaticMesh-поле оружия. Программа проанализирует профиль хвата {placement.DisplayName}, выровняет raw-модель по grip/anchor зоне и сохранит материалы/текстуры модели.");
+            if (weaponRig.TargetProfile.Equals("melee-blade", StringComparison.OrdinalIgnoreCase))
+            {
+                warnings.Add("Melee 2H: точка Grip теперь выбирается на существующей рукояти, а модель целиком сдвигается к зоне второй руки. Геометрия рукояти по умолчанию не меняется, чтобы не тянуть UV/текстуры.");
+            }
+        }
+        else if (placement.Profile.Equals("wearable-head", StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add("Выбран headwear-профиль: модель будет ориентирована под реальный Prisoner3 UpperHeadSocket, игровые head attachment sockets и envelope оригинального военного шлема, а не только по общему bounding box.");
+        }
+        else if (placement.Profile.Equals("wearable-contract", StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add("Выбран wearable-профиль брони/одежды: программа будет готовить модель под body slot цели, target skeleton contract и запас поверх тела игрока. Для комплектов брони части лучше cook-ить отдельно: шлем, торс/жилет, руки, ноги, пояс.");
+        }
+        else if (placement.Profile.Equals("npc-character", StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add("Выбран NPC character-профиль: модель будет анализироваться как humanoid SkeletalMesh. Для настоящей замены NPC программа должна совместить SCUM skeleton, physics asset, material slots и body/cloth clearance; небезопасная простая замена будет блокироваться предупреждениями.");
+        }
+        else if (vehicleFullRig)
+        {
+            warnings.Add("Выбрано корневое vehicle SkeletalMesh-поле. Программа создаст совместимый bone contract цели и привяжет всю геометрию к root, сохранив логику, physics asset и animation blueprint SCUM.");
+        }
+        else if (importAsSkeletal)
+        {
+            warnings.Add("Выбрано неоружейное SkeletalMesh-поле. Программа подготовит транспортно/предметный skeleton contract без M1887 weapon rig.");
+        }
+
+        var scaleFactor = Math.Clamp(request.ScalePercent.GetValueOrDefault(100d), 1d, 1000d) / 100d;
+        var assetName = BuildRawCookAssetName(request, rawModelPath, importAsSkeletal);
+        var gameDestinationPath = $"/Game/SMS/R/{assetName}";
+        var customRoot = GetWritableCustomVisualAssetRoot();
+        var customTargetRoot = Path.Combine(customRoot, "Imported", "SCUM", "Content", "SMS", "R", assetName);
+        var runRoot = Path.Combine(GetCookScratchRoot(), Guid.NewGuid().ToString("N")[..8]);
+        var inputRoot = Path.Combine(runRoot, "input");
+        Directory.CreateDirectory(inputRoot);
+
+        ProcessRunResult? blenderResult = null;
+        ProcessRunResult? importResult = null;
+        ProcessRunResult? cookResult = null;
+        List<string> targetBoneNames = [];
+        if (importAsSkeletal
+            && TryResolveTargetSkeletonBoneNames(request, warnings, out var resolvedBoneNames))
+        {
+            targetBoneNames = resolvedBoneNames;
+        }
+        if (weaponRig.Enabled)
+        {
+            targetBoneNames = AugmentWeaponTargetBoneNames(request, weaponRig, targetBoneNames, warnings);
+        }
+        try
+        {
+            var sourceForUnreal = rawModelPath;
+            if (needsBlender)
+            {
+                var blenderSourcePath = rawModelPath;
+                if (externalMaterial.Enabled || paint.Enabled)
+                {
+                    warnings.Add("Sidecar PBR-текстуры не копируются в UE4 scratch: выбран материал из игры/ручная окраска. Это экономит память cook для тяжёлых raw-моделей.");
+                }
+                else
+                {
+                    CopyRawModelTextureSidecarsForCook(rawModelPath, inputRoot, warnings);
+                }
+                if (extension.Equals(".fbx", StringComparison.OrdinalIgnoreCase)
+                    && TryConvertAsciiFbxToObjForBlender(rawModelPath, inputRoot, assetName, warnings, out var convertedObjPath))
+                {
+                    blenderSourcePath = convertedObjPath;
+                    warnings.Add("ASCII FBX автоматически конвертирован во временный OBJ перед Blender: современные версии Blender не импортируют ASCII FBX напрямую.");
+                }
+
+                sourceForUnreal = Path.Combine(inputRoot, $"{assetName}.fbx");
+                var blenderScriptPath = Path.Combine(runRoot, "scum_mod_studio_blender_export.py");
+                File.WriteAllText(
+                    blenderScriptPath,
+                    BuildBlenderExportScript(blenderSourcePath, sourceForUnreal, importAsSkeletal, fit, transform, weaponRig, staticWeaponAdapter, vehicleFullRig, vehicleVisualOverlay, queryProxy, targetBoneNames, rawPartNames, optimization, placement),
+                    Encoding.UTF8);
+
+                blenderResult = ProcessRunner.Run(
+                    blenderPath!,
+                    $"--background --python {QuoteCommandArgument(blenderScriptPath)}",
+                    runRoot,
+                    _ => { },
+                    timeoutMs: 30 * 60 * 1000);
+
+                if (blenderResult.ExitCode != 0)
+                {
+                    return new StudioRawModelCookResultDto(
+                        false,
+                        "Blender не смог конвертировать модель в FBX.",
+                        null,
+                        [],
+                        warnings,
+                        null,
+                        MergeProcessTail(blenderResult));
+                }
+
+                if (!File.Exists(sourceForUnreal))
+                {
+                    return new StudioRawModelCookResultDto(
+                        false,
+                        "Blender завершился без ошибки, но FBX-файл для UE4 не появился.",
+                        null,
+                        [],
+                        warnings,
+                        null,
+                        MergeProcessTail(blenderResult));
+                }
+            }
+
+            var projectRoot = Path.Combine(runRoot, "p");
+            var projectName = "SMS";
+            var projectPath = CreateRawModelCookProject(projectRoot, projectName);
+            var importScriptPath = Path.Combine(runRoot, "scum_mod_studio_ue_import.py");
+            File.WriteAllText(
+                importScriptPath,
+                BuildUnrealImportScript(sourceForUnreal, gameDestinationPath, assetName, importAsSkeletal, scaleFactor, paint, weaponRig, placement, externalMaterial.Enabled, vehicleVisualOverlay, vehicleQueryProxy),
+                Encoding.UTF8);
+
+            importResult = ProcessRunner.Run(
+                ueEditorCmd,
+                $"{QuoteCommandArgument(projectPath)} -run=pythonscript -script={QuoteCommandArgument(importScriptPath)} -unattended -nop4 -nosplash -NoLogTimes -UTF8Output",
+                projectRoot,
+                _ => { },
+                timeoutMs: 30 * 60 * 1000);
+
+            if (importResult.ExitCode != 0)
+            {
+                return new StudioRawModelCookResultDto(
+                    false,
+                    "UE4.27 не смог импортировать модель. Проверь, что модель не повреждена и подходит для выбранного типа mesh.",
+                    null,
+                    [],
+                    warnings,
+                    MergeProcessTail(importResult),
+                    MergeProcessTail(blenderResult));
+            }
+
+            cookResult = ProcessRunner.Run(
+                ueEditorCmd,
+                $"{QuoteCommandArgument(projectPath)} -run=Cook -TargetPlatform=WindowsNoEditor -unattended -nop4 -nosplash -NoLogTimes -UTF8Output",
+                projectRoot,
+                _ => { },
+                timeoutMs: 60 * 60 * 1000);
+
+            if (cookResult.ExitCode != 0)
+            {
+                return new StudioRawModelCookResultDto(
+                    false,
+                    "UE4.27 импортировал модель, но cook под WindowsNoEditor завершился ошибкой.",
+                    null,
+                    [],
+                    warnings,
+                    MergeProcessTail(cookResult),
+                    MergeProcessTail(blenderResult));
+            }
+
+            if (Directory.Exists(customTargetRoot))
+            {
+                Directory.Delete(customTargetRoot, recursive: true);
+            }
+
+            Directory.CreateDirectory(customTargetRoot);
+            var copiedFiles = CopyCookedRawModelFiles(projectRoot, projectName, assetName, customTargetRoot, warnings);
+            if (copiedFiles.Count == 0)
+            {
+                return new StudioRawModelCookResultDto(
+                    false,
+                    "Cook завершился, но программа не нашла cooked .uasset/.uexp/.ubulk файлы модели.",
+                    null,
+                    [],
+                    warnings,
+                    MergeProcessTail(cookResult),
+                    MergeProcessTail(blenderResult));
+            }
+
+            if (externalMaterial.Enabled)
+            {
+                var patchedMaterialSlots = PatchCookedRawModelMaterialReferences(customTargetRoot, externalMaterial, warnings);
+                if (patchedMaterialSlots > 0)
+                {
+                    warnings.Add($"Материал {externalMaterial.DisplayName} привязан к cooked-модели: слотов заменено {patchedMaterialSlots}.");
+                }
+                else
+                {
+                    warnings.Add("Выбранный .mi/material не удалось привязать: в cooked mesh не найдены заменяемые material slots.");
+                }
+            }
+            else if (TryCreateScumCompatibleMaterialInstanceCloneForRawModel(request, customTargetRoot, assetName, warnings, out var clonedMaterial))
+            {
+                var patchedMaterialSlots = PatchCookedRawModelMaterialReferences(customTargetRoot, clonedMaterial, warnings);
+                if (patchedMaterialSlots > 0)
+                {
+                    warnings.Add($"SCUM-compatible material clone {clonedMaterial.DisplayName} привязан к cooked-модели: слотов заменено {patchedMaterialSlots}.");
+                }
+                else
+                {
+                    warnings.Add($"SCUM-compatible material clone {clonedMaterial.DisplayName} создан, но в cooked mesh не найдены заменяемые material slots.");
+                }
+            }
+
+            if (importAsSkeletal)
+            {
+                if (TryResolveTargetSkeletonReference(request, warnings, out var targetSkeleton))
+                {
+                    var patchedSkeletons = PatchCookedRawModelSkeletonReferences(customTargetRoot, targetSkeleton, warnings);
+                    if (patchedSkeletons > 0)
+                    {
+                        var profileKind = weaponRig.Enabled ? "Оружейный skeleton" : "Skeleton target-профиля";
+                        warnings.Add($"{profileKind} привязан к цели {targetSkeleton.DisplayName}: mesh-экспортов обновлено {patchedSkeletons}.");
+                    }
+                    else
+                    {
+                        warnings.Add("Skeleton цели найден, но в cooked-модели не нашлось SkeletalMesh-экспортов для обновления.");
+                    }
+                }
+                else
+                {
+                    warnings.Add("Skeleton цели не определён автоматически: модель оставлена на собственном skeleton.");
+                }
+
+                if (TryResolveTargetPhysicsAssetReference(request, warnings, out var targetPhysicsAsset))
+                {
+                    var patchedPhysicsAssets = PatchCookedRawModelPhysicsAssetReferences(customTargetRoot, targetPhysicsAsset, warnings);
+                    if (patchedPhysicsAssets > 0)
+                    {
+                        var profileKind = weaponRig.Enabled ? "Оружейный PhysicsAsset" : "PhysicsAsset target-профиля";
+                        warnings.Add($"{profileKind} привязан к цели {targetPhysicsAsset.DisplayName}: mesh-экспортов обновлено {patchedPhysicsAssets}.");
+                    }
+                    else
+                    {
+                        warnings.Add("PhysicsAsset цели найден, но в cooked-модели не нашлось SkeletalMesh-экспортов для обновления.");
+                    }
+                }
+                else
+                {
+                    warnings.Add("PhysicsAsset цели не определён автоматически: подбор/трассировка по новой модели может работать хуже.");
+                }
+            }
+
+            var targetUassetPath = Path.Combine(customTargetRoot, $"{assetName}.uasset");
+            if (!File.Exists(targetUassetPath))
+            {
+                targetUassetPath = copiedFiles.FirstOrDefault(path =>
+                    Path.GetFileName(path).Equals($"{assetName}.uasset", StringComparison.OrdinalIgnoreCase))
+                    ?? copiedFiles.FirstOrDefault(path => path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+                    ?? string.Empty;
+            }
+
+            _customVisualAssetCache = null;
+            if (string.IsNullOrWhiteSpace(targetUassetPath)
+                || !TryBuildCustomVisualAssetInfo(customRoot, targetUassetPath, out var assetInfo))
+            {
+                return new StudioRawModelCookResultDto(
+                    false,
+                    "Модель приготовлена, но программа не смогла распознать cooked visual asset.",
+                    null,
+                    [],
+                    warnings,
+                    MergeProcessTail(cookResult),
+                    MergeProcessTail(blenderResult));
+            }
+
+            var asset = new StudioCustomVisualAssetDto(
+                assetInfo.DisplayName,
+                assetInfo.Kind,
+                assetInfo.TargetRelativePath,
+                assetInfo.ObjectReference,
+                assetInfo.AssetReference);
+
+            if (Math.Abs(scaleFactor - 1d) > 0.0001d)
+            {
+                warnings.Add($"Дополнительный масштаб применён через UE4: {scaleFactor:0.###}x.");
+            }
+
+            if (fit.AutoFit)
+            {
+                warnings.Add($"Автоподгонка размера: модель нормализована под {fit.TargetLongestCm:0.#} см по самой длинной стороне до UE4 cook.");
+            }
+
+            if (queryProxy.Enabled)
+            {
+                warnings.Add($"Query/collision proxy создан как grounded low-poly hull: L/W/H {queryProxy.LengthScale * 100d:0.#}%/{queryProxy.WidthScale * 100d:0.#}%/{queryProxy.HeightScale * 100d:0.#}% от подогнанной модели.");
+            }
+
+            if (HasRawCookRuntimeFit(request))
+            {
+                warnings.Add(transform.HasTransform
+                    ? "Смещение и поворот запечены в raw-модель до UE4 cook; это нужно для оружия, где в игровом ассете нет отдельных transform-полей."
+                    : "Смещение и поворот применяются к выбранному игровому ассету в мастере, а не запекаются в mesh.");
+            }
+
+            if (weaponRig.Enabled)
+            {
+                warnings.Add(targetBoneNames.Count > 0
+                    ? $"Оружейный rig-профиль создал skeleton contract целевого оружия: bones {targetBoneNames.Count}, геометрия выровнена по weapon bounds, vertices привязаны к root."
+                    : "Оружейный rig-профиль M1887 добавил полный SCUM skeleton contract: Root, Lever, Cock, Bullet, LeftHandIK, Muzzle, BulletShells, RepositionBone и Bullets; геометрия выровнена по оригинальным bounds цели, а UE4 import получает pitch 180 для совпадения ref-pose с игрой.");
+            }
+            else if (vehicleFullRig)
+            {
+                warnings.Add(targetBoneNames.Count > 0
+                    ? $"Vehicle full replacement создал skeleton contract цели: bones {targetBoneNames.Count}, вся геометрия центрирована на root и привязана к root, чтобы attachment transforms Duster не разбрасывали модель."
+                    : "Vehicle full replacement приготовлен без списка bones цели; skeleton/physics будут взяты из выбранного поля, но совместимость нужно проверять особенно внимательно.");
+            }
+
+            if (paint.Enabled)
+            {
+                warnings.Add($"Окраска модели создана в UE4 material stage: {paint.DisplayColor}, сила {paint.StrengthPercent:0.#}%, металл {paint.MetallicPercent:0.#}%, шероховатость {paint.RoughnessPercent:0.#}%.");
+            }
+
+            var suggestedEdit = TryBuildRawModelCookSuggestedEdit(request, asset, warnings);
+            return new StudioRawModelCookResultDto(
+                true,
+                null,
+                asset.TargetRelativePath,
+                [asset],
+                warnings,
+                MergeProcessTail(cookResult),
+                MergeProcessTail(blenderResult),
+                suggestedEdit);
+        }
+        catch (Exception ex)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                ex.Message,
+                null,
+                [],
+                warnings,
+                MergeProcessTail(cookResult ?? importResult),
+                MergeProcessTail(blenderResult));
+        }
+    }
+
+    private StudioAssetEditDto? TryBuildRawModelCookSuggestedEdit(
+        StudioRawModelCookRequestDto request,
+        StudioCustomVisualAssetDto cookedAsset,
+        List<string> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(request.AssetId)
+            || string.IsNullOrWhiteSpace(request.FieldPath))
+        {
+            return null;
+        }
+
+        StudioModAssetSchemaDto? schema = null;
+        var value = cookedAsset.AssetReference;
+        try
+        {
+            schema = GetModdingAssetSchema(request.AssetId);
+            var field = schema.Fields.FirstOrDefault(candidate =>
+                candidate.FieldPath.Equals(request.FieldPath, StringComparison.OrdinalIgnoreCase));
+            if (field is not null)
+            {
+                value = SelectCookedVisualReferenceValue(
+                    cookedAsset,
+                    field.ReferencePickerKind,
+                    field.CurrentValue);
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Cooked модель создана, но тип reference-поля не удалось проверить автоматически: {ex.Message}. Используется asset reference.");
+        }
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            warnings.Add("Cooked модель создана, но suggested edit не сформирован: у cooked asset нет ссылки нужного типа.");
+            return null;
+        }
+
+        var edits = new List<StudioFieldEditDto>
+        {
+            new(request.FieldPath, value)
+        };
+        if (schema is not null)
+        {
+            AppendFamilySuggestedReplacementEdits(request, cookedAsset, schema, edits, warnings);
+        }
+        AppendWeaponReplacementContractEdits(request, edits, warnings);
+        AppendWeaponSuggestedFitEdits(request, edits, warnings);
+
+        warnings.Add("Подготовлена suggested edit для выбранного visual-поля: UI может сразу сохранить изменение в staged мод.");
+        return new StudioAssetEditDto(
+            request.AssetId,
+            edits,
+            []);
+    }
+
+    private void AppendFamilySuggestedReplacementEdits(
+        StudioRawModelCookRequestDto request,
+        StudioCustomVisualAssetDto cookedAsset,
+        StudioModAssetSchemaDto schema,
+        List<StudioFieldEditDto> edits,
+        List<string> warnings)
+    {
+        var domain = ClassifyReplacementContractDomain(schema.RelativePath);
+        if (domain is not ("wearable" or "helmet" or "weapon" or "item"))
+        {
+            return;
+        }
+
+        var meshAdded = 0;
+        foreach (var field in schema.Fields)
+        {
+            if (!IsCompatibleCookedMeshField(cookedAsset, field))
+            {
+                continue;
+            }
+
+            var value = SelectCookedVisualReferenceValue(
+                cookedAsset,
+                field.ReferencePickerKind,
+                field.CurrentValue);
+            if (AddSuggestedEdit(edits, field.FieldPath, value))
+            {
+                meshAdded++;
+            }
+        }
+
+        var materialAdded = 0;
+        if (TryResolveCookedRawModelTemplateMaterialReference(
+                cookedAsset,
+                out var materialAssetReference,
+                out var materialObjectReference))
+        {
+            foreach (var field in schema.Fields)
+            {
+                if (!IsSuggestedMaterialOverrideField(field))
+                {
+                    continue;
+                }
+
+                var value = SelectCookedMaterialReferenceValue(
+                    materialAssetReference,
+                    materialObjectReference,
+                    field.ReferencePickerKind,
+                    field.CurrentValue);
+                if (AddSuggestedEdit(edits, field.FieldPath, value))
+                {
+                    materialAdded++;
+                }
+            }
+        }
+
+        if (meshAdded > 0 || materialAdded > 0)
+        {
+            warnings.Add($"Contract adapter добавил связанные поля предмета: mesh {meshAdded}, material override {materialAdded}. Это нужно для male/female/world-вида, шлемов, одежды и предметов с несколькими visual slots.");
+        }
+
+        if (domain.Equals("weapon", StringComparison.OrdinalIgnoreCase)
+            && RawModelWeaponRigOptions.FromRequest(request, NormalizeRawCookModelKind(request.ModelKind)).TargetProfile.Equals("melee-blade", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendMeleeSocketContractDiagnostics(schema, warnings);
+        }
+    }
+
+    private static bool AddSuggestedEdit(List<StudioFieldEditDto> edits, string fieldPath, string value)
+    {
+        if (string.IsNullOrWhiteSpace(fieldPath)
+            || string.IsNullOrWhiteSpace(value)
+            || edits.Any(edit => edit.FieldPath.Equals(fieldPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        edits.Add(new StudioFieldEditDto(fieldPath, value));
+        return true;
+    }
+
+    private static bool IsCompatibleCookedMeshField(StudioCustomVisualAssetDto cookedAsset, StudioModFieldDto field)
+    {
+        if ((field.CurrentValue ?? string.Empty).Trim().StartsWith("export:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var picker = (field.ReferencePickerKind ?? string.Empty).ToLowerInvariant();
+        if (!picker.Contains("visual", StringComparison.Ordinal)
+            || !picker.Contains("mesh", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var kind = (cookedAsset.Kind ?? string.Empty).ToLowerInvariant();
+        return kind switch
+        {
+            "static-mesh" => picker.Contains("static", StringComparison.Ordinal),
+            "skeletal-mesh" => picker.Contains("skeletal", StringComparison.Ordinal),
+            _ => false
+        };
+    }
+
+    private bool TryResolveCookedRawModelTemplateMaterialReference(
+        StudioCustomVisualAssetDto cookedAsset,
+        out string materialAssetReference,
+        out string materialObjectReference)
+    {
+        materialAssetReference = string.Empty;
+        materialObjectReference = string.Empty;
+        if (string.IsNullOrWhiteSpace(cookedAsset.TargetRelativePath))
+        {
+            return false;
+        }
+
+        var cookedPath = Path.Combine(
+            GetWritableCustomVisualAssetRoot(),
+            "Imported",
+            cookedAsset.TargetRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        var folder = Path.GetDirectoryName(cookedPath);
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+        {
+            return false;
+        }
+
+        foreach (var materialFile in Directory.EnumerateFiles(folder, "*.uasset", SearchOption.TopDirectoryOnly)
+                     .Where(path =>
+                     {
+                         var stem = Path.GetFileNameWithoutExtension(path);
+                         return stem.StartsWith("PARENT_", StringComparison.OrdinalIgnoreCase)
+                                || stem.StartsWith("MI_", StringComparison.OrdinalIgnoreCase);
+                     })
+                     .OrderBy(path => Path.GetFileNameWithoutExtension(path).StartsWith("PARENT_", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                     .ThenByDescending(MaterialTemplateHasTextureParameters)
+                     .ThenBy(path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            var objectName = Path.GetFileNameWithoutExtension(materialFile);
+            if (!TryBuildGamePackagePathFromCookedContentFile(materialFile, out var packagePath))
+            {
+                continue;
+            }
+
+            materialAssetReference = $"{packagePath}.{objectName}";
+            materialObjectReference = BuildImportedObjectReferenceRawValue(
+                packagePath,
+                objectName,
+                "/Script/Engine",
+                "MaterialInstanceConstant");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsSuggestedMaterialOverrideField(StudioModFieldDto field)
+    {
+        var picker = (field.ReferencePickerKind ?? string.Empty).ToLowerInvariant();
+        if (!picker.Contains("visual-material", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var label = (field.Label ?? string.Empty).ToLowerInvariant();
+        if (label.Contains("skin", StringComparison.Ordinal)
+            || label.Contains("durability", StringComparison.Ordinal)
+            || label.Contains("damage", StringComparison.Ordinal)
+            || label.Contains("dirt", StringComparison.Ordinal)
+            || label.Contains("blood", StringComparison.Ordinal)
+            || label.Contains("wet", StringComparison.Ordinal)
+            || label.Contains("окраск", StringComparison.Ordinal)
+            || label.Contains("гряз", StringComparison.Ordinal)
+            || label.Contains("кров", StringComparison.Ordinal)
+            || label.Contains("повреж", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return label.Contains("override", StringComparison.Ordinal)
+               || label.Contains("переопредел", StringComparison.Ordinal)
+               || LooksLikeMaterialObjectReference(field.CurrentValue);
+    }
+
+    private static string SelectCookedMaterialReferenceValue(
+        string assetReference,
+        string objectReference,
+        string? pickerKind,
+        string? currentValue)
+    {
+        var picker = pickerKind ?? string.Empty;
+        var current = currentValue ?? string.Empty;
+        if (picker.EndsWith("-object", StringComparison.OrdinalIgnoreCase)
+            || current.StartsWith("object:", StringComparison.OrdinalIgnoreCase)
+            || current.Contains("|/Script/Engine|", StringComparison.OrdinalIgnoreCase))
+        {
+            return objectReference;
+        }
+
+        return assetReference;
+    }
+
+    private static void AppendMeleeSocketContractDiagnostics(
+        StudioModAssetSchemaDto schema,
+        List<string> warnings)
+    {
+        var socketFields = schema.Fields
+            .Where(field => IsItemAttachmentSocketOffsetLabel(field.Label))
+            .Select(field => $"{field.Label}={field.CurrentDisplayValue ?? field.CurrentValue}")
+            .Take(6)
+            .ToList();
+        if (socketFields.Count > 0)
+        {
+            warnings.Add("Melee grip contract найден: " + string.Join("; ", socketFields) + ". Подгонка должна совпадать с player holster/hand sockets, а не только с pivot модели.");
+        }
+    }
+
+    private static void AppendWeaponReplacementContractEdits(
+        StudioRawModelCookRequestDto request,
+        List<StudioFieldEditDto> edits,
+        List<string> warnings)
+    {
+        if (!IsWeaponRawCookRequest(request)
+            || string.IsNullOrWhiteSpace(request.FieldPath)
+            || !TryExtractExportFieldRoot(request.FieldPath, out var componentPath))
+        {
+            return;
+        }
+
+        void Add(string fieldPath, string value)
+        {
+            if (edits.Any(edit => edit.FieldPath.Equals(fieldPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            edits.Add(new StudioFieldEditDto(fieldPath, value));
+        }
+
+        Add($"{WeaponSyntheticFieldPrefix}clear-override-materials:{componentPath}", string.Empty);
+        warnings.Add("Weapon adapter добавил очистку OverrideMaterials у target mesh component, чтобы старый материал оружия не перекрывал cooked PBR/текстуры новой модели.");
+
+        var haystack = $"{request.AssetId} {request.FieldPath}".ToLowerInvariant();
+        if (haystack.Contains("m16", StringComparison.Ordinal)
+            && request.FieldPath.Equals("e:18/p:1", StringComparison.OrdinalIgnoreCase))
+        {
+            Add("e:18/p:2", "false");
+            warnings.Add("Weapon adapter отключил fixed skeletal bounds у M16 component: custom rifle mesh не должен обрезаться bounds-контрактом оригинального SK_M16A4.");
+        }
+    }
+
+    private static bool TryExtractExportFieldRoot(string fieldPath, out string exportPath)
+    {
+        exportPath = string.Empty;
+        var normalized = (fieldPath ?? string.Empty).Trim();
+        if (!normalized.StartsWith("e:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var slashIndex = normalized.IndexOf('/');
+        exportPath = slashIndex >= 0 ? normalized[..slashIndex] : normalized;
+        return exportPath.Length > 2;
+    }
+
+    private static void AppendWeaponSuggestedFitEdits(
+        StudioRawModelCookRequestDto request,
+        List<StudioFieldEditDto> edits,
+        List<string> warnings)
+    {
+        var modelKind = NormalizeRawCookModelKind(request.ModelKind);
+        var weaponRig = RawModelWeaponRigOptions.FromRequest(request, modelKind);
+        var haystack = $"{request.AssetId} {request.FieldPath}".ToLowerInvariant();
+
+        void Add(string fieldPath, string value)
+        {
+            if (edits.Any(edit => edit.FieldPath.Equals(fieldPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            edits.Add(new StudioFieldEditDto(fieldPath, value));
+        }
+
+        if (weaponRig.TargetProfile.Equals("melee-blade", StringComparison.OrdinalIgnoreCase)
+            && (haystack.Contains("2h", StringComparison.Ordinal)
+                || haystack.Contains("katana", StringComparison.Ordinal)
+                || haystack.Contains("sword", StringComparison.Ordinal)
+                || haystack.Contains("twohand", StringComparison.Ordinal)))
+        {
+            Add("e:2/p:1", "object:/Game/ConZ_Files/Data/HandsCorrections/DA_HandsCorrections_Grip_2H_Katana_01.DA_HandsCorrections_Grip_2H_Katana_01|/Script/SCUM|HandsCorrectionsData");
+            Add("e:2/p:2", "object:/Game/ConZ_Files/Data/ItemFirstPersonAnimations/DA_Generic_2H1_Melee_rework.DA_Generic_2H1_Melee_rework|/Script/SCUM|ItemFirstPersonAnimationsDataAsset");
+            warnings.Add("2H melee adapter закрепил катанный HandsCorrections и FirstPersonAnimations contract: длинные мечи должны наследовать двухручный хват цели, а raw-модель центрируется по двуручной рукояти.");
+        }
+
+        if (!modelKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (!weaponRig.Enabled
+            || !weaponRig.TargetProfile.Equals("m16-rifle", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (!haystack.Contains("m16", StringComparison.Ordinal)
+            && !haystack.Contains("rifle", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Add("e:5/p:27/p:0/vc:x", "36.75453186035156");
+        Add("e:5/p:27/p:0/vc:y", "8.994890213012695");
+        Add("e:5/p:27/p:0/vc:z", "-4.5");
+        warnings.Add("Rifle weapon adapter сохранил IK-fit оригинального M16 для левой руки, чтобы новая модель наследовала рабочий хват целевого оружия.");
+    }
+
+    private static string SelectCookedVisualReferenceValue(
+        StudioCustomVisualAssetDto cookedAsset,
+        string? referencePickerKind,
+        string? currentValue)
+    {
+        var picker = referencePickerKind ?? string.Empty;
+        var current = currentValue ?? string.Empty;
+        if (picker.EndsWith("-object", StringComparison.OrdinalIgnoreCase)
+            || current.StartsWith("object:", StringComparison.OrdinalIgnoreCase)
+            || current.Contains("|/Script/Engine|", StringComparison.OrdinalIgnoreCase))
+        {
+            return cookedAsset.ObjectReference;
+        }
+
+        return cookedAsset.AssetReference;
+    }
+
+    private bool TryResolveRawModelImportPath(string sourceRelativePath, out string sourcePath)
+    {
+        sourcePath = string.Empty;
+        var rawImportRoot = Path.Combine(GetWritableCustomVisualAssetRoot(), "RawImports");
+        var normalized = PathUtil.NormalizeRelative((sourceRelativePath ?? string.Empty).Replace('\\', '/'));
+        if (string.IsNullOrWhiteSpace(normalized)
+            || normalized.StartsWith("../", StringComparison.Ordinal)
+            || Path.IsPathRooted(normalized))
+        {
+            return false;
+        }
+
+        var candidate = Path.GetFullPath(Path.Combine(rawImportRoot, normalized));
+        if (!IsPathInsideDirectory(candidate, rawImportRoot))
+        {
+            return false;
+        }
+
+        sourcePath = candidate;
+        return true;
+    }
+
+    private static string NormalizeRawCookModelKind(string? modelKind)
+    {
+        var normalized = (modelKind ?? string.Empty).Trim().ToLowerInvariant();
+        return normalized is "skeletal" or "skeletal-mesh" or "sk" or "vehicle-skeletal-mesh" or "vehicle-full-skeletal" or "vehicle-root-skeletal"
+            ? "skeletal-mesh"
+            : "static-mesh";
+    }
+
+    private static bool IsVehicleFullSkeletalCookRequest(StudioRawModelCookRequestDto request)
+    {
+        var kind = (request.ModelKind ?? string.Empty).Trim().ToLowerInvariant();
+        return kind is "vehicle-skeletal-mesh" or "vehicle-full-skeletal" or "vehicle-root-skeletal";
+    }
+
+    private static bool IsVehicleVisualOverlayCookRequest(StudioRawModelCookRequestDto request)
+    {
+        var kind = (request.ModelKind ?? string.Empty).Trim().ToLowerInvariant();
+        return kind is "vehicle-visual-static" or "vehicle-overlay-static" or "vehicle-visual-overlay";
+    }
+
+    private static bool IsVehicleQueryProxyCookRequest(StudioRawModelCookRequestDto request)
+    {
+        var kind = (request.ModelKind ?? string.Empty).Trim().ToLowerInvariant();
+        return kind is "vehicle-query-proxy" or "vehicle-query-proxy-static" or "vehicle-collision-proxy";
+    }
+
+    private static bool IsVehicleRawCookRequest(StudioRawModelCookRequestDto request)
+    {
+        var haystack = string.Join(' ', new[]
+        {
+            request.AssetId,
+            request.FieldPath
+        }).Replace('\\', '/').ToLowerInvariant();
+
+        return haystack.Contains("/vehicles/", StringComparison.Ordinal)
+            || haystack.Contains("vehicle", StringComparison.Ordinal)
+            || haystack.Contains("airplane", StringComparison.Ordinal)
+            || haystack.Contains("duster", StringComparison.Ordinal)
+            || haystack.Contains("kinglet", StringComparison.Ordinal);
+    }
+
+    private static bool IsWeaponRawCookRequest(StudioRawModelCookRequestDto request)
+    {
+        var haystack = string.Join(' ', new[]
+        {
+            request.AssetId,
+            request.FieldPath,
+            request.ModelKind
+        }).Replace('\\', '/').ToLowerInvariant();
+
+        return haystack.Contains("/weapons/", StringComparison.Ordinal)
+            || haystack.Contains("weapon", StringComparison.Ordinal)
+            || haystack.Contains("ranged_weapons", StringComparison.Ordinal)
+            || haystack.Contains("new_melee", StringComparison.Ordinal)
+            || haystack.Contains("melee", StringComparison.Ordinal)
+            || haystack.Contains("katana", StringComparison.Ordinal)
+            || haystack.Contains("machete", StringComparison.Ordinal)
+            || haystack.Contains("knife", StringComparison.Ordinal)
+            || haystack.Contains("sword", StringComparison.Ordinal)
+            || haystack.Contains("rifle", StringComparison.Ordinal)
+            || haystack.Contains("shotgun", StringComparison.Ordinal)
+            || haystack.Contains("pistol", StringComparison.Ordinal);
+    }
+
+    private bool TryInferRawPartNamesForTarget(
+        string rawModelPath,
+        string extension,
+        StudioRawModelCookRequestDto request,
+        out List<string> rawPartNames,
+        out string groupLabel)
+    {
+        rawPartNames = [];
+        groupLabel = string.Empty;
+        if (!TryAnalyzeRawModelParts(rawModelPath, extension, out var parts))
+        {
+            return false;
+        }
+
+        var armorParts = parts
+            .Where(part => (part.Role ?? string.Empty).StartsWith("armor-", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (armorParts.Count == 0)
+        {
+            return false;
+        }
+
+        var haystack = string.Join(' ', new[]
+        {
+            request.AssetId,
+            request.FieldPath,
+            request.ModelKind
+        }).Replace('\\', '/').ToLowerInvariant();
+
+        List<StudioRawModelPartDto> selected;
+        if (haystack.Contains("/helmets/", StringComparison.Ordinal)
+            || haystack.Contains("/head/helmet", StringComparison.Ordinal)
+            || haystack.Contains("helmet", StringComparison.Ordinal))
+        {
+            groupLabel = "шлем";
+            selected = SelectArmorPartsByRole(armorParts, "armor-helmet");
+        }
+        else if (haystack.Contains("gloves", StringComparison.Ordinal)
+                 || haystack.Contains("glove", StringComparison.Ordinal)
+                 || haystack.Contains("перчат", StringComparison.Ordinal))
+        {
+            groupLabel = "перчатки / кисти";
+            selected = SelectArmorPartsByRole(armorParts, "armor-hands");
+            if (selected.Count == 0)
+            {
+                selected = SelectLowestArmorParts(armorParts, "armor-arms", 2);
+            }
+        }
+        else if (haystack.Contains("footwear", StringComparison.Ordinal)
+                 || haystack.Contains("boots", StringComparison.Ordinal)
+                 || haystack.Contains("boot", StringComparison.Ordinal)
+                 || haystack.Contains("shoe", StringComparison.Ordinal)
+                 || haystack.Contains("ботин", StringComparison.Ordinal))
+        {
+            groupLabel = "ботинки / ступни";
+            selected = SelectArmorPartsByRole(armorParts, "armor-boots");
+            if (selected.Count == 0)
+            {
+                selected = SelectLowestArmorParts(armorParts, "armor-legs", 2);
+            }
+        }
+        else if (haystack.Contains("underwear_pants", StringComparison.Ordinal)
+                 || haystack.Contains("pants", StringComparison.Ordinal)
+                 || haystack.Contains("trousers", StringComparison.Ordinal)
+                 || haystack.Contains("штаны", StringComparison.Ordinal))
+        {
+            groupLabel = "ноги";
+            selected = SelectArmorPartsByRole(armorParts, "armor-legs");
+        }
+        else if (haystack.Contains("jackets_coats", StringComparison.Ordinal)
+                 || haystack.Contains("jacket", StringComparison.Ordinal)
+                 || haystack.Contains("куртк", StringComparison.Ordinal))
+        {
+            groupLabel = "куртка / руки";
+            selected = SelectArmorPartsByRole(armorParts, "armor-vest", "armor-arms", "armor-belt");
+        }
+        else if (LooksLikeArmorWearableTargetHaystack(haystack)
+                 || haystack.Contains("vest", StringComparison.Ordinal)
+                 || haystack.Contains("torso", StringComparison.Ordinal)
+                 || haystack.Contains("жилет", StringComparison.Ordinal))
+        {
+            groupLabel = "бронежилет / торс";
+            selected = SelectArmorPartsByRole(armorParts, "armor-vest", "armor-belt");
+        }
+        else
+        {
+            return false;
+        }
+
+        rawPartNames = selected
+            .Select(part => (part.Name ?? string.Empty).Trim())
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return rawPartNames.Count > 0;
+    }
+
+    private static List<StudioRawModelPartDto> SelectArmorPartsByRole(
+        IEnumerable<StudioRawModelPartDto> parts,
+        params string[] roles)
+    {
+        var roleSet = roles.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return parts
+            .Where(part => roleSet.Contains(part.Role ?? string.Empty))
+            .OrderByDescending(part => part.Triangles)
+            .ThenBy(part => part.Name)
+            .ToList();
+    }
+
+    private static List<StudioRawModelPartDto> SelectLowestArmorParts(
+        IEnumerable<StudioRawModelPartDto> parts,
+        string role,
+        int maxCount)
+    {
+        return parts
+            .Where(part => string.Equals(part.Role, role, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(part => part.Bounds.MinZ)
+            .ThenByDescending(part => part.Triangles)
+            .Take(Math.Max(1, maxCount))
+            .ToList();
+    }
+
+    private sealed record ArmorSetTargetDefinition(
+        string ModuleRole,
+        string DisplayName,
+        string TargetAssetId,
+        string TargetMeshKind,
+        double TargetLongestCm,
+        int TargetTriangleCount,
+        string Recommendation);
+
+    private static List<ArmorSetTargetDefinition> BuildArmorSetTargetDefinitions()
+    {
+        return
+        [
+            new(
+                "helmet",
+                "Шлем",
+                "game::scum/content/conz_files/items/clothes/helmets/combat_helmet_01.uasset",
+                "static-mesh",
+                35d,
+                6000,
+                "Готовит верхнюю часть комплекта как шлем: используются safe StaticMesh-поля, внутренний HeadWear component не меняется."),
+            new(
+                "torso",
+                "Бронежилет / торс",
+                "game::scum/content/conz_files/items/clothes/vests_armor/armor_tactical_vest_01_01.uasset",
+                "skeletal-mesh",
+                85d,
+                12000,
+                "Готовит жилет и пояс как worn SkeletalMesh для torso/armor slot; male/female поля и material overrides добавляются через contract adapter."),
+            new(
+                "arms",
+                "Руки / плечи",
+                "game::scum/content/conz_files/items/clothes/jackets_coats/camouflage_jacket_01.uasset",
+                "skeletal-mesh",
+                92d,
+                12000,
+                "Готовит наручи и плечи через слот куртки. Это лучше, чем клеить их к жилету: у рукавов свой body contract и меньше риск clipping на плечах."),
+            new(
+                "legs",
+                "Ноги / бедра",
+                "game::scum/content/conz_files/items/clothes/underwear_pants/militarypants_01.uasset",
+                "skeletal-mesh",
+                96d,
+                11000,
+                "Готовит верхнюю/среднюю часть защиты ног через pants slot; нижние детали программа по возможности оставляет ботинкам."),
+            new(
+                "boots",
+                "Ботинки / голени",
+                "game::scum/content/conz_files/items/clothes/footwear/combatboots.uasset",
+                "skeletal-mesh",
+                48d,
+                7000,
+                "Готовит самые нижние детали ног через footwear slot, чтобы защита голени не дублировалась в pants-модуле."),
+            new(
+                "hands",
+                "Перчатки / кисти",
+                "game::scum/content/conz_files/items/clothes/gloves/tactical_military_gloves_01.uasset",
+                "skeletal-mesh",
+                28d,
+                5000,
+                "Если в raw-модели есть отдельные кисти/перчатки, программа вынесет их в glove slot. Если безопасных полей нет, слот будет помечен как ручная проверка.")
+        ];
+    }
+
+    public StudioArmorSetPlanDto GetArmorSetPlan(string rawSourceRelativePath)
+    {
+        var warnings = new List<string>();
+        if (string.IsNullOrWhiteSpace(rawSourceRelativePath)
+            || !TryResolveRawModelImportPath(rawSourceRelativePath, out var rawModelPath)
+            || !File.Exists(rawModelPath))
+        {
+            return new StudioArmorSetPlanDto(
+                false,
+                "Raw-модель комплекта брони не найдена в папке импортов программы.",
+                rawSourceRelativePath ?? string.Empty,
+                null,
+                [],
+                ["Raw-модель комплекта брони не найдена в папке импортов программы."],
+                []);
+        }
+
+        var extension = Path.GetExtension(rawModelPath);
+        var rawBounds = TryAnalyzeRawModelBounds(rawModelPath, extension, out var analyzedBounds)
+            ? analyzedBounds
+            : null;
+        var parts = TryAnalyzeRawModelParts(rawModelPath, extension, out var analyzedParts)
+            ? analyzedParts
+            : [];
+        var armorParts = parts
+            .Where(part => (part.Role ?? string.Empty).StartsWith("armor-", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (armorParts.Count == 0)
+        {
+            return new StudioArmorSetPlanDto(
+                false,
+                "В raw-модели не найдено распознанных частей брони.",
+                rawSourceRelativePath,
+                rawBounds,
+                [],
+                ["Раздели модель на именованные части вроде Helmet, AV, Belt, AArmor, LArmor или импортируй исходник с объектами, а не единым collapsed mesh."],
+                []);
+        }
+
+        var entries = new List<StudioArmorSetPlanEntryDto>();
+        foreach (var definition in BuildArmorSetTargetDefinitions())
+        {
+            var selectedParts = SelectArmorSetPartsForModule(definition.ModuleRole, armorParts);
+            if (selectedParts.Count == 0)
+            {
+                continue;
+            }
+
+            entries.Add(BuildArmorSetPlanEntry(definition, selectedParts, warnings));
+        }
+
+        if (entries.Count == 0)
+        {
+            return new StudioArmorSetPlanDto(
+                false,
+                "Части брони найдены, но программа не смогла сопоставить их с игровыми слотами.",
+                rawSourceRelativePath,
+                rawBounds,
+                [],
+                warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                []);
+        }
+
+        var nextSteps = new List<string>
+        {
+            "Сначала готовь шлем и жилет: эти зоны меньше всего зависят от сложной деформации рук/ног.",
+            "Для рук и ног программа готовит отдельные worn slots, но в игре обязательно проверяй приседание, бег, удары и clipping с телом.",
+            "После cook staged edits можно собрать обычной кнопкой сборки PAK; внутренние component exports предметов программа не трогает."
+        };
+        var autoCount = entries.Count(entry => entry.CanAutoCook);
+        warnings.Add($"План комплекта брони: найдено зон {entries.Count}, auto-cook доступен для {autoCount}.");
+        return new StudioArmorSetPlanDto(
+            true,
+            null,
+            rawSourceRelativePath,
+            rawBounds,
+            entries,
+            warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            nextSteps);
+    }
+
+    public StudioRawModelCookResultDto CookArmorSetRawModel(StudioArmorSetCookRequestDto request)
+    {
+        if (request is null
+            || string.IsNullOrWhiteSpace(request.RawSourceRelativePath)
+            || string.IsNullOrWhiteSpace(request.TargetAssetId))
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Нужна raw-модель комплекта брони и целевой слот из плана.",
+                null,
+                [],
+                []);
+        }
+
+        var plan = GetArmorSetPlan(request.RawSourceRelativePath);
+        if (!plan.Ok)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                plan.Error ?? "План комплекта брони не удалось построить.",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        var entry = plan.Entries.FirstOrDefault(candidate =>
+            candidate.TargetAssetId.Equals(request.TargetAssetId, StringComparison.OrdinalIgnoreCase)
+            && (string.IsNullOrWhiteSpace(request.TargetFieldPath)
+                || candidate.TargetFieldPath.Equals(request.TargetFieldPath, StringComparison.OrdinalIgnoreCase)));
+        if (entry is null)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Целевой слот брони не найден в актуальном плане комплекта.",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        return CookArmorSetPlanEntryRawModel(request.RawSourceRelativePath, entry, plan.Warnings);
+    }
+
+    public StudioArmorSetCookBatchResultDto CookArmorSetPlanRawModels(StudioArmorSetCookBatchRequestDto request)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.RawSourceRelativePath))
+        {
+            return new StudioArmorSetCookBatchResultDto(
+                false,
+                "Нужна raw-модель комплекта брони для batch cook.",
+                [],
+                [],
+                []);
+        }
+
+        var plan = GetArmorSetPlan(request.RawSourceRelativePath);
+        if (!plan.Ok)
+        {
+            return new StudioArmorSetCookBatchResultDto(
+                false,
+                plan.Error ?? "План комплекта брони не удалось построить.",
+                [],
+                [],
+                plan.Warnings);
+        }
+
+        var maxModules = Math.Clamp(request.MaxModules.GetValueOrDefault(5), 1, 8);
+        var entries = plan.Entries
+            .Where(entry => entry.CanAutoCook)
+            .Take(maxModules)
+            .ToList();
+        if (entries.Count == 0)
+        {
+            return new StudioArmorSetCookBatchResultDto(
+                false,
+                "В плане брони нет безопасных слотов для auto-cook.",
+                [],
+                [],
+                plan.Warnings);
+        }
+
+        var items = new List<StudioArmorSetCookBatchItemDto>();
+        var suggestedEdits = new List<StudioAssetEditDto>();
+        foreach (var entry in entries)
+        {
+            var result = CookArmorSetPlanEntryRawModel(request.RawSourceRelativePath, entry, plan.Warnings);
+            if (result.SuggestedEdit is not null)
+            {
+                suggestedEdits.Add(result.SuggestedEdit);
+            }
+
+            items.Add(new StudioArmorSetCookBatchItemDto(
+                entry.ModuleRole,
+                entry.TargetAssetId,
+                entry.TargetRelativePath,
+                entry.TargetDisplayName,
+                entry.TargetFieldPath,
+                entry.TargetMeshKind,
+                result.Ok,
+                result.Error,
+                result.CookedTargetRelativePath,
+                result.SuggestedEdit,
+                result.Warnings));
+        }
+
+        var successCount = items.Count(item => item.Ok);
+        var warnings = plan.Warnings
+            .Concat([$"Batch cook комплекта брони: успешно {successCount} из {items.Count}."])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return new StudioArmorSetCookBatchResultDto(
+            successCount > 0,
+            successCount > 0 ? null : "Ни один слот брони не удалось приготовить.",
+            items,
+            suggestedEdits,
             warnings);
+    }
+
+    private StudioRawModelCookResultDto CookArmorSetPlanEntryRawModel(
+        string rawSourceRelativePath,
+        StudioArmorSetPlanEntryDto entry,
+        List<string> planWarnings)
+    {
+        if (!entry.CanAutoCook)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Этот слот брони помечен как небезопасный для автоматического cook.",
+                null,
+                [],
+                planWarnings);
+        }
+
+        var request = new StudioRawModelCookRequestDto(
+            RawSourceRelativePath: rawSourceRelativePath,
+            AssetId: entry.TargetAssetId,
+            FieldPath: entry.TargetFieldPath,
+            ModelKind: entry.TargetMeshKind,
+            ScalePercent: 100d,
+            OffsetX: 0d,
+            OffsetY: 0d,
+            OffsetZ: 0d,
+            Pitch: 0d,
+            Yaw: 0d,
+            Roll: 0d,
+            AutoFitToTarget: true,
+            TargetLongestCm: entry.TargetLongestCm,
+            PaintColorHex: "#ffffff",
+            PaintStrengthPercent: 0d,
+            MetallicPercent: 0d,
+            RoughnessPercent: 50d,
+            MaterialMode: "model",
+            MaterialReference: null,
+            RawPartNames: entry.RawPartNames,
+            TargetTriangleCount: entry.TargetTriangleCount);
+        var result = CookRawModelAsset(request);
+        if (result.Ok)
+        {
+            result.Warnings.Add($"Слот комплекта брони приготовлен: {entry.TargetDisplayName} / {FormatArmorSetModuleRole(entry.ModuleRole)}.");
+        }
+
+        return result;
+    }
+
+    private StudioArmorSetPlanEntryDto BuildArmorSetPlanEntry(
+        ArmorSetTargetDefinition definition,
+        List<StudioRawModelPartDto> selectedParts,
+        List<string> warnings)
+    {
+        var targetRelativePath = ExtractAssetIdRelativePath(definition.TargetAssetId);
+        var targetDisplayName = definition.DisplayName;
+        StudioModFieldDto? targetField = null;
+        try
+        {
+            var schema = GetModdingAssetSchema(definition.TargetAssetId);
+            if (!string.IsNullOrWhiteSpace(schema.RelativePath))
+            {
+                targetRelativePath = schema.RelativePath;
+            }
+
+            targetDisplayName = string.IsNullOrWhiteSpace(schema.RelativePath)
+                ? definition.DisplayName
+                : $"{definition.DisplayName}: {LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(schema.RelativePath))}";
+            targetField = SelectArmorSetTargetField(schema, definition.TargetMeshKind);
+            if (targetField is null)
+            {
+                warnings.Add($"Для {definition.DisplayName} не найдено safe {definition.TargetMeshKind} visual-поле. Внутренние component exports пропущены.");
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Для {definition.DisplayName} не удалось прочитать схему целевого предмета: {ex.Message}");
+        }
+
+        var rawPartNames = selectedParts
+            .Select(part => (part.Name ?? string.Empty).Trim())
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var rawTriangles = selectedParts.Sum(part => Math.Max(0, part.Triangles));
+        var canAutoCook = targetField is not null && rawPartNames.Count > 0;
+        var recommendation = canAutoCook
+            ? definition.Recommendation
+            : $"{definition.Recommendation} Сейчас слот требует ручной проверки, потому что safe visual-поле не найдено или raw parts не распознаны.";
+        return new StudioArmorSetPlanEntryDto(
+            definition.ModuleRole,
+            definition.TargetAssetId,
+            targetRelativePath,
+            targetDisplayName,
+            targetField?.FieldPath ?? string.Empty,
+            targetField?.Label ?? string.Empty,
+            targetField?.CurrentValue ?? string.Empty,
+            targetField?.CurrentDisplayValue ?? targetField?.CurrentValue ?? string.Empty,
+            definition.TargetMeshKind,
+            canAutoCook,
+            rawPartNames,
+            rawTriangles,
+            definition.TargetTriangleCount,
+            definition.TargetLongestCm,
+            recommendation);
+    }
+
+    private static StudioModFieldDto? SelectArmorSetTargetField(
+        StudioModAssetSchemaDto schema,
+        string targetMeshKind)
+    {
+        var wantsSkeletal = targetMeshKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase);
+        return schema.Fields
+            .Where(field =>
+            {
+                var picker = (field.ReferencePickerKind ?? string.Empty).ToLowerInvariant();
+                var current = field.CurrentValue ?? string.Empty;
+                if (!picker.Contains("visual", StringComparison.Ordinal)
+                    || !picker.Contains("mesh", StringComparison.Ordinal)
+                    || current.StartsWith("export:", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                return wantsSkeletal
+                    ? picker.Contains("skeletal", StringComparison.Ordinal)
+                    : picker.Contains("static", StringComparison.Ordinal);
+            })
+            .OrderBy(field => (field.ReferencePickerKind ?? string.Empty).Contains("-asset", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(field => field.FieldPath.Contains("/a:0/", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(field => field.FieldPath, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    private static List<StudioRawModelPartDto> SelectArmorSetPartsForModule(
+        string moduleRole,
+        List<StudioRawModelPartDto> armorParts)
+    {
+        return moduleRole.ToLowerInvariant() switch
+        {
+            "helmet" => SelectArmorPartsByRole(armorParts, "armor-helmet"),
+            "torso" => SelectArmorPartsByRole(armorParts, "armor-vest", "armor-belt"),
+            "arms" => SelectArmorPartsByRole(armorParts, "armor-arms"),
+            "hands" => SelectArmorPartsByRole(armorParts, "armor-hands"),
+            "boots" => SelectArmorPartsByRole(armorParts, "armor-boots").Count > 0
+                ? SelectArmorPartsByRole(armorParts, "armor-boots")
+                : SelectLowestArmorParts(armorParts, "armor-legs", 2),
+            "legs" => SelectArmorLegPartsForPants(armorParts),
+            _ => []
+        };
+    }
+
+    private static List<StudioRawModelPartDto> SelectArmorLegPartsForPants(List<StudioRawModelPartDto> armorParts)
+    {
+        var legParts = SelectArmorPartsByRole(armorParts, "armor-legs");
+        if (legParts.Count <= 2)
+        {
+            return legParts;
+        }
+
+        var bootNames = SelectLowestArmorParts(armorParts, "armor-legs", 2)
+            .Select(part => part.Name ?? string.Empty)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return legParts
+            .Where(part => !bootNames.Contains(part.Name ?? string.Empty))
+            .ToList();
+    }
+
+    private static string FormatArmorSetModuleRole(string moduleRole)
+    {
+        return moduleRole.ToLowerInvariant() switch
+        {
+            "helmet" => "шлем",
+            "torso" => "бронежилет / торс",
+            "arms" => "руки / плечи",
+            "legs" => "ноги",
+            "boots" => "ботинки / голени",
+            "hands" => "перчатки / кисти",
+            _ => moduleRole
+        };
+    }
+
+    private static string ExtractAssetIdRelativePath(string assetId)
+    {
+        var normalized = (assetId ?? string.Empty).Replace('\\', '/');
+        var markerIndex = normalized.IndexOf("::", StringComparison.Ordinal);
+        return markerIndex >= 0 ? normalized[(markerIndex + 2)..] : normalized;
+    }
+
+    private static string BuildRawCookAssetName(StudioRawModelCookRequestDto request, string rawModelPath, bool skeletal)
+    {
+        var rawStem = Path.GetFileNameWithoutExtension(rawModelPath);
+        var targetStem = string.Empty;
+        if (!string.IsNullOrWhiteSpace(request.AssetId))
+        {
+            var assetId = request.AssetId.Replace('\\', '/');
+            var markerIndex = assetId.LastIndexOf("::", StringComparison.Ordinal);
+            targetStem = Path.GetFileNameWithoutExtension(markerIndex >= 0 ? assetId[(markerIndex + 2)..] : assetId);
+        }
+
+        var merged = string.IsNullOrWhiteSpace(targetStem)
+            ? rawStem
+            : $"{targetStem}_{rawStem}";
+        var firstPartName = request.RawPartNames?
+            .Select(name => (name ?? string.Empty).Trim())
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => NormalizeUnrealAssetName(name, "Part"))
+            .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+        if (!string.IsNullOrWhiteSpace(firstPartName))
+        {
+            merged = $"{merged}_{firstPartName}";
+        }
+
+        var prefix = skeletal ? "SK_" : "SM_";
+        var normalized = NormalizeUnrealAssetName(merged, "ImportedModel");
+        if (!normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = $"{prefix}{normalized}";
+        }
+
+        return normalized.Length <= 96 ? normalized : normalized[..96].TrimEnd('_');
+    }
+
+    private static string NormalizeUnrealAssetName(string value, string fallback)
+    {
+        var builder = new StringBuilder(value.Length);
+        var lastWasUnderscore = false;
+        foreach (var ch in value)
+        {
+            var isAsciiLetter = ch is >= 'a' and <= 'z' or >= 'A' and <= 'Z';
+            var isDigit = ch is >= '0' and <= '9';
+            if (isAsciiLetter || isDigit)
+            {
+                builder.Append(ch);
+                lastWasUnderscore = false;
+                continue;
+            }
+
+            if (!lastWasUnderscore)
+            {
+                builder.Append('_');
+                lastWasUnderscore = true;
+            }
+        }
+
+        var normalized = builder.ToString().Trim('_');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            normalized = fallback;
+        }
+
+        if (normalized[0] is >= '0' and <= '9')
+        {
+            normalized = $"Asset_{normalized}";
+        }
+
+        return normalized;
+    }
+
+    private static bool HasRawCookRuntimeFit(StudioRawModelCookRequestDto request)
+    {
+        return Math.Abs(request.OffsetX.GetValueOrDefault()) > 0.0001d
+               || Math.Abs(request.OffsetY.GetValueOrDefault()) > 0.0001d
+               || Math.Abs(request.OffsetZ.GetValueOrDefault()) > 0.0001d
+               || Math.Abs(request.Pitch.GetValueOrDefault()) > 0.0001d
+               || Math.Abs(request.Yaw.GetValueOrDefault()) > 0.0001d
+               || Math.Abs(request.Roll.GetValueOrDefault()) > 0.0001d;
+    }
+
+    private sealed record RawModelTransformOptions(
+        double OffsetX,
+        double OffsetY,
+        double OffsetZ,
+        double Pitch,
+        double Yaw,
+        double Roll)
+    {
+        public bool HasTransform =>
+            Math.Abs(OffsetX) > 0.0001d
+            || Math.Abs(OffsetY) > 0.0001d
+            || Math.Abs(OffsetZ) > 0.0001d
+            || Math.Abs(Pitch) > 0.0001d
+            || Math.Abs(Yaw) > 0.0001d
+            || Math.Abs(Roll) > 0.0001d;
+
+        public static RawModelTransformOptions FromRequest(StudioRawModelCookRequestDto request)
+        {
+            static double ClampFinite(double value, double min, double max)
+            {
+                if (double.IsNaN(value) || double.IsInfinity(value))
+                {
+                    return 0d;
+                }
+
+                return Math.Clamp(value, min, max);
+            }
+
+            return new RawModelTransformOptions(
+                ClampFinite(request.OffsetX.GetValueOrDefault(), -50000d, 50000d),
+                ClampFinite(request.OffsetY.GetValueOrDefault(), -50000d, 50000d),
+                ClampFinite(request.OffsetZ.GetValueOrDefault(), -50000d, 50000d),
+                ClampFinite(request.Pitch.GetValueOrDefault(), -3600d, 3600d),
+                ClampFinite(request.Yaw.GetValueOrDefault(), -3600d, 3600d),
+                ClampFinite(request.Roll.GetValueOrDefault(), -3600d, 3600d));
+        }
+    }
+
+    private sealed record RawModelWeaponRigOptions(
+        bool Enabled,
+        bool IsShortWeapon,
+        string TargetProfile,
+        double GripAnchorPercent,
+        double GripDiameterCm,
+        double GripBackReachCm,
+        double SecondHandShiftCm)
+    {
+        public static RawModelWeaponRigOptions Disabled { get; } = new(false, false, "none", 45d, 0d, 32d, 0d);
+
+        public static RawModelWeaponRigOptions FromRequest(StudioRawModelCookRequestDto request, string modelKind)
+        {
+            static double ClampFinite(double value, double min, double max)
+            {
+                if (double.IsNaN(value) || double.IsInfinity(value))
+                {
+                    return min;
+                }
+
+                return Math.Clamp(value, min, max);
+            }
+
+            var isShortWeapon = IsShortWeaponRequest(request);
+            var targetProfile = InferTargetProfile(request);
+            var gripAnchorPercent = ClampFinite(
+                request.WeaponGripAnchorPercent.GetValueOrDefault(InferGripAnchorPercent(targetProfile)),
+                5d,
+                95d);
+            var gripDiameterCm = ClampFinite(
+                request.WeaponGripDiameterCm.GetValueOrDefault(0d),
+                0d,
+                12d);
+            var gripBackReachCm = ClampFinite(
+                request.WeaponGripBackReachCm.GetValueOrDefault(InferGripBackReachCm(targetProfile)),
+                0d,
+                60d);
+            var secondHandShiftCm = ClampFinite(
+                request.WeaponSecondHandShiftCm.GetValueOrDefault(InferSecondHandShiftCm(targetProfile)),
+                -80d,
+                80d);
+            if (!modelKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase))
+            {
+                return new RawModelWeaponRigOptions(false, isShortWeapon, targetProfile, gripAnchorPercent, gripDiameterCm, gripBackReachCm, secondHandShiftCm);
+            }
+
+            var haystack = $"{request.AssetId} {request.FieldPath}".ToLowerInvariant();
+            var isWeapon = haystack.Contains("weapon", StringComparison.Ordinal)
+                           || haystack.Contains("/weapons/", StringComparison.Ordinal)
+                           || haystack.Contains("ranged_weapons", StringComparison.Ordinal)
+                           || haystack.Contains("shotgun", StringComparison.Ordinal)
+                           || haystack.Contains("rifle", StringComparison.Ordinal)
+                           || haystack.Contains("pistol", StringComparison.Ordinal);
+            if (!isWeapon)
+            {
+                return Disabled;
+            }
+
+            return new RawModelWeaponRigOptions(true, isShortWeapon, targetProfile, gripAnchorPercent, gripDiameterCm, gripBackReachCm, secondHandShiftCm);
+        }
+
+        private static double InferGripAnchorPercent(string targetProfile)
+        {
+            return targetProfile.Equals("melee-blade", StringComparison.OrdinalIgnoreCase)
+                ? 45d
+                : 50d;
+        }
+
+        private static double InferGripBackReachCm(string targetProfile)
+        {
+            return targetProfile.Equals("melee-blade", StringComparison.OrdinalIgnoreCase)
+                ? 32d
+                : 0d;
+        }
+
+        private static double InferSecondHandShiftCm(string targetProfile)
+        {
+            return targetProfile.Equals("melee-blade", StringComparison.OrdinalIgnoreCase)
+                ? 24d
+                : 0d;
+        }
+
+        private static bool IsShortWeaponRequest(StudioRawModelCookRequestDto request)
+        {
+            var haystack = $"{request.AssetId} {request.FieldPath}".ToLowerInvariant();
+            return haystack.Contains("sawed", StringComparison.Ordinal)
+                || haystack.Contains("short", StringComparison.Ordinal)
+                || haystack.Contains("обрез", StringComparison.Ordinal)
+                || haystack.Contains("pistol", StringComparison.Ordinal);
+        }
+
+        private static string InferTargetProfile(StudioRawModelCookRequestDto request)
+        {
+            var haystack = $"{request.AssetId} {request.FieldPath} {request.ModelKind}"
+                .Replace('\\', '/')
+                .ToLowerInvariant();
+            if (haystack.Contains("new_melee", StringComparison.Ordinal)
+                || haystack.Contains("melee", StringComparison.Ordinal)
+                || haystack.Contains("katana", StringComparison.Ordinal)
+                || haystack.Contains("machete", StringComparison.Ordinal)
+                || haystack.Contains("knife", StringComparison.Ordinal)
+                || haystack.Contains("sword", StringComparison.Ordinal)
+                || haystack.Contains("blade", StringComparison.Ordinal))
+            {
+                return "melee-blade";
+            }
+
+            if (haystack.Contains("m16", StringComparison.Ordinal)
+                || haystack.Contains("automatic_rifles", StringComparison.Ordinal)
+                || haystack.Contains("rifle", StringComparison.Ordinal))
+            {
+                return "m16-rifle";
+            }
+
+            if (haystack.Contains("pistol", StringComparison.Ordinal)
+                || haystack.Contains("handgun", StringComparison.Ordinal)
+                || haystack.Contains("deagle", StringComparison.Ordinal)
+                || haystack.Contains("revolver", StringComparison.Ordinal))
+            {
+                return "pistol";
+            }
+
+            if (haystack.Contains("shotgun", StringComparison.Ordinal)
+                || haystack.Contains("m1887", StringComparison.Ordinal)
+                || haystack.Contains("m1897", StringComparison.Ordinal))
+            {
+                return "shotgun";
+            }
+
+            return "m1887";
+        }
+    }
+
+    private static bool LooksLikeNpcCharacterTargetHaystack(string haystack)
+    {
+        var normalized = (haystack ?? string.Empty).Replace('\\', '/').ToLowerInvariant();
+        return normalized.Contains("/characters/npcs/", StringComparison.Ordinal)
+               || normalized.Contains("/npcs/", StringComparison.Ordinal)
+               || normalized.Contains("armed_npcs", StringComparison.Ordinal)
+               || normalized.Contains("npc_lvl", StringComparison.Ordinal)
+               || normalized.Contains("/vendors/", StringComparison.Ordinal)
+               || normalized.Contains("vendor", StringComparison.Ordinal)
+               || normalized.Contains("prisoner", StringComparison.Ordinal)
+               || normalized.Contains("character body", StringComparison.Ordinal);
+    }
+
+    private static bool LooksLikeArmorWearableTargetHaystack(string haystack)
+    {
+        var normalized = (haystack ?? string.Empty).Replace('\\', '/').ToLowerInvariant();
+        if (normalized.Contains("/helmets/", StringComparison.Ordinal)
+            || normalized.Contains("/head/helmet", StringComparison.Ordinal)
+            || normalized.Contains("helmet", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return normalized.Contains("vests_armor", StringComparison.Ordinal)
+               || normalized.Contains("torso_protection", StringComparison.Ordinal)
+               || normalized.Contains("armor_tactical", StringComparison.Ordinal)
+               || normalized.Contains("armor_police", StringComparison.Ordinal)
+               || normalized.Contains("body armor", StringComparison.Ordinal)
+               || normalized.Contains("body_armor", StringComparison.Ordinal)
+               || normalized.Contains("armored", StringComparison.Ordinal)
+               || normalized.Contains("armoured", StringComparison.Ordinal)
+               || normalized.Contains("militarypants", StringComparison.Ordinal)
+               || normalized.Contains("underwear_pants", StringComparison.Ordinal)
+               || normalized.Contains("jackets_coats", StringComparison.Ordinal)
+               || normalized.Contains("gloves", StringComparison.Ordinal)
+               || normalized.Contains("footwear", StringComparison.Ordinal)
+               || normalized.Contains("boots", StringComparison.Ordinal)
+               || normalized.Contains("pants", StringComparison.Ordinal)
+               || normalized.Contains("jacket", StringComparison.Ordinal);
+    }
+
+    private sealed record RawModelFitOptions(
+        bool AutoFit,
+        double TargetLongestCm)
+    {
+        public double TargetLongestMeters => TargetLongestCm / 100d;
+
+        public static RawModelFitOptions FromRequest(StudioRawModelCookRequestDto request, string modelKind)
+        {
+            var autoFit = request.AutoFitToTarget.GetValueOrDefault(true);
+            var requestedTarget = request.TargetLongestCm.GetValueOrDefault();
+            var targetLongestCm = requestedTarget is >= 1d and <= 50000d
+                ? requestedTarget
+                : InferRawCookTargetLongestCm(request, modelKind);
+
+            return new RawModelFitOptions(autoFit, targetLongestCm);
+        }
+
+        private static double InferRawCookTargetLongestCm(StudioRawModelCookRequestDto request, string modelKind)
+        {
+            var haystack = $"{request.AssetId} {request.FieldPath} {request.ModelKind} {modelKind}".Replace('\\', '/').ToLowerInvariant();
+            if (modelKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase)
+                && StudioRuntime.LooksLikeNpcCharacterTargetHaystack(haystack))
+            {
+                return 180d;
+            }
+
+            if (haystack.Contains("airplane", StringComparison.Ordinal)
+                || haystack.Contains("/planes/", StringComparison.Ordinal)
+                || haystack.Contains("/plane_", StringComparison.Ordinal)
+                || haystack.Contains("aircraft", StringComparison.Ordinal)
+                || haystack.Contains("duster", StringComparison.Ordinal)
+                || haystack.Contains("kinglet", StringComparison.Ordinal))
+            {
+                return 1800d;
+            }
+
+            if (haystack.Contains("vehicle", StringComparison.Ordinal)
+                || haystack.Contains("/vehicles/", StringComparison.Ordinal)
+                || haystack.Contains("transport", StringComparison.Ordinal))
+            {
+                return 420d;
+            }
+
+            if (haystack.Contains("basebuilding", StringComparison.Ordinal)
+                || haystack.Contains("fortification", StringComparison.Ordinal)
+                || haystack.Contains("building", StringComparison.Ordinal)
+                || haystack.Contains("structure", StringComparison.Ordinal)
+                || haystack.Contains("wall", StringComparison.Ordinal)
+                || haystack.Contains("floor", StringComparison.Ordinal)
+                || haystack.Contains("door", StringComparison.Ordinal)
+                || haystack.Contains("gate", StringComparison.Ordinal))
+            {
+                return 300d;
+            }
+
+            if (haystack.Contains("chest", StringComparison.Ordinal)
+                || haystack.Contains("crate", StringComparison.Ordinal)
+                || haystack.Contains("container", StringComparison.Ordinal)
+                || haystack.Contains("storage", StringComparison.Ordinal)
+                || haystack.Contains("wardrobe", StringComparison.Ordinal)
+                || haystack.Contains("locker", StringComparison.Ordinal))
+            {
+                return 120d;
+            }
+
+            if (haystack.Contains("/helmets/", StringComparison.Ordinal)
+                || haystack.Contains("/head/helmet", StringComparison.Ordinal)
+                || haystack.Contains("helmet", StringComparison.Ordinal))
+            {
+                return 33d;
+            }
+
+            if (haystack.Contains("weapon", StringComparison.Ordinal)
+                || haystack.Contains("/weapons/", StringComparison.Ordinal)
+                || haystack.Contains("new_melee", StringComparison.Ordinal)
+                || haystack.Contains("melee", StringComparison.Ordinal)
+                || haystack.Contains("katana", StringComparison.Ordinal)
+                || haystack.Contains("machete", StringComparison.Ordinal)
+                || haystack.Contains("knife", StringComparison.Ordinal)
+                || haystack.Contains("sword", StringComparison.Ordinal)
+                || haystack.Contains("ranged_weapons", StringComparison.Ordinal)
+                || haystack.Contains("shotgun", StringComparison.Ordinal)
+                || haystack.Contains("rifle", StringComparison.Ordinal)
+                || haystack.Contains("pistol", StringComparison.Ordinal))
+            {
+                if (haystack.Contains("katana", StringComparison.Ordinal)
+                    || haystack.Contains("sword", StringComparison.Ordinal)
+                    || haystack.Contains("2h_", StringComparison.Ordinal)
+                    || haystack.Contains("twohand", StringComparison.Ordinal))
+                {
+                    return 115d;
+                }
+
+                if (haystack.Contains("machete", StringComparison.Ordinal)
+                    || haystack.Contains("knife", StringComparison.Ordinal)
+                    || haystack.Contains("1h_", StringComparison.Ordinal))
+                {
+                    return 80d;
+                }
+
+                if (haystack.Contains("sawed", StringComparison.Ordinal)
+                    || haystack.Contains("short", StringComparison.Ordinal)
+                    || haystack.Contains("обрез", StringComparison.Ordinal))
+                {
+                    return 65d;
+                }
+
+                return 95d;
+            }
+
+            if (haystack.Contains("clothing", StringComparison.Ordinal)
+                || haystack.Contains("clothes", StringComparison.Ordinal)
+                || haystack.Contains("armor", StringComparison.Ordinal)
+                || haystack.Contains("vests_armor", StringComparison.Ordinal)
+                || haystack.Contains("torso_protection", StringComparison.Ordinal)
+                || haystack.Contains("underwear_pants", StringComparison.Ordinal)
+                || haystack.Contains("jackets_coats", StringComparison.Ordinal)
+                || haystack.Contains("gloves", StringComparison.Ordinal)
+                || haystack.Contains("footwear", StringComparison.Ordinal)
+                || haystack.Contains("boots", StringComparison.Ordinal)
+                || haystack.Contains("backpack", StringComparison.Ordinal))
+            {
+                return LooksLikeArmorWearableTargetHaystack(haystack) ? 85d : 75d;
+            }
+
+            return modelKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase)
+                ? 100d
+                : 150d;
+        }
+    }
+
+    private sealed record RawModelPlacementOptions(
+        string Profile,
+        string DisplayName)
+    {
+        public static RawModelPlacementOptions FromRequest(
+            StudioRawModelCookRequestDto request,
+            string modelKind,
+            bool staticWeaponAdapter,
+            bool isVehicleRawCook,
+            bool vehicleVisualOverlay,
+            bool vehicleQueryProxy)
+        {
+            var haystack = string.Join(' ', new[]
+            {
+                request.AssetId,
+                request.FieldPath,
+                request.ModelKind,
+                modelKind
+            }).Replace('\\', '/').ToLowerInvariant();
+
+            if (staticWeaponAdapter)
+            {
+                var weaponProfile = RawModelWeaponRigOptions.FromRequest(request, modelKind).TargetProfile;
+                return new RawModelPlacementOptions(weaponProfile, DescribePlacementProfile(weaponProfile));
+            }
+
+            if (isVehicleRawCook || vehicleVisualOverlay || vehicleQueryProxy)
+            {
+                return new RawModelPlacementOptions("vehicle-grounded", "vehicle grounded footprint");
+            }
+
+            if (modelKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase)
+                && StudioRuntime.LooksLikeNpcCharacterTargetHaystack(haystack))
+            {
+                return new RawModelPlacementOptions("npc-character", "NPC character skeleton/body slot");
+            }
+
+            if (haystack.Contains("basebuilding", StringComparison.Ordinal)
+                || haystack.Contains("fortification", StringComparison.Ordinal)
+                || haystack.Contains("building", StringComparison.Ordinal)
+                || haystack.Contains("structure", StringComparison.Ordinal)
+                || haystack.Contains("wall", StringComparison.Ordinal)
+                || haystack.Contains("floor", StringComparison.Ordinal)
+                || haystack.Contains("door", StringComparison.Ordinal)
+                || haystack.Contains("gate", StringComparison.Ordinal))
+            {
+                return new RawModelPlacementOptions("world-grounded", "world grounded footprint");
+            }
+
+            if (haystack.Contains("chest", StringComparison.Ordinal)
+                || haystack.Contains("crate", StringComparison.Ordinal)
+                || haystack.Contains("container", StringComparison.Ordinal)
+                || haystack.Contains("storage", StringComparison.Ordinal)
+                || haystack.Contains("wardrobe", StringComparison.Ordinal)
+                || haystack.Contains("locker", StringComparison.Ordinal))
+            {
+                return new RawModelPlacementOptions("container-grounded", "container grounded footprint");
+            }
+
+            if (haystack.Contains("/helmets/", StringComparison.Ordinal)
+                || haystack.Contains("/head/helmet", StringComparison.Ordinal)
+                || haystack.Contains("helmet", StringComparison.Ordinal))
+            {
+                return new RawModelPlacementOptions("wearable-head", "wearable head/helmet slot");
+            }
+
+            if (haystack.Contains("clothing", StringComparison.Ordinal)
+                || haystack.Contains("clothes", StringComparison.Ordinal)
+                || haystack.Contains("armor", StringComparison.Ordinal)
+                || haystack.Contains("vests_armor", StringComparison.Ordinal)
+                || haystack.Contains("torso_protection", StringComparison.Ordinal)
+                || haystack.Contains("underwear_pants", StringComparison.Ordinal)
+                || haystack.Contains("jackets_coats", StringComparison.Ordinal)
+                || haystack.Contains("gloves", StringComparison.Ordinal)
+                || haystack.Contains("footwear", StringComparison.Ordinal)
+                || haystack.Contains("boots", StringComparison.Ordinal)
+                || haystack.Contains("backpack", StringComparison.Ordinal))
+            {
+                return new RawModelPlacementOptions("wearable-contract", "wearable skeleton/body slot");
+            }
+
+            return new RawModelPlacementOptions("generic-center", "generic centered pivot");
+        }
+
+        private static string DescribePlacementProfile(string profile)
+        {
+            return profile switch
+            {
+                "melee-blade" => "melee blade grip",
+                "pistol" => "pistol grip",
+                "m16-rifle" => "rifle grip/IK",
+                "shotgun" or "m1887" => "shotgun grip",
+                "wearable-head" => "wearable head/helmet slot",
+                "wearable-contract" => "wearable armor/body slot",
+                "npc-character" => "NPC character skeleton/body slot",
+                _ => profile
+            };
+        }
+    }
+
+    private sealed record RawModelOptimizationOptions(
+        bool Enabled,
+        int TargetTriangleCount)
+    {
+        public static RawModelOptimizationOptions Disabled { get; } = new(false, 0);
+
+        public static RawModelOptimizationOptions FromRequest(
+            StudioRawModelCookRequestDto request,
+            bool importAsSkeletal,
+            bool hasPartFilter,
+            bool allowSkeletalOptimization = false)
+        {
+            if (importAsSkeletal && !allowSkeletalOptimization)
+            {
+                return Disabled;
+            }
+
+            var requestedBudget = request.TargetTriangleCount.GetValueOrDefault(0);
+            if (requestedBudget <= 0 && !hasPartFilter)
+            {
+                return Disabled;
+            }
+
+            var targetTriangleCount = requestedBudget > 0
+                ? requestedBudget
+                : 8000;
+            return new RawModelOptimizationOptions(
+                true,
+                Math.Clamp(targetTriangleCount, 250, 75000));
+        }
+    }
+
+    private sealed record RawModelQueryProxyOptions(
+        bool Enabled,
+        bool UseBoxProxy,
+        double LengthScale,
+        double WidthScale,
+        double HeightScale)
+    {
+        public static RawModelQueryProxyOptions Disabled { get; } = new(false, false, 1d, 1d, 1d);
+
+        public static RawModelQueryProxyOptions FromRequest(StudioRawModelCookRequestDto request, bool enabled)
+        {
+            if (!enabled)
+            {
+                return Disabled;
+            }
+
+            static double PercentToScale(double? value, double fallback)
+            {
+                var percent = value.GetValueOrDefault(fallback);
+                if (!double.IsFinite(percent))
+                {
+                    percent = fallback;
+                }
+
+                return Math.Clamp(percent, 10d, 200d) / 100d;
+            }
+
+            var collisionMode = (request.CollisionMode ?? string.Empty).Trim().ToLowerInvariant();
+            var useBoxProxy = collisionMode.Contains("box", StringComparison.Ordinal)
+                              || collisionMode.Contains("simple", StringComparison.Ordinal)
+                              || collisionMode.Contains("hull", StringComparison.Ordinal);
+
+            return new RawModelQueryProxyOptions(
+                true,
+                useBoxProxy,
+                PercentToScale(request.QueryProxyLengthPercent, 96d),
+                PercentToScale(request.QueryProxyWidthPercent, 88d),
+                PercentToScale(request.QueryProxyHeightPercent, 92d));
+        }
+    }
+
+    private sealed record RawModelPaintOptions(
+        bool Enabled,
+        double Red,
+        double Green,
+        double Blue,
+        double Strength,
+        double Metallic,
+        double Roughness,
+        string DisplayColor)
+    {
+        public double StrengthPercent => Strength * 100d;
+        public double MetallicPercent => Metallic * 100d;
+        public double RoughnessPercent => Roughness * 100d;
+
+        public static RawModelPaintOptions Disabled { get; } = new(
+            false,
+            1d,
+            1d,
+            1d,
+            0d,
+            0d,
+            0.5d,
+            "#ffffff");
+
+        public static RawModelPaintOptions FromRequest(StudioRawModelCookRequestDto request)
+        {
+            var strength = Math.Clamp(request.PaintStrengthPercent.GetValueOrDefault(), 0d, 100d) / 100d;
+            if (strength <= 0.0001d)
+            {
+                return Disabled;
+            }
+
+            var (red, green, blue, displayColor) = TryParseHexColor(request.PaintColorHex, out var parsed)
+                ? parsed
+                : (1d, 1d, 1d, "#ffffff");
+            var metallic = Math.Clamp(request.MetallicPercent.GetValueOrDefault(0d), 0d, 100d) / 100d;
+            var roughness = Math.Clamp(request.RoughnessPercent.GetValueOrDefault(50d), 0d, 100d) / 100d;
+
+            return new RawModelPaintOptions(
+                true,
+                red,
+                green,
+                blue,
+                strength,
+                metallic,
+                roughness,
+                displayColor);
+        }
+
+        private static bool TryParseHexColor(string? raw, out (double Red, double Green, double Blue, string DisplayColor) color)
+        {
+            color = (1d, 1d, 1d, "#ffffff");
+            var normalized = (raw ?? string.Empty).Trim();
+            if (normalized.StartsWith('#'))
+            {
+                normalized = normalized[1..];
+            }
+
+            if (normalized.Length == 3)
+            {
+                normalized = string.Concat(normalized.Select(ch => new string(ch, 2)));
+            }
+
+            if (normalized.Length != 6
+                || !int.TryParse(normalized[..2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var red)
+                || !int.TryParse(normalized[2..4], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var green)
+                || !int.TryParse(normalized[4..6], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var blue))
+            {
+                return false;
+            }
+
+            color = (
+                red / 255d,
+                green / 255d,
+                blue / 255d,
+                $"#{normalized.ToLowerInvariant()}");
+            return true;
+        }
+    }
+
+    private sealed record RawModelExternalMaterialReference(
+        bool Enabled,
+        string PackagePath,
+        string ObjectName,
+        string ClassPackage,
+        string ClassName,
+        string DisplayName)
+    {
+        public static RawModelExternalMaterialReference Disabled { get; } = new(
+            false,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty);
+
+        public static RawModelExternalMaterialReference FromRequest(
+            StudioRawModelCookRequestDto request,
+            List<string> warnings)
+        {
+            var materialMode = (request.MaterialMode ?? string.Empty).Trim().ToLowerInvariant();
+            if (materialMode is not ("game" or "reference" or "material" or "mi"))
+            {
+                return Disabled;
+            }
+
+            var rawReference = (request.MaterialReference ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(rawReference))
+            {
+                warnings.Add("Материал из игры/.mi выбран, но ссылка на материал не задана. Модель будет приготовлена с материалами из самой модели.");
+                return Disabled;
+            }
+
+            string objectPath;
+            string classPackage;
+            string className;
+            if (TryParseImportedObjectReferenceRawValue(rawReference, out objectPath, out classPackage, out className))
+            {
+                if (!TryNormalizeMaterialClassName(className, out className))
+                {
+                    warnings.Add($"Выбранная ссылка не похожа на Material/MaterialInstance: {rawReference}");
+                    return Disabled;
+                }
+            }
+            else
+            {
+                objectPath = rawReference;
+                classPackage = "/Script/Engine";
+                var objectNameForClass = objectPath[(objectPath.LastIndexOf('.') + 1)..];
+                className = objectNameForClass.StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+                    ? "MaterialInstanceConstant"
+                    : "Material";
+            }
+
+            var dotIndex = objectPath.LastIndexOf('.');
+            if (dotIndex <= 0 || dotIndex >= objectPath.Length - 1)
+            {
+                warnings.Add($"Ссылка на материал должна иметь вид /Game/Path/Asset.Asset или object:/Game/Path/Asset.Asset|/Script/Engine|Material: {rawReference}");
+                return Disabled;
+            }
+
+            var packagePath = objectPath[..dotIndex];
+            var objectName = objectPath[(dotIndex + 1)..];
+            if (!packagePath.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(objectName))
+            {
+                warnings.Add($"Материал должен ссылаться на cooked game path /Game/...: {rawReference}");
+                return Disabled;
+            }
+
+            return new RawModelExternalMaterialReference(
+                true,
+                packagePath,
+                objectName,
+                string.IsNullOrWhiteSpace(classPackage) ? "/Script/Engine" : classPackage,
+                className,
+                LocalizeReferenceObjectName(objectName));
+        }
+
+        private static bool TryNormalizeMaterialClassName(string rawClassName, out string className)
+        {
+            var normalized = (rawClassName ?? string.Empty).Trim();
+            if (normalized.Equals("MaterialInstanceConstant", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("MaterialInstance", StringComparison.OrdinalIgnoreCase))
+            {
+                className = "MaterialInstanceConstant";
+                return true;
+            }
+
+            if (normalized.Equals("Material", StringComparison.OrdinalIgnoreCase)
+                || normalized.Equals("MaterialInterface", StringComparison.OrdinalIgnoreCase))
+            {
+                className = "Material";
+                return true;
+            }
+
+            className = string.Empty;
+            return false;
+        }
+    }
+
+    private sealed record RawModelTargetSkeletonReference(
+        string PackagePath,
+        string ObjectName,
+        string DisplayName);
+
+    private sealed record RawModelMaterialTemplateReference(
+        string SourcePath,
+        string PackagePath,
+        string ObjectName,
+        string ClassName,
+        string DisplayName,
+        string RawReference);
+
+    private sealed record CookedTexturePatchCandidate(
+        string Semantic,
+        string PackagePath,
+        string ObjectName,
+        string ClassName,
+        string DisplayName);
+
+    private sealed record RawModelTargetPhysicsAssetReference(
+        string PackagePath,
+        string ObjectName,
+        string DisplayName);
+
+    private bool TryCreateScumCompatibleMaterialInstanceCloneForRawModel(
+        StudioRawModelCookRequestDto request,
+        string customTargetRoot,
+        string assetName,
+        List<string> warnings,
+        out RawModelExternalMaterialReference material)
+    {
+        material = RawModelExternalMaterialReference.Disabled;
+        var materialMode = (request.MaterialMode ?? "model").Trim();
+        if (!string.IsNullOrWhiteSpace(materialMode)
+            && !materialMode.Equals("model", StringComparison.OrdinalIgnoreCase)
+            && !materialMode.Equals("internet", StringComparison.OrdinalIgnoreCase)
+            && !materialMode.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!Directory.Exists(customTargetRoot))
+        {
+            warnings.Add("SCUM-compatible material clone skipped: cooked target folder не найден.");
+            return false;
+        }
+
+        if (!TryResolveTargetMaterialTemplateReference(request, warnings, out var template))
+        {
+            warnings.Add("SCUM-compatible material clone skipped: не найден target MaterialInstance template с texture parameters.");
+            return false;
+        }
+
+        var textureCandidates = DiscoverCookedTexturePatchCandidates(customTargetRoot);
+        if (!textureCandidates.Any(candidate => candidate.Semantic.Equals("base-color", StringComparison.OrdinalIgnoreCase))
+            && !textureCandidates.Any(candidate => candidate.Semantic.Equals("normal", StringComparison.OrdinalIgnoreCase)))
+        {
+            warnings.Add("SCUM-compatible material clone skipped: cooked текстуры raw-модели не классифицированы как base color/normal.");
+            return false;
+        }
+
+        var materialFileName = $"{template.ObjectName}.uasset";
+        var materialPath = Path.Combine(customTargetRoot, materialFileName);
+        if (!TryCopyAssetPackage(template.SourcePath, materialPath, warnings))
+        {
+            return false;
+        }
+
+        var patchedParameters = PatchClonedMaterialInstanceTextureParameters(materialPath, textureCandidates, warnings);
+        if (patchedParameters <= 0)
+        {
+            warnings.Add($"SCUM-compatible material clone skipped: template {template.DisplayName} не содержит подходящих texture parameters для найденных текстур.");
+            TryDeleteFile(materialPath);
+            TryDeleteFile(Path.ChangeExtension(materialPath, ".uexp"));
+            TryDeleteFile(Path.ChangeExtension(materialPath, ".ubulk"));
+            return false;
+        }
+
+        var packagePath = $"/Game/SMS/R/{assetName}/{template.ObjectName}";
+        material = new RawModelExternalMaterialReference(
+            true,
+            packagePath,
+            template.ObjectName,
+            "/Script/Engine",
+            string.IsNullOrWhiteSpace(template.ClassName) ? "MaterialInstanceConstant" : template.ClassName,
+            template.DisplayName);
+        warnings.Add($"Создан SCUM-compatible material clone из {template.DisplayName}: texture parameters обновлено {patchedParameters}.");
+        return true;
+    }
+
+    private bool TryResolveTargetMaterialTemplateReference(
+        StudioRawModelCookRequestDto request,
+        List<string> warnings,
+        out RawModelMaterialTemplateReference template)
+    {
+        template = new RawModelMaterialTemplateReference(string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty);
+        var rawReferences = new List<string>();
+        if (TryResolveTargetVisualMeshObjectPathFromRequest(request, warnings, out var meshObjectPath))
+        {
+            rawReferences.AddRange(InferMaterialReferencesFromGameMeshReference(meshObjectPath));
+        }
+
+        rawReferences.AddRange(InferMaterialReferencesFromTargetAssetMaterialFields(request, warnings));
+        var candidates = rawReferences
+            .Select(NormalizeMaterialTemplateReference)
+            .Where(candidate => candidate is not null)
+            .Select(candidate => candidate!)
+            .Where(candidate => candidate.ObjectName.StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+                                || candidate.ObjectName.StartsWith("PARENT_", StringComparison.OrdinalIgnoreCase))
+            .DistinctBy(candidate => candidate.PackagePath + "." + candidate.ObjectName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(candidate => ScoreRawModelMaterialTemplateCandidate(candidate, request))
+            .ToList();
+        if (candidates.Count == 0)
+        {
+            warnings.Add("Material template scanner: в target mesh/item не найдено MI_/PARENT_ material candidates.");
+        }
+
+        var skippedWithoutTextureParameters = new List<string>();
+        foreach (var candidate in candidates)
+        {
+            if (!TryResolveRelativeAssetPathFromGameReference(candidate.RawReference, out var relativePath)
+                || !TryResolveGameAssetSource(relativePath, out var sourcePath, warnings, includeCompanions: true)
+                || string.IsNullOrWhiteSpace(sourcePath)
+                || !File.Exists(sourcePath))
+            {
+                continue;
+            }
+
+            if (!MaterialTemplateHasTextureParameters(sourcePath))
+            {
+                skippedWithoutTextureParameters.Add(candidate.ObjectName);
+                continue;
+            }
+
+            template = candidate with { SourcePath = sourcePath };
+            return true;
+        }
+
+        if (skippedWithoutTextureParameters.Count > 0)
+        {
+            warnings.Add($"Material template scanner: candidates без texture parameters пропущены: {string.Join(", ", skippedWithoutTextureParameters.Take(8))}.");
+        }
+
+        return false;
+    }
+
+    private static bool MaterialTemplateHasTextureParameters(string sourcePath)
+    {
+        try
+        {
+            var asset = new UAsset(sourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            return asset.Exports
+                .OfType<NormalExport>()
+                .Any(export => (FindTopLevelProperty<ArrayPropertyData>(export, "TextureParameterValues", out _)?.Value.Length ?? 0) > 0);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private IEnumerable<string> InferMaterialReferencesFromTargetAssetMaterialFields(
+        StudioRawModelCookRequestDto request,
+        List<string> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(request.AssetId))
+        {
+            return [];
+        }
+
+        try
+        {
+            var report = GetFieldDiscoveryReport(request.AssetId, 1800, hiddenOnly: false);
+            var directReferences = report.Fields
+                .Where(field => LooksLikeMaterialObjectReference(field.CurrentValue)
+                                || (field.ReferencePickerKind ?? string.Empty).Contains("material", StringComparison.OrdinalIgnoreCase))
+                .Select(field => field.CurrentValue)
+                .Where(LooksLikeMaterialObjectReference)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var expandedReferences = new List<string>(directReferences);
+            foreach (var reference in directReferences)
+            {
+                if (!TryResolveRelativeAssetPathFromGameReference(reference, out var relativePath)
+                    || !TryResolveGameAssetSource(relativePath, out var sourcePath, warnings, includeCompanions: true)
+                    || string.IsNullOrWhiteSpace(sourcePath)
+                    || !File.Exists(sourcePath))
+                {
+                    continue;
+                }
+
+                expandedReferences.AddRange(EnumerateCustomVisualDependencies(sourcePath)
+                    .Where(LooksLikeMaterialObjectReference));
+            }
+
+            return expandedReferences
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Material template target-предмета не удалось прочитать из override-полей: {ex.Message}");
+            return [];
+        }
+    }
+
+    private static RawModelMaterialTemplateReference? NormalizeMaterialTemplateReference(string rawReference)
+    {
+        var normalized = (rawReference ?? string.Empty).Trim();
+        var className = "MaterialInstanceConstant";
+        if (TryParseImportedObjectReferenceRawValue(normalized, out var importedObjectPath, out _, out var importedClassName))
+        {
+            normalized = importedObjectPath;
+            if (!string.IsNullOrWhiteSpace(importedClassName))
+            {
+                className = importedClassName;
+            }
+        }
+
+        var dotIndex = normalized.LastIndexOf('.');
+        if (dotIndex <= 0 || dotIndex >= normalized.Length - 1)
+        {
+            return null;
+        }
+
+        var packagePath = normalized[..dotIndex];
+        var objectName = normalized[(dotIndex + 1)..];
+        if (!packagePath.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(objectName))
+        {
+            return null;
+        }
+
+        return new RawModelMaterialTemplateReference(
+            string.Empty,
+            packagePath,
+            objectName,
+            className.Equals("MaterialInstance", StringComparison.OrdinalIgnoreCase) ? "MaterialInstanceConstant" : className,
+            LocalizeReferenceObjectName(objectName),
+            normalized);
+    }
+
+    private static int ScoreRawModelMaterialTemplateCandidate(
+        RawModelMaterialTemplateReference candidate,
+        StudioRawModelCookRequestDto request)
+    {
+        var haystack = $"{request.AssetId} {request.FieldPath} {candidate.PackagePath} {candidate.ObjectName}".ToLowerInvariant();
+        var name = candidate.ObjectName.ToLowerInvariant();
+        var score = 100;
+        if (name.Contains("receiver", StringComparison.Ordinal))
+        {
+            score -= 40;
+        }
+        if (name.Contains("body", StringComparison.Ordinal)
+            || name.Contains("main", StringComparison.Ordinal))
+        {
+            score -= 25;
+        }
+        if (name.Contains("exchange", StringComparison.Ordinal))
+        {
+            score -= 15;
+        }
+        if (name.Contains("katana", StringComparison.Ordinal)
+            || name.Contains("cleaver", StringComparison.Ordinal)
+            || name.Contains("blade", StringComparison.Ordinal))
+        {
+            score -= 30;
+        }
+        if ((haystack.Contains("/clothes/", StringComparison.Ordinal)
+                || haystack.Contains("clothing", StringComparison.Ordinal)
+                || haystack.Contains("helmet", StringComparison.Ordinal)
+                || haystack.Contains("armor", StringComparison.Ordinal)
+                || haystack.Contains("backpack", StringComparison.Ordinal))
+            && name.StartsWith("parent_", StringComparison.Ordinal))
+        {
+            score -= 45;
+        }
+        if (name.Contains("iron", StringComparison.Ordinal)
+            || name.Contains("sight", StringComparison.Ordinal)
+            || name.Contains("bullet", StringComparison.Ordinal)
+            || name.Contains("ammo", StringComparison.Ordinal))
+        {
+            score += 30;
+        }
+        if (haystack.Contains("/weapons/", StringComparison.Ordinal))
+        {
+            score -= 5;
+        }
+
+        return score;
+    }
+
+    private bool TryResolveTargetVisualMeshObjectPathFromRequest(
+        StudioRawModelCookRequestDto request,
+        List<string> warnings,
+        out string meshObjectPath)
+    {
+        meshObjectPath = string.Empty;
+        if (string.IsNullOrWhiteSpace(request.AssetId) || string.IsNullOrWhiteSpace(request.FieldPath))
+        {
+            return false;
+        }
+
+        if (!TryBuildSelectionFromAssetId(request.AssetId, out var selection))
+        {
+            return false;
+        }
+
+        var sourcePath = ResolveAssetSourcePath(selection, "game", warnings, includeCompanions: true);
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var readableSourcePath = PrepareIsolatedAssetReadSource(sourcePath);
+            var asset = new UAsset(readableSourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            return TryResolveUassetProperty(asset, request.FieldPath, out var selectedProperty)
+                   && TryResolveSkeletalMeshObjectPathFromProperty(asset, selectedProperty, out meshObjectPath);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Material template целевого mesh не удалось определить автоматически: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool TryCopyAssetPackage(string sourceUassetPath, string destinationUassetPath, List<string> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(sourceUassetPath)
+            || !File.Exists(sourceUassetPath)
+            || string.IsNullOrWhiteSpace(destinationUassetPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationUassetPath) ?? ".");
+            foreach (var extension in new[] { ".uasset", ".uexp", ".ubulk" })
+            {
+                var source = Path.ChangeExtension(sourceUassetPath, extension);
+                if (!File.Exists(source))
+                {
+                    continue;
+                }
+
+                var destination = Path.ChangeExtension(destinationUassetPath, extension);
+                File.Copy(source, destination, overwrite: true);
+            }
+
+            return File.Exists(destinationUassetPath);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Material template copy skipped: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static List<CookedTexturePatchCandidate> DiscoverCookedTexturePatchCandidates(string customTargetRoot)
+    {
+        if (!Directory.Exists(customTargetRoot))
+        {
+            return [];
+        }
+
+        var candidates = new List<CookedTexturePatchCandidate>();
+        foreach (var uassetPath in Directory.EnumerateFiles(customTargetRoot, "*.uasset", SearchOption.AllDirectories))
+        {
+            var objectName = Path.GetFileNameWithoutExtension(uassetPath);
+            var semantic = ClassifyCookedTexturePatchSemantic(objectName);
+            if (string.IsNullOrWhiteSpace(semantic)
+                || !TryBuildGamePackagePathFromCookedContentFile(uassetPath, out var packagePath))
+            {
+                continue;
+            }
+
+            candidates.Add(new CookedTexturePatchCandidate(
+                semantic,
+                packagePath,
+                objectName,
+                "Texture2D",
+                LocalizeReferenceObjectName(objectName)));
+        }
+
+        return candidates
+            .GroupBy(candidate => candidate.PackagePath + "." + candidate.ObjectName, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+    }
+
+    private static string ClassifyCookedTexturePatchSemantic(string objectName)
+    {
+        var normalized = (objectName ?? string.Empty).Replace('-', '_').Replace('.', '_').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return string.Empty;
+        }
+
+        if (normalized.Contains("normal", StringComparison.Ordinal)
+            || normalized.EndsWith("_n", StringComparison.Ordinal)
+            || normalized.EndsWith("_nrm", StringComparison.Ordinal)
+            || normalized.Contains("_nrm_", StringComparison.Ordinal))
+        {
+            return "normal";
+        }
+
+        if (normalized.Contains("roughness", StringComparison.Ordinal)
+            || normalized.EndsWith("_r", StringComparison.Ordinal)
+            || normalized.EndsWith("_rgh", StringComparison.Ordinal))
+        {
+            return "roughness";
+        }
+
+        if (normalized.Contains("metallic", StringComparison.Ordinal)
+            || normalized.Contains("metalness", StringComparison.Ordinal)
+            || normalized.EndsWith("_m", StringComparison.Ordinal)
+            || normalized.EndsWith("_met", StringComparison.Ordinal))
+        {
+            return "metallic";
+        }
+
+        if (normalized.Contains("mixed_ao", StringComparison.Ordinal)
+            || normalized.Contains("ambient_occlusion", StringComparison.Ordinal)
+            || normalized.Contains("ambientocclusion", StringComparison.Ordinal)
+            || normalized.EndsWith("_ao", StringComparison.Ordinal))
+        {
+            return "aomec";
+        }
+
+        if (normalized.Contains("base_color", StringComparison.Ordinal)
+            || normalized.Contains("basecolor", StringComparison.Ordinal)
+            || normalized.Contains("albedo", StringComparison.Ordinal)
+            || normalized.Contains("diffuse", StringComparison.Ordinal)
+            || normalized.EndsWith("_d", StringComparison.Ordinal)
+            || normalized.EndsWith("_col", StringComparison.Ordinal)
+            || normalized.EndsWith("_color", StringComparison.Ordinal))
+        {
+            return "base-color";
+        }
+
+        return string.Empty;
+    }
+
+    private static int PatchClonedMaterialInstanceTextureParameters(
+        string materialPath,
+        List<CookedTexturePatchCandidate> textureCandidates,
+        List<string> warnings)
+    {
+        UAsset asset;
+        try
+        {
+            asset = new UAsset(materialPath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Material clone patch skipped: не удалось прочитать {Path.GetFileName(materialPath)} ({ex.Message})");
+            return 0;
+        }
+
+        var patched = 0;
+        foreach (var export in asset.Exports.OfType<NormalExport>())
+        {
+            var textureParameters = FindTopLevelProperty<ArrayPropertyData>(export, "TextureParameterValues", out _);
+            if (textureParameters is null)
+            {
+                continue;
+            }
+
+            foreach (var entry in textureParameters.Value.OfType<StructPropertyData>())
+            {
+                if (!TryGetMaterialParameterName(entry, out var parameterName)
+                    || !TrySelectCookedTextureForMaterialParameter(parameterName, textureCandidates, out var texture)
+                    || !TryFindStructProperty<ObjectPropertyData>(entry, "ParameterValue", out var parameterValue))
+                {
+                    continue;
+                }
+
+                var oldIndex = parameterValue.Value.Index;
+                var newIndex = EnsureTextureImport(asset, texture);
+                parameterValue.Value = newIndex;
+                PatchCachedReferencedTexture(asset, export, oldIndex, newIndex.Index);
+                patched++;
+            }
+        }
+
+        if (patched <= 0)
+        {
+            return 0;
+        }
+
+        try
+        {
+            asset.Write(materialPath);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Material clone patch skipped: не удалось записать {Path.GetFileName(materialPath)} ({ex.Message})");
+            return 0;
+        }
+
+        return patched;
+    }
+
+    private static bool TryGetMaterialParameterName(StructPropertyData entry, out string parameterName)
+    {
+        parameterName = string.Empty;
+        if (!TryFindStructProperty<StructPropertyData>(entry, "ParameterInfo", out var parameterInfo)
+            || !TryFindStructProperty<NamePropertyData>(parameterInfo, "Name", out var nameProperty))
+        {
+            return false;
+        }
+
+        parameterName = nameProperty.Value?.ToString() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(parameterName);
+    }
+
+    private static bool TryFindStructProperty<T>(StructPropertyData container, string name, out T property)
+        where T : PropertyData
+    {
+        property = null!;
+        foreach (var child in container.Value ?? [])
+        {
+            if (child is T typed
+                && child.Name.ToString().Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                property = typed;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TrySelectCookedTextureForMaterialParameter(
+        string parameterName,
+        List<CookedTexturePatchCandidate> textureCandidates,
+        out CookedTexturePatchCandidate texture)
+    {
+        texture = null!;
+        var normalized = (parameterName ?? string.Empty).Replace(" ", string.Empty).Replace("_", string.Empty).ToLowerInvariant();
+        var preferredSemantic =
+            normalized.Equals("d", StringComparison.Ordinal)
+            || normalized.Equals("diffuse", StringComparison.Ordinal)
+            || normalized.Equals("albedo", StringComparison.Ordinal)
+            || normalized.Contains("color", StringComparison.Ordinal)
+            || normalized.Contains("diffuse", StringComparison.Ordinal)
+            || normalized.Contains("albedo", StringComparison.Ordinal)
+            || normalized.Contains("basecolor", StringComparison.Ordinal)
+                ? "base-color"
+                : normalized.Equals("n", StringComparison.Ordinal)
+                  || normalized.Contains("normal", StringComparison.Ordinal)
+                    ? "normal"
+                    : normalized.Equals("cmd", StringComparison.Ordinal)
+                      || normalized.Equals("materialmask", StringComparison.Ordinal)
+                      || normalized.Contains("cmd", StringComparison.Ordinal)
+                      || normalized.Contains("materialmask", StringComparison.Ordinal)
+                      || normalized.Contains("aomec", StringComparison.Ordinal)
+                      || normalized.Contains("orm", StringComparison.Ordinal)
+                      || normalized.Contains("param", StringComparison.Ordinal)
+                        ? "aomec"
+                        : normalized.Equals("r", StringComparison.Ordinal)
+                          || normalized.Contains("roughness", StringComparison.Ordinal)
+                            ? "roughness"
+                            : normalized.Equals("m", StringComparison.Ordinal)
+                              || normalized.Contains("metallic", StringComparison.Ordinal)
+                              || normalized.Contains("metalness", StringComparison.Ordinal)
+                                ? "metallic"
+                                : string.Empty;
+
+        if (string.IsNullOrWhiteSpace(preferredSemantic))
+        {
+            return false;
+        }
+
+        var exactTexture = textureCandidates.FirstOrDefault(candidate => candidate.Semantic.Equals(preferredSemantic, StringComparison.OrdinalIgnoreCase));
+        if (exactTexture is not null)
+        {
+            texture = exactTexture;
+            return true;
+        }
+
+        if (preferredSemantic.Equals("aomec", StringComparison.OrdinalIgnoreCase))
+        {
+            var fallbackTexture = textureCandidates.FirstOrDefault(candidate => candidate.Semantic.Equals("metallic", StringComparison.OrdinalIgnoreCase))
+                                  ?? textureCandidates.FirstOrDefault(candidate => candidate.Semantic.Equals("roughness", StringComparison.OrdinalIgnoreCase));
+            if (fallbackTexture is not null)
+            {
+                texture = fallbackTexture;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static FPackageIndex EnsureTextureImport(UAsset asset, CookedTexturePatchCandidate texture)
+    {
+        var packageImportIndex = EnsureImport(
+            asset,
+            "/Script/CoreUObject",
+            "Package",
+            new FPackageIndex(0),
+            texture.PackagePath);
+        var textureImportIndex = EnsureImport(
+            asset,
+            "/Script/Engine",
+            string.IsNullOrWhiteSpace(texture.ClassName) ? "Texture2D" : texture.ClassName,
+            new FPackageIndex(-(packageImportIndex + 1)),
+            texture.ObjectName);
+        return new FPackageIndex(-(textureImportIndex + 1));
+    }
+
+    private static void PatchCachedReferencedTexture(UAsset asset, NormalExport export, int oldIndex, int newIndex)
+    {
+        if (oldIndex == newIndex)
+        {
+            return;
+        }
+
+        foreach (var propertyName in new[] { "CachedReferencedTextures", "TextureStreamingData" })
+        {
+            var array = FindTopLevelProperty<ArrayPropertyData>(export, propertyName, out _);
+            if (array is null)
+            {
+                continue;
+            }
+
+            foreach (var objectProperty in array.Value.OfType<ObjectPropertyData>())
+            {
+                if (objectProperty.Value.Index == oldIndex)
+                {
+                    objectProperty.Value = new FPackageIndex(newIndex);
+                }
+            }
+        }
+    }
+
+    private bool TryResolveTargetSkeletonReference(
+        StudioRawModelCookRequestDto request,
+        List<string> warnings,
+        out RawModelTargetSkeletonReference skeleton)
+    {
+        skeleton = new RawModelTargetSkeletonReference(string.Empty, string.Empty, string.Empty);
+        if (string.IsNullOrWhiteSpace(request.AssetId) || string.IsNullOrWhiteSpace(request.FieldPath))
+        {
+            return false;
+        }
+
+        if (!TryBuildSelectionFromAssetId(request.AssetId, out var selection))
+        {
+            return false;
+        }
+
+        var sourcePath = ResolveAssetSourcePath(selection, "game", warnings, includeCompanions: true);
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var readableSourcePath = PrepareIsolatedAssetReadSource(sourcePath);
+            var asset = new UAsset(readableSourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            if (!TryResolveUassetProperty(asset, request.FieldPath, out var selectedProperty))
+            {
+                return false;
+            }
+
+            if (!TryResolveSkeletalMeshObjectPathFromProperty(asset, selectedProperty, out var meshObjectPath)
+                || !TryInferSkeletonObjectPathFromSkeletalMesh(meshObjectPath, out var skeletonObjectPath))
+            {
+                return false;
+            }
+
+            var dotIndex = skeletonObjectPath.LastIndexOf('.');
+            if (dotIndex <= 0 || dotIndex >= skeletonObjectPath.Length - 1)
+            {
+                return false;
+            }
+
+            var packagePath = skeletonObjectPath[..dotIndex];
+            var objectName = skeletonObjectPath[(dotIndex + 1)..];
+            skeleton = new RawModelTargetSkeletonReference(
+                packagePath,
+                objectName,
+                LocalizeReferenceObjectName(objectName));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Skeleton-профиль целевого SkeletalMesh не удалось определить автоматически: {ex.Message}");
+            return false;
+        }
+    }
+
+    private bool TryResolveTargetPhysicsAssetReference(
+        StudioRawModelCookRequestDto request,
+        List<string> warnings,
+        out RawModelTargetPhysicsAssetReference physicsAsset)
+    {
+        physicsAsset = new RawModelTargetPhysicsAssetReference(string.Empty, string.Empty, string.Empty);
+        if (string.IsNullOrWhiteSpace(request.AssetId) || string.IsNullOrWhiteSpace(request.FieldPath))
+        {
+            return false;
+        }
+
+        if (!TryBuildSelectionFromAssetId(request.AssetId, out var selection))
+        {
+            return false;
+        }
+
+        var sourcePath = ResolveAssetSourcePath(selection, "game", warnings, includeCompanions: true);
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var readableSourcePath = PrepareIsolatedAssetReadSource(sourcePath);
+            var asset = new UAsset(readableSourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            if (!TryResolveUassetProperty(asset, request.FieldPath, out var selectedProperty)
+                || !TryResolveSkeletalMeshObjectPathFromProperty(asset, selectedProperty, out var meshObjectPath)
+                || !TryResolvePhysicsAssetObjectPathFromSkeletalMesh(meshObjectPath, warnings, out var physicsObjectPath))
+            {
+                return false;
+            }
+
+            var dotIndex = physicsObjectPath.LastIndexOf('.');
+            if (dotIndex <= 0 || dotIndex >= physicsObjectPath.Length - 1)
+            {
+                return false;
+            }
+
+            var packagePath = physicsObjectPath[..dotIndex];
+            var objectName = physicsObjectPath[(dotIndex + 1)..];
+            physicsAsset = new RawModelTargetPhysicsAssetReference(
+                packagePath,
+                objectName,
+                LocalizeReferenceObjectName(objectName));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"PhysicsAsset-профиль целевого SkeletalMesh не удалось определить автоматически: {ex.Message}");
+            return false;
+        }
+    }
+
+    private bool TryResolveTargetSkeletonBoneNames(
+        StudioRawModelCookRequestDto request,
+        List<string> warnings,
+        out List<string> boneNames)
+    {
+        boneNames = [];
+        if (!TryResolveTargetSkeletonReference(request, warnings, out var skeleton))
+        {
+            return false;
+        }
+
+        var skeletonObjectPath = $"{skeleton.PackagePath}.{skeleton.ObjectName}";
+        if (!TryResolveRelativeAssetPathFromGameReference(skeletonObjectPath, out var skeletonRelativePath)
+            || !TryResolveGameAssetSource(skeletonRelativePath, out var skeletonSourcePath, warnings, includeCompanions: true)
+            || !File.Exists(skeletonSourcePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var readableSkeletonPath = PrepareIsolatedAssetReadSource(skeletonSourcePath);
+            var skeletonAsset = new UAsset(readableSkeletonPath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            boneNames = ExtractLikelySkeletonBoneNames(skeletonAsset);
+            if (boneNames.Count == 0)
+            {
+                return false;
+            }
+
+            warnings.Add($"Target skeleton contract прочитан из {skeleton.DisplayName}: bone names {boneNames.Count}.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Bone names целевого Skeleton не удалось прочитать автоматически: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static List<string> ExtractLikelySkeletonBoneNames(UAsset skeletonAsset)
+    {
+        var candidates = new List<string>();
+        foreach (var name in skeletonAsset.GetNameMapIndexList())
+        {
+            var text = (name.ToString() ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(text)
+                || text.Equals("None", StringComparison.OrdinalIgnoreCase)
+                || candidates.Contains(text, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (text.Equals("Root", StringComparison.OrdinalIgnoreCase)
+                || text.StartsWith("b_", StringComparison.OrdinalIgnoreCase)
+                || text.StartsWith("bone_", StringComparison.OrdinalIgnoreCase))
+            {
+                candidates.Add(text);
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return [];
+        }
+
+        var root = candidates.FirstOrDefault(name => name.Equals("Root", StringComparison.OrdinalIgnoreCase))
+                   ?? candidates.FirstOrDefault(name => name.Equals("root", StringComparison.OrdinalIgnoreCase))
+                   ?? candidates.First();
+
+        return candidates
+            .OrderBy(name => name.Equals(root, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .Take(128)
+            .ToList();
+    }
+
+    private static List<string> AugmentWeaponTargetBoneNames(
+        StudioRawModelCookRequestDto request,
+        RawModelWeaponRigOptions weaponRig,
+        IReadOnlyList<string> boneNames,
+        List<string> warnings)
+    {
+        var result = new List<string>();
+
+        void Add(string name)
+        {
+            if (!string.IsNullOrWhiteSpace(name)
+                && !result.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                result.Add(name);
+            }
+        }
+
+        foreach (var name in boneNames)
+        {
+            Add(name);
+        }
+
+        Add(result.FirstOrDefault(name => name.Equals("Root", StringComparison.OrdinalIgnoreCase)) ?? "Root");
+        Add("RepositionBone");
+        Add("LeftHandIK");
+        Add("Muzzle");
+        Add("AimingDownTheSightsCenter");
+
+        var haystack = $"{request.AssetId} {request.FieldPath} {weaponRig.TargetProfile}"
+            .ToLowerInvariant();
+        if (haystack.Contains("m16", StringComparison.Ordinal)
+            || weaponRig.TargetProfile.Equals("m16-rifle", StringComparison.OrdinalIgnoreCase))
+        {
+            Add("EjectCasing");
+            Add("Bullet");
+            Add("BulletShells");
+            Add("Bullets");
+            Add("Magazine");
+            Add("ChargingHandle");
+            Add("Trigger");
+        }
+        else
+        {
+            Add("Lever");
+            Add("Cock");
+            Add("Bullet");
+            Add("BulletShells");
+            Add("Bullets");
+        }
+
+        if (result.Count > boneNames.Count)
+        {
+            warnings.Add($"Оружейный target skeleton contract дополнен socket/bone markers: {string.Join(", ", result.Skip(boneNames.Count).Take(12))}.");
+        }
+
+        return result;
+    }
+
+    private static bool TryResolveSkeletalMeshObjectPathFromProperty(
+        UAsset asset,
+        PropertyData property,
+        out string objectPath)
+    {
+        objectPath = string.Empty;
+        if (property is SoftObjectPropertyData softObjectProperty
+            && TryExtractGameObjectPathFromPickerValue(ExtractSoftObjectReference(softObjectProperty.Value), out objectPath)
+            && objectPath.Contains("/Game/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (property is SoftObjectPathPropertyData softObjectPathProperty
+            && TryExtractGameObjectPathFromPickerValue(ExtractSoftObjectReference(softObjectPathProperty.Value), out objectPath)
+            && objectPath.Contains("/Game/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (property is ObjectPropertyData objectProperty)
+        {
+            if (TryExtractObjectReferencePickerValue(asset, objectProperty.Value, out var rawValue, out _)
+                && TryExtractGameObjectPathFromPickerValue(rawValue, out objectPath)
+                && objectPath.Contains("/Game/", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            var exportIndex = objectProperty.Value.Index - 1;
+            if (exportIndex >= 0
+                && exportIndex < asset.Exports.Count
+                && asset.Exports[exportIndex] is NormalExport referencedExport)
+            {
+                var nestedMesh = FindTopLevelProperty<ObjectPropertyData>(referencedExport, "SkeletalMesh", out _);
+                if (nestedMesh is not null
+                    && TryExtractObjectReferencePickerValue(asset, nestedMesh.Value, out var nestedRawValue, out _)
+                    && TryExtractGameObjectPathFromPickerValue(nestedRawValue, out objectPath)
+                    && objectPath.Contains("/Game/", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        if (property is StructPropertyData structProperty)
+        {
+            foreach (var child in structProperty.Value ?? [])
+            {
+                if (TryResolveSkeletalMeshObjectPathFromProperty(asset, child, out objectPath))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryInferSkeletonObjectPathFromSkeletalMesh(string meshObjectPath, out string skeletonObjectPath)
+    {
+        skeletonObjectPath = string.Empty;
+        var normalized = (meshObjectPath ?? string.Empty).Trim();
+        if (TryParseImportedObjectReferenceRawValue(normalized, out var importedObjectPath, out _, out _))
+        {
+            normalized = importedObjectPath;
+        }
+
+        var dotIndex = normalized.LastIndexOf('.');
+        if (dotIndex <= 0 || dotIndex >= normalized.Length - 1)
+        {
+            return false;
+        }
+
+        var packagePath = normalized[..dotIndex];
+        var objectName = normalized[(dotIndex + 1)..];
+        if (!packagePath.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(objectName))
+        {
+            return false;
+        }
+
+        var baseName = objectName;
+        var suffixes = new[]
+        {
+            "_PhysicsAsset",
+            "_Physicsasset",
+            "_Physics",
+            "_Skin",
+            "_Short",
+            "_Sawed_Off",
+            "_SawedOff"
+        };
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var suffix in suffixes)
+            {
+                if (baseName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+                    && baseName.Length > suffix.Length + 2)
+                {
+                    baseName = baseName[..^suffix.Length];
+                    changed = true;
+                }
+            }
+        }
+
+        var slashIndex = packagePath.LastIndexOf('/');
+        if (slashIndex <= 0)
+        {
+            return false;
+        }
+
+        var directory = packagePath[..slashIndex];
+        var skeletonName = baseName.EndsWith("_Skeleton", StringComparison.OrdinalIgnoreCase)
+            ? baseName
+            : $"{baseName}_Skeleton";
+        skeletonObjectPath = $"{directory}/{skeletonName}.{skeletonName}";
+        return true;
+    }
+
+    private bool TryResolvePhysicsAssetObjectPathFromSkeletalMesh(
+        string meshObjectPath,
+        List<string> warnings,
+        out string physicsObjectPath)
+    {
+        physicsObjectPath = string.Empty;
+        var normalized = (meshObjectPath ?? string.Empty).Trim();
+        if (TryParseImportedObjectReferenceRawValue(normalized, out var importedObjectPath, out _, out _))
+        {
+            normalized = importedObjectPath;
+        }
+
+        if (TryResolveRelativeAssetPathFromGameReference(normalized, out var meshRelativePath)
+            && TryResolveGameAssetSource(meshRelativePath, out var meshSourcePath, warnings, includeCompanions: true)
+            && File.Exists(meshSourcePath))
+        {
+            try
+            {
+                var readableMeshPath = PrepareIsolatedAssetReadSource(meshSourcePath);
+                var meshAsset = new UAsset(readableMeshPath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+                foreach (var export in meshAsset.Exports.OfType<NormalExport>())
+                {
+                    if (!IsSkeletalMeshExport(meshAsset, export))
+                    {
+                        continue;
+                    }
+
+                    var physicsProperty = FindTopLevelProperty<ObjectPropertyData>(export, "PhysicsAsset", out _);
+                    if (physicsProperty is not null
+                        && TryExtractObjectReferencePickerValue(meshAsset, physicsProperty.Value, out var rawValue, out _)
+                        && TryExtractGameObjectPathFromPickerValue(rawValue, out physicsObjectPath))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"PhysicsAsset целевого SkeletalMesh не удалось прочитать из оригинала: {ex.Message}");
+            }
+        }
+
+        return TryInferPhysicsAssetObjectPathFromSkeletalMesh(normalized, out physicsObjectPath);
+    }
+
+    private static bool TryInferPhysicsAssetObjectPathFromSkeletalMesh(string meshObjectPath, out string physicsObjectPath)
+    {
+        physicsObjectPath = string.Empty;
+        var normalized = (meshObjectPath ?? string.Empty).Trim();
+        if (TryParseImportedObjectReferenceRawValue(normalized, out var importedObjectPath, out _, out _))
+        {
+            normalized = importedObjectPath;
+        }
+
+        var dotIndex = normalized.LastIndexOf('.');
+        if (dotIndex <= 0 || dotIndex >= normalized.Length - 1)
+        {
+            return false;
+        }
+
+        var packagePath = normalized[..dotIndex];
+        var objectName = normalized[(dotIndex + 1)..];
+        if (!packagePath.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(objectName))
+        {
+            return false;
+        }
+
+        var slashIndex = packagePath.LastIndexOf('/');
+        if (slashIndex <= 0)
+        {
+            return false;
+        }
+
+        var directory = packagePath[..slashIndex];
+        var physicsName = objectName.EndsWith("_PhysicsAsset", StringComparison.OrdinalIgnoreCase)
+            ? objectName
+            : $"{objectName}_PhysicsAsset";
+        physicsObjectPath = $"{directory}/{physicsName}.{physicsName}";
+        return true;
+    }
+
+    private static string QuoteCommandArgument(string value)
+    {
+        return $"\"{(value ?? string.Empty).Replace("\"", "\\\"")}\"";
+    }
+
+    private static string PythonStringLiteral(string value)
+    {
+        return JsonSerializer.Serialize(value ?? string.Empty);
+    }
+
+    private static List<string> NormalizeRawPartNameFilter(List<string>? rawPartNames)
+    {
+        if (rawPartNames is null || rawPartNames.Count == 0)
+        {
+            return [];
+        }
+
+        return rawPartNames
+            .Select(name => (name ?? string.Empty).Trim())
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(64)
+            .ToList();
+    }
+
+    private static string BuildBlenderExportScript(
+        string sourcePath,
+        string outputPath,
+        bool forceArmature,
+        RawModelFitOptions fit,
+        RawModelTransformOptions transform,
+        RawModelWeaponRigOptions weaponRig,
+        bool staticWeaponAdapter,
+        bool vehicleRigEnabled,
+        bool vehicleVisualOverlay,
+        RawModelQueryProxyOptions queryProxy,
+        IReadOnlyList<string> targetBoneNames,
+        IReadOnlyList<string> selectedPartNames,
+        RawModelOptimizationOptions optimization,
+        RawModelPlacementOptions placement)
+    {
+        var autoFitEnabled = fit.AutoFit ? "True" : "False";
+        var targetLongestMeters = fit.TargetLongestMeters.ToString(CultureInfo.InvariantCulture);
+        var weaponRigEnabled = weaponRig.Enabled ? "True" : "False";
+        var staticWeaponAdapterPython = staticWeaponAdapter ? "True" : "False";
+        var vehicleRigEnabledPython = vehicleRigEnabled ? "True" : "False";
+        var vehicleVisualOverlayPython = vehicleVisualOverlay ? "True" : "False";
+        var vehicleQueryProxyPython = queryProxy.Enabled ? "True" : "False";
+        var queryProxyUseBoxesPython = queryProxy.UseBoxProxy ? "True" : "False";
+        var isShortWeapon = weaponRig.IsShortWeapon ? "True" : "False";
+        var weaponTargetProfileJson = JsonSerializer.Serialize(weaponRig.TargetProfile ?? "none");
+        var weaponGripAnchorPercent = weaponRig.GripAnchorPercent.ToString(CultureInfo.InvariantCulture);
+        var weaponGripDiameterMeters = (weaponRig.GripDiameterCm / 100d).ToString(CultureInfo.InvariantCulture);
+        var weaponGripBackReachMeters = (weaponRig.GripBackReachCm / 100d).ToString(CultureInfo.InvariantCulture);
+        var weaponSecondHandShiftMeters = (weaponRig.SecondHandShiftCm / 100d).ToString(CultureInfo.InvariantCulture);
+        var targetBoneNamesJson = JsonSerializer.Serialize(targetBoneNames ?? []);
+        var selectedPartNamesJson = JsonSerializer.Serialize(selectedPartNames ?? []);
+        var placementProfileJson = JsonSerializer.Serialize(placement.Profile ?? "generic-center");
+        var optimizationEnabled = optimization.Enabled ? "True" : "False";
+        var targetTriangleCount = optimization.TargetTriangleCount.ToString(CultureInfo.InvariantCulture);
+        var queryProxyLengthScale = queryProxy.LengthScale.ToString(CultureInfo.InvariantCulture);
+        var queryProxyWidthScale = queryProxy.WidthScale.ToString(CultureInfo.InvariantCulture);
+        var queryProxyHeightScale = queryProxy.HeightScale.ToString(CultureInfo.InvariantCulture);
+        return $"""
+import os
+import sys
+import math
+import re
+import bpy
+import xml.etree.ElementTree as ET
+from mathutils import Euler, Matrix, Vector
+
+source_file = {PythonStringLiteral(sourcePath)}
+output_file = {PythonStringLiteral(outputPath)}
+force_armature = {(forceArmature ? "True" : "False")}
+auto_fit_enabled = {autoFitEnabled}
+target_longest_m = {targetLongestMeters}
+weapon_rig_enabled = {weaponRigEnabled}
+static_weapon_adapter = {staticWeaponAdapterPython}
+vehicle_rig_enabled = {vehicleRigEnabledPython}
+vehicle_visual_overlay = {vehicleVisualOverlayPython}
+vehicle_query_proxy = {vehicleQueryProxyPython}
+query_proxy_use_boxes = {queryProxyUseBoxesPython}
+weapon_is_short = {isShortWeapon}
+weapon_target_profile = {weaponTargetProfileJson}
+weapon_grip_anchor_percent = {weaponGripAnchorPercent}
+weapon_grip_diameter_m = {weaponGripDiameterMeters}
+weapon_grip_back_reach_m = {weaponGripBackReachMeters}
+weapon_second_hand_shift_m = {weaponSecondHandShiftMeters}
+placement_profile = {placementProfileJson}
+target_bone_names = {targetBoneNamesJson}
+selected_part_names = {selectedPartNamesJson}
+optimization_enabled = {optimizationEnabled}
+target_triangle_count = {targetTriangleCount}
+query_proxy_length_scale = {queryProxyLengthScale}
+query_proxy_width_scale = {queryProxyWidthScale}
+query_proxy_height_scale = {queryProxyHeightScale}
+target_contract_enabled = force_armature and len(target_bone_names) > 0
+scene_units_per_meter = 100.0 if weapon_rig_enabled else 1.0
+bake_offset_cm = ({transform.OffsetX.ToString(CultureInfo.InvariantCulture)}, {transform.OffsetY.ToString(CultureInfo.InvariantCulture)}, {transform.OffsetZ.ToString(CultureInfo.InvariantCulture)})
+bake_rotation_deg = ({transform.Pitch.ToString(CultureInfo.InvariantCulture)}, {transform.Yaw.ToString(CultureInfo.InvariantCulture)}, {transform.Roll.ToString(CultureInfo.InvariantCulture)})
+ext = os.path.splitext(source_file)[1].lower()
+
+def xml_local_name(element):
+    namespace_close = chr(125)
+    return element.tag.rsplit(namespace_close, 1)[-1] if namespace_close in element.tag else element.tag
+
+def xml_children(element, name):
+    return [child for child in list(element) if xml_local_name(child) == name]
+
+def xml_first(element, name):
+    for child in list(element):
+        if xml_local_name(child) == name:
+            return child
+    return None
+
+def xml_desc_first(element, name):
+    for child in element.iter():
+        if xml_local_name(child) == name:
+            return child
+    return None
+
+def parse_float_text(text):
+    if not text:
+        return []
+    return [float(part) for part in text.replace("\n", " ").replace("\r", " ").split()]
+
+def parse_int_text(text):
+    if not text:
+        return []
+    return [int(part) for part in text.replace("\n", " ").replace("\r", " ").split()]
+
+def strip_ref(value):
+    return (value or "").lstrip("#")
+
+def import_collada_static_mesh(filepath):
+    tree = ET.parse(filepath)
+    root = tree.getroot()
+    up_axis_node = xml_desc_first(root, "up_axis")
+    y_up = (up_axis_node.text or "").strip().upper() == "Y_UP" if up_axis_node is not None else False
+
+    def convert_axis(coord):
+        x, y, z = coord
+        return (x, -z, y) if y_up else (x, y, z)
+
+    material_ids = dict()
+    for material_node in [node for node in root.iter() if xml_local_name(node) == "material"]:
+        material_id = material_node.get("id")
+        if not material_id:
+            continue
+        material_ids[material_id] = material_node.get("name") or material_id
+
+    geometry_material_bindings = dict()
+    geometry_node_names = dict()
+    for instance in [node for node in root.iter() if xml_local_name(node) == "instance_geometry"]:
+        geometry_id = strip_ref(instance.get("url"))
+        if not geometry_id:
+            continue
+        parent_name = ""
+        for candidate in root.iter():
+            if instance in list(candidate):
+                parent_name = candidate.get("name") or candidate.get("id") or ""
+                break
+        if parent_name and geometry_id not in geometry_node_names:
+            geometry_node_names[geometry_id] = parent_name
+        bindings = dict()
+        for instance_material in [node for node in instance.iter() if xml_local_name(node) == "instance_material"]:
+            symbol = instance_material.get("symbol") or "defaultMaterial"
+            target_id = strip_ref(instance_material.get("target"))
+            bindings[symbol] = material_ids.get(target_id, target_id or symbol)
+        if bindings:
+            geometry_material_bindings[geometry_id] = bindings
+
+    texture_files = dict()
+    texture_extensions = set([".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff"])
+    texture_roots = [os.path.dirname(filepath), os.path.join(os.path.dirname(filepath), "textures")]
+    ancestor = os.path.dirname(filepath)
+    for _ in range(0, 6):
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            break
+        texture_roots.append(os.path.join(parent, "textures"))
+        ancestor = parent
+    texture_roots = list(dict.fromkeys(texture_roots))
+    for texture_root in texture_roots:
+        if not os.path.isdir(texture_root):
+            continue
+        for walk_root, _, files in os.walk(texture_root):
+            for filename in files:
+                stem, ext = os.path.splitext(filename)
+                if ext.lower() in texture_extensions:
+                    texture_files[stem.lower()] = os.path.join(walk_root, filename)
+
+    def normalized_texture_key(value):
+        raw = str(value or "").lower()
+        return "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
+
+    def find_texture(material_name, suffixes):
+        material_key = normalized_texture_key(material_name)
+        if not material_key:
+            return None
+        suffix_keys = [normalized_texture_key(suffix) for suffix in suffixes]
+        exact_names = set()
+        for suffix in suffix_keys:
+            exact_names.add(material_key + "_" + suffix)
+            exact_names.add(material_key + suffix)
+        normalized_files = [(normalized_texture_key(stem), path) for stem, path in texture_files.items()]
+        for stem, path in normalized_files:
+            if stem in exact_names:
+                return path
+        for stem, path in normalized_files:
+            if stem.startswith(material_key + "_") and any(stem.endswith("_" + suffix) or stem.endswith(suffix) for suffix in suffix_keys):
+                return path
+        return None
+
+    material_cache = dict()
+    def safe_material_name(name):
+        raw = str(name or "Default").strip() or "Default"
+        safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in raw)
+        return ("SMS_DAE_" + safe)[:63]
+
+    def get_collada_material(name):
+        key = str(name or "Default").strip() or "Default"
+        if key in material_cache:
+            return material_cache[key]
+        material = bpy.data.materials.new(safe_material_name(key))
+        material.diffuse_color = (0.6, 0.6, 0.6, 1.0)
+        try:
+            material.use_nodes = True
+            nodes = material.node_tree.nodes
+            links = material.node_tree.links
+            bsdf = nodes.get("Principled BSDF")
+
+            def load_image_texture(path, non_color):
+                image = bpy.data.images.load(path, check_existing=True)
+                if non_color:
+                    try:
+                        image.colorspace_settings.name = "Non-Color"
+                    except Exception:
+                        pass
+                texture = nodes.new(type="ShaderNodeTexImage")
+                texture.image = image
+                return texture
+
+            base_color = find_texture(key, ["albedo", "basecolor", "base_color", "diffuse", "col"])
+            if base_color and bsdf and "Base Color" in bsdf.inputs:
+                texture = load_image_texture(base_color, False)
+                links.new(texture.outputs.get("Color"), bsdf.inputs["Base Color"])
+
+            metallic = find_texture(key, ["metallic", "metal", "met"])
+            if metallic and bsdf and "Metallic" in bsdf.inputs:
+                texture = load_image_texture(metallic, True)
+                links.new(texture.outputs.get("Color"), bsdf.inputs["Metallic"])
+
+            roughness = find_texture(key, ["roughness", "rough", "rgh"])
+            if roughness and bsdf and "Roughness" in bsdf.inputs:
+                texture = load_image_texture(roughness, True)
+                links.new(texture.outputs.get("Color"), bsdf.inputs["Roughness"])
+
+            normal = find_texture(key, ["normal", "normalgl", "normaldx", "nrm"])
+            if normal and bsdf and "Normal" in bsdf.inputs:
+                texture = load_image_texture(normal, True)
+                normal_node = nodes.new(type="ShaderNodeNormalMap")
+                links.new(texture.outputs.get("Color"), normal_node.inputs["Color"])
+                links.new(normal_node.outputs["Normal"], bsdf.inputs["Normal"])
+        except Exception as material_error:
+            print("SCUM_MOD_STUDIO_COLLADA_MATERIAL_WARNING " + str(material_error))
+        material_cache[key] = material
+        return material
+
+    def resolve_geometry_material_name(geometry_id, primitive_symbol):
+        symbol = str(primitive_symbol or "Default").strip() or "Default"
+        bindings = geometry_material_bindings.get(geometry_id)
+        if bindings and symbol in bindings:
+            return bindings[symbol]
+        return material_ids.get(symbol, symbol)
+
+    created = 0
+    total_faces = 0
+
+    for geometry in [node for node in root.iter() if xml_local_name(node) == "geometry"]:
+        mesh_node = xml_first(geometry, "mesh")
+        if mesh_node is None:
+            continue
+
+        sources = dict()
+        for source in xml_children(mesh_node, "source"):
+            source_id = source.get("id")
+            float_array = xml_desc_first(source, "float_array")
+            if not source_id or float_array is None:
+                continue
+            stride = 3
+            accessor = xml_desc_first(source, "accessor")
+            if accessor is not None:
+                try:
+                    stride = max(1, int(accessor.get("stride") or "3"))
+                except Exception:
+                    stride = 3
+            sources[source_id] = (parse_float_text(float_array.text), stride)
+
+        vertices_sources = dict()
+        for vertices in xml_children(mesh_node, "vertices"):
+            vertices_id = vertices.get("id")
+            if not vertices_id:
+                continue
+            for input_node in xml_children(vertices, "input"):
+                if (input_node.get("semantic") or "").upper() == "POSITION":
+                    vertices_sources[vertices_id] = strip_ref(input_node.get("source"))
+                    break
+
+        verts = []
+        faces = []
+        geometry_id = geometry.get("id") or ""
+        geometry_material_name = None
+
+        def append_vertex(position_source_id, position_index):
+            data = sources.get(position_source_id)
+            if not data:
+                return None
+            values, stride = data
+            base = position_index * stride
+            if base + 2 >= len(values):
+                return None
+            verts.append(convert_axis((values[base], values[base + 1], values[base + 2])))
+            return len(verts) - 1
+
+        def read_inputs(primitive):
+            parsed = []
+            for input_node in xml_children(primitive, "input"):
+                semantic = (input_node.get("semantic") or "").upper()
+                source_id = strip_ref(input_node.get("source"))
+                try:
+                    offset = int(input_node.get("offset") or "0")
+                except Exception:
+                    offset = 0
+                if semantic == "VERTEX":
+                    source_id = vertices_sources.get(source_id, source_id)
+                    semantic = "POSITION"
+                parsed.append((semantic, source_id, offset))
+            return parsed
+
+        for primitive in xml_children(mesh_node, "triangles") + xml_children(mesh_node, "polylist"):
+            if geometry_material_name is None:
+                geometry_material_name = primitive.get("material")
+            inputs = read_inputs(primitive)
+            if not inputs:
+                continue
+            position_input = next((item for item in inputs if item[0] == "POSITION"), None)
+            if position_input is None:
+                continue
+            _, position_source_id, position_offset = position_input
+            record_stride = max(item[2] for item in inputs) + 1
+            p_node = xml_first(primitive, "p")
+            values = parse_int_text(p_node.text if p_node is not None else "")
+            if not values:
+                continue
+
+            if xml_local_name(primitive) == "triangles":
+                vertex_records = len(values) // record_stride
+                for start_record in range(0, vertex_records - 2, 3):
+                    face = []
+                    for local_index in range(3):
+                        value_index = (start_record + local_index) * record_stride + position_offset
+                        vertex_index = append_vertex(position_source_id, values[value_index])
+                        if vertex_index is not None:
+                            face.append(vertex_index)
+                    if len(face) == 3:
+                        faces.append(tuple(face))
+                continue
+
+            vcount_node = xml_first(primitive, "vcount")
+            vcounts = parse_int_text(vcount_node.text if vcount_node is not None else "")
+            cursor = 0
+            for vertex_count in vcounts:
+                polygon = []
+                for local_index in range(vertex_count):
+                    value_index = (cursor + local_index) * record_stride + position_offset
+                    if value_index < len(values):
+                        vertex_index = append_vertex(position_source_id, values[value_index])
+                        if vertex_index is not None:
+                            polygon.append(vertex_index)
+                cursor += vertex_count
+                if len(polygon) >= 3:
+                    for i in range(1, len(polygon) - 1):
+                        faces.append((polygon[0], polygon[i], polygon[i + 1]))
+
+        if not verts or not faces:
+            continue
+
+        name = geometry_node_names.get(geometry_id) or geometry.get("name") or geometry.get("id") or ("ColladaMesh_" + str(created))
+        mesh = bpy.data.meshes.new(name)
+        mesh.from_pydata(verts, [], faces)
+        mesh.update(calc_edges=True)
+        try:
+            mesh.validate(clean_customdata=True)
+        except Exception:
+            pass
+        obj = bpy.data.objects.new(name, mesh)
+        obj.data.materials.append(get_collada_material(resolve_geometry_material_name(geometry_id, geometry_material_name)))
+        bpy.context.collection.objects.link(obj)
+        created += 1
+        total_faces += len(faces)
+
+    if created <= 0:
+        raise RuntimeError("Collada fallback importer found no mesh geometry")
+    print("SCUM_MOD_STUDIO_COLLADA_FALLBACK meshes=" + str(created) + " faces=" + str(total_faces) + " materials=" + str(len(material_cache)) + " y_up=" + str(y_up))
+
+if weapon_rig_enabled:
+    bpy.context.scene.unit_settings.system = "METRIC"
+    bpy.context.scene.unit_settings.scale_length = 0.01
+
+if ext == ".blend":
+    bpy.ops.wm.open_mainfile(filepath=source_file)
+else:
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete()
+    if ext == ".fbx":
+        bpy.ops.import_scene.fbx(filepath=source_file)
+    elif ext == ".obj":
+        if hasattr(bpy.ops.wm, "obj_import"):
+            bpy.ops.wm.obj_import(filepath=source_file)
+        else:
+            bpy.ops.import_scene.obj(filepath=source_file)
+    elif ext in [".glb", ".gltf"]:
+        bpy.ops.import_scene.gltf(filepath=source_file)
+    elif ext == ".dae":
+        try:
+            bpy.ops.wm.collada_import(filepath=source_file)
+        except Exception as collada_error:
+            print("SCUM_MOD_STUDIO_COLLADA_NATIVE_UNAVAILABLE " + str(collada_error))
+            import_collada_static_mesh(source_file)
+    elif ext == ".stl":
+        if hasattr(bpy.ops.wm, "stl_import"):
+            bpy.ops.wm.stl_import(filepath=source_file)
+        else:
+            bpy.ops.import_mesh.stl(filepath=source_file)
+    elif ext == ".ply":
+        if hasattr(bpy.ops.wm, "ply_import"):
+            bpy.ops.wm.ply_import(filepath=source_file)
+        else:
+            bpy.ops.import_mesh.ply(filepath=source_file)
+    else:
+        raise RuntimeError("Unsupported model format for Blender export: " + ext)
+
+mesh_like = [obj for obj in bpy.context.scene.objects if obj.type in ["MESH", "ARMATURE"]]
+if not mesh_like:
+    raise RuntimeError("No mesh or armature objects found in model")
+
+mesh_objects = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+armatures = [obj for obj in bpy.context.scene.objects if obj.type == "ARMATURE"]
+
+def normalize_part_name(value):
+    raw = str(value or "").strip().lower()
+    if len(raw) > 4 and raw[-4] == "." and raw[-3:].isdigit():
+        raw = raw[:-4]
+    return "".join(ch if ch.isalnum() else "_" for ch in raw).strip("_")
+
+def object_matches_selected_parts(obj, selected_names):
+    candidates = [
+        obj.name,
+        obj.data.name if hasattr(obj, "data") and obj.data else "",
+        obj.name.rsplit(".", 1)[0],
+        (obj.data.name.rsplit(".", 1)[0] if hasattr(obj, "data") and obj.data else "")
+    ]
+    normalized_candidates = [normalize_part_name(candidate) for candidate in candidates]
+    for selected in selected_names:
+        selected_norm = normalize_part_name(selected)
+        if not selected_norm:
+            continue
+        for candidate in candidates:
+            if selected.lower() == str(candidate or "").lower():
+                return True
+        for candidate_norm in normalized_candidates:
+            if selected_norm == candidate_norm or selected_norm in candidate_norm or candidate_norm in selected_norm:
+                return True
+    return False
+
+if selected_part_names:
+    kept_meshes = []
+    for obj in list(mesh_objects):
+        if object_matches_selected_parts(obj, selected_part_names):
+            kept_meshes.append(obj)
+            continue
+        bpy.data.objects.remove(obj, do_unlink=True)
+    mesh_objects = kept_meshes
+    mesh_like = [obj for obj in bpy.context.scene.objects if obj.type in ["MESH", "ARMATURE"]]
+    if not mesh_objects:
+        raise RuntimeError("Selected raw model parts were not found after import: " + ", ".join(selected_part_names))
+    print("SCUM_MOD_STUDIO_PART_FILTER kept=" + str(len(mesh_objects)) + " requested=" + ", ".join(selected_part_names))
+
+def collapse_meshes_to_scene_space(meshes, armature_objects):
+    bpy.context.view_layer.update()
+    for mesh in meshes:
+        mesh.select_set(False)
+        for modifier in list(mesh.modifiers):
+            try:
+                mesh.modifiers.remove(modifier)
+            except Exception:
+                pass
+        matrix = mesh.matrix_world.copy()
+        mesh.data.transform(matrix)
+        mesh.matrix_world = Matrix.Identity(4)
+        mesh.parent = None
+        try:
+            mesh.data.update()
+        except Exception:
+            pass
+
+    for armature in list(armature_objects):
+        try:
+            bpy.data.objects.remove(armature, do_unlink=True)
+        except Exception:
+            pass
+
+def transform_mesh_vertices(meshes, transform):
+    for mesh in meshes:
+        for vertex in mesh.data.vertices:
+            vertex.co = transform @ vertex.co
+        try:
+            mesh.data.update()
+        except Exception:
+            pass
+
+def repair_mesh_geometry_for_unreal(meshes):
+    repaired = 0
+    boundary_edges = 0
+    non_manifold_edges = 0
+    try:
+        bpy.ops.object.mode_set(mode="OBJECT")
+    except Exception:
+        pass
+    for mesh in meshes:
+        if mesh.type != "MESH":
+            continue
+        try:
+            mesh.data.validate(clean_customdata=False)
+        except Exception:
+            pass
+        try:
+            mesh.data.update(calc_edges=True)
+        except Exception:
+            pass
+        try:
+            bpy.ops.object.select_all(action="DESELECT")
+            mesh.select_set(True)
+            bpy.context.view_layer.objects.active = mesh
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.select_mode(type="VERT")
+            bpy.ops.mesh.select_all(action="SELECT")
+            try:
+                bpy.ops.mesh.merge_by_distance(distance=0.00001)
+            except Exception:
+                try:
+                    bpy.ops.mesh.remove_doubles(threshold=0.00001)
+                except Exception:
+                    pass
+            bpy.ops.mesh.select_all(action="SELECT")
+            bpy.ops.mesh.normals_make_consistent(inside=False)
+            bpy.ops.object.mode_set(mode="OBJECT")
+            repaired += 1
+        except Exception as repair_error:
+            try:
+                bpy.ops.object.mode_set(mode="OBJECT")
+            except Exception:
+                pass
+            print("SCUM_MOD_STUDIO_GEOMETRY_REPAIR_WARNING " + str(mesh.name) + " " + str(repair_error))
+        try:
+            mesh.data.update(calc_edges=True)
+        except Exception:
+            pass
+        try:
+            edge_use = dict()
+            for polygon in mesh.data.polygons:
+                for edge_key in polygon.edge_keys:
+                    edge_use[edge_key] = edge_use.get(edge_key, 0) + 1
+            boundary_edges += sum(1 for count in edge_use.values() if count == 1)
+            non_manifold_edges += sum(1 for count in edge_use.values() if count > 2)
+        except Exception:
+            pass
+        try:
+            mesh.data.polygons.foreach_set("use_smooth", [False] * len(mesh.data.polygons))
+        except Exception:
+            for polygon in mesh.data.polygons:
+                polygon.use_smooth = False
+        try:
+            mesh.data.update()
+        except Exception:
+            pass
+    print("SCUM_MOD_STUDIO_GEOMETRY_REPAIR meshes=" + str(repaired) + " boundary_edges=" + str(boundary_edges) + " non_manifold_edges=" + str(non_manifold_edges))
+
+def world_bounds(objects):
+    points = []
+    for obj in objects:
+        if obj.type == "MESH":
+            for vertex in obj.data.vertices:
+                points.append(obj.matrix_world @ vertex.co)
+        else:
+            for corner in obj.bound_box:
+                points.append(obj.matrix_world @ Vector(corner))
+    if not points:
+        return (0, 0, 0), (0, 0, 1)
+    mins = [min(p[i] for p in points) for i in range(3)]
+    maxs = [max(p[i] for p in points) for i in range(3)]
+    return mins, maxs
+
+def center_static_module_meshes_at_origin(meshes):
+    if not selected_part_names or force_armature:
+        return
+    mins, maxs = world_bounds(meshes)
+    center = Vector((
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ))
+    if center.length <= 0.000001:
+        return
+    transform_mesh_vertices(meshes, Matrix.Translation(-center))
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_MODULE_PIVOT_CENTER selected_parts=True center=" + str(tuple(center)))
+
+def normalize_meshes_to_target(meshes, armature_objects):
+    if not auto_fit_enabled:
+        return 1.0
+    mins, maxs = world_bounds(meshes)
+    size = [maxs[i] - mins[i] for i in range(3)]
+    longest = max(size)
+    target_longest_units = target_longest_m * scene_units_per_meter
+    if weapon_rig_enabled:
+        target_mins, target_maxs = weapon_target_bounds()
+        target_longest_units = max(
+            target_maxs[0] - target_mins[0],
+            target_maxs[1] - target_mins[1],
+            target_maxs[2] - target_mins[2],
+        )
+    if longest <= 0.000001 or target_longest_units <= 0.000001:
+        return 1.0
+    scale = target_longest_units / longest
+    transform_mesh_vertices(meshes, Matrix.Scale(scale, 4))
+    for obj in armature_objects:
+        obj.scale = (obj.scale[0] * scale, obj.scale[1] * scale, obj.scale[2] * scale)
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_AUTOFIT scale=" + str(scale) + " source_longest_units=" + str(longest) + " target_longest_units=" + str(target_longest_units))
+    return scale
+
+def mesh_vertex_points(meshes):
+    points = []
+    for mesh in meshes:
+        matrix = mesh.matrix_world
+        for vertex in mesh.data.vertices:
+            points.append(matrix @ vertex.co)
+    return points
+
+def orient_weapon_long_axis_to_x(meshes):
+    points = mesh_vertex_points(meshes)
+    if not points:
+        return
+    mins = [min(p[i] for p in points) for i in range(3)]
+    maxs = [max(p[i] for p in points) for i in range(3)]
+    size = [maxs[i] - mins[i] for i in range(3)]
+    longest_axis = max(range(3), key=lambda index: size[index])
+
+    if longest_axis == 1:
+        transform_mesh_vertices(meshes, Matrix.Rotation(math.radians(-90.0), 4, "Z"))
+        print("SCUM_MOD_STUDIO_WEAPON_ORIENT long_axis=Y->X")
+    elif longest_axis == 2:
+        transform_mesh_vertices(meshes, Matrix.Rotation(math.radians(90.0), 4, "Y"))
+        print("SCUM_MOD_STUDIO_WEAPON_ORIENT long_axis=Z->X")
+
+def orient_vehicle_long_axis_to_x(meshes):
+    points = mesh_vertex_points(meshes)
+    if not points:
+        return
+    mins = [min(p[i] for p in points) for i in range(3)]
+    maxs = [max(p[i] for p in points) for i in range(3)]
+    size = [maxs[i] - mins[i] for i in range(3)]
+    longest_axis = max(range(3), key=lambda index: size[index])
+    if longest_axis == 1:
+        transform_mesh_vertices(meshes, Matrix.Rotation(math.radians(-90.0), 4, "Z"))
+        print("SCUM_MOD_STUDIO_VEHICLE_ORIENT long_axis=Y->X")
+    elif longest_axis == 2:
+        transform_mesh_vertices(meshes, Matrix.Rotation(math.radians(90.0), 4, "Y"))
+        print("SCUM_MOD_STUDIO_VEHICLE_ORIENT long_axis=Z->X")
+
+def orient_wearable_head_mesh_to_player_forward(meshes):
+    if placement_profile != "wearable-head":
+        return
+    points = mesh_vertex_points(meshes)
+    if not points:
+        return
+
+    front_tokens = ("visor", "face", "mask", "chin", "mouth", "nose", "eye", "camera", "front")
+    front_points = []
+    for mesh in meshes:
+        name = (str(mesh.name) + " " + str(mesh.data.name if mesh.data else "")).lower()
+        if not any(token in name for token in front_tokens):
+            continue
+        matrix = mesh.matrix_world
+        for vertex in mesh.data.vertices:
+            front_points.append(matrix @ vertex.co)
+
+    center = robust_point_center(points)
+    front_center = robust_point_center(front_points if front_points else points)
+    delta = front_center - center
+    rotation_degrees = 0.0
+    if front_points and max(abs(delta.x), abs(delta.y)) > 0.0001:
+        current_angle = math.degrees(math.atan2(delta.y, delta.x))
+        # DAE authoring commonly uses Blender-style -Y as model forward. Keeping that axis for
+        # headwear avoids the 90-degree side turn seen on UpperHeadSocket imports.
+        target_angle = -90.0 if ext == ".dae" else 0.0
+        rotation_degrees = (target_angle - current_angle + 180.0) % 360.0 - 180.0
+
+    if abs(rotation_degrees) > 0.001:
+        transform_mesh_vertices(meshes, Matrix.Rotation(math.radians(rotation_degrees), 4, "Z"))
+        bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_WEARABLE_HEAD_ORIENT front_tokens=" + str(len(front_points)) + " delta=" + str(tuple(delta)) + " target_axis=" + ("-Y" if ext == ".dae" else "+X") + " rotate_z=" + str(rotation_degrees))
+
+def center_vehicle_meshes_on_root(meshes):
+    if not vehicle_rig_enabled:
+        return
+    mins, maxs = world_bounds(meshes)
+    center = Vector((
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ))
+    if center.length <= 0.000001:
+        return
+    transform_mesh_vertices(meshes, Matrix.Translation(-center))
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_VEHICLE_ROOT_CENTER center=" + str(tuple(center)))
+
+def center_vehicle_overlay_on_ground(meshes):
+    if not vehicle_visual_overlay and not vehicle_query_proxy:
+        return
+    mins, maxs = world_bounds(meshes)
+    center_x = (mins[0] + maxs[0]) * 0.5
+    center_y = (mins[1] + maxs[1]) * 0.5
+    ground_z = mins[2]
+    transform_mesh_vertices(meshes, Matrix.Translation(Vector((-center_x, -center_y, -ground_z))))
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_VEHICLE_OVERLAY_GROUND center_x=" + str(center_x) + " center_y=" + str(center_y) + " ground_z=" + str(ground_z))
+
+def create_box_mesh_object(name, center, size, material):
+    cx, cy, cz = center
+    sx, sy, sz = size
+    hx = max(sx * 0.5, 0.01)
+    hy = max(sy * 0.5, 0.01)
+    hz = max(sz * 0.5, 0.01)
+    vertices = [
+        (cx - hx, cy - hy, cz - hz),
+        (cx + hx, cy - hy, cz - hz),
+        (cx + hx, cy + hy, cz - hz),
+        (cx - hx, cy + hy, cz - hz),
+        (cx - hx, cy - hy, cz + hz),
+        (cx + hx, cy - hy, cz + hz),
+        (cx + hx, cy + hy, cz + hz),
+        (cx - hx, cy + hy, cz + hz),
+    ]
+    faces = [
+        (0, 1, 2), (0, 2, 3),
+        (4, 7, 6), (4, 6, 5),
+        (0, 4, 5), (0, 5, 1),
+        (1, 5, 6), (1, 6, 2),
+        (2, 6, 7), (2, 7, 3),
+        (3, 7, 4), (3, 4, 0),
+    ]
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update(calc_edges=True)
+    obj = bpy.data.objects.new(name, mesh)
+    obj.data.materials.append(material)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+def replace_with_vehicle_query_proxy(meshes):
+    if not vehicle_query_proxy:
+        return meshes
+    if not query_proxy_use_boxes:
+        print("SCUM_MOD_STUDIO_VEHICLE_QUERY_PROXY visual_mesh=True boxes=0")
+        return meshes
+    mins, maxs = world_bounds(meshes)
+    length = max((maxs[0] - mins[0]) * query_proxy_length_scale, 0.2)
+    width = max((maxs[1] - mins[1]) * query_proxy_width_scale, 0.2)
+    height = max((maxs[2] - mins[2]) * query_proxy_height_scale, 0.2)
+
+    fallback = bpy.data.materials.get("SMS_Default_ValidSlot")
+    if fallback is None:
+        fallback = bpy.data.materials.new("SMS_Default_ValidSlot")
+        fallback.diffuse_color = (0.35, 0.38, 0.38, 1.0)
+
+    for obj in list(meshes):
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
+
+    hull_width = min(width * 0.42, length * 0.22)
+    hull_height = max(height * 0.86, 0.18)
+    hull = create_box_mesh_object(
+        "SMS_QueryProxy_Hull",
+        (0.0, 0.0, hull_height * 0.5),
+        (length * 0.78, hull_width, hull_height),
+        fallback)
+    result = [hull]
+
+    if width > hull_width * 1.25:
+        wing_height = max(height * 0.12, 0.16)
+        wing = create_box_mesh_object(
+            "SMS_QueryProxy_WingSpan",
+            (length * 0.03, 0.0, max(height * 0.45, wing_height * 0.5)),
+            (length * 0.34, width * 0.96, wing_height),
+            fallback)
+        result.append(wing)
+
+    tail_width = min(width * 0.55, max(hull_width * 1.55, 0.2))
+    if tail_width > hull_width * 1.05:
+        tail_height = max(height * 0.16, 0.16)
+        tail = create_box_mesh_object(
+            "SMS_QueryProxy_Tail",
+            (-length * 0.34, 0.0, max(height * 0.62, tail_height * 0.5)),
+            (length * 0.18, tail_width, tail_height),
+            fallback)
+        result.append(tail)
+
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_VEHICLE_QUERY_PROXY boxes=" + str(len(result)) + " length=" + str(length) + " width=" + str(width) + " height=" + str(height))
+    return result
+
+def ensure_mesh_material_slots(meshes):
+    fallback = bpy.data.materials.get("SMS_Default_ValidSlot")
+    if fallback is None:
+        fallback = bpy.data.materials.new("SMS_Default_ValidSlot")
+        fallback.diffuse_color = (0.55, 0.55, 0.55, 1.0)
+    patched = 0
+    for mesh in meshes:
+        if mesh.type != "MESH":
+            continue
+        if len(mesh.data.materials) == 0:
+            mesh.data.materials.append(fallback)
+            patched += 1
+    if patched > 0:
+        print("SCUM_MOD_STUDIO_MATERIAL_SLOTS added_default=" + str(patched))
+
+weapon_markers = dict()
+weapon_socket_objects = []
+
+def cm_vec(x, y, z):
+    return Vector((x, y, z))
+
+def socket_cm_vec(x, y, z):
+    return Vector((x * 0.01, y * 0.01, z * 0.01))
+
+def katana_grip_socket_location():
+    return socket_cm_vec(-0.29106733202934265, 0.09999966621398926, -19.706043243408203)
+
+def katana_holster_socket_location():
+    return socket_cm_vec(-0.47847241163253784, 0.000012305637028475758, -0.005241642706096172)
+
+def katana_placement_center_socket_location():
+    return socket_cm_vec(4.999996185302734, 3.000004768371582, 5.0)
+
+def military_helmet_02_bounds_center():
+    return socket_cm_vec(0.040123939514160156, 1.9488105773925781, 9.382283210754395)
+
+def military_helmet_02_bounds_extent():
+    return socket_cm_vec(12.264711380004883, 14.231954574584961, 13.799939155578613)
+
+def military_helmet_02_female_bounds_center():
+    return socket_cm_vec(0.04012489318847656, 2.928584098815918, 9.275785446166992)
+
+def military_helmet_02_blender_target_center():
+    ue_center = military_helmet_02_bounds_center()
+    return Vector((ue_center.x, -ue_center.y, ue_center.z))
+
+def military_helmet_02_blender_target_size():
+    # Real SM_M/F_Helmet_02_V2 is about 24.5 x 28.5 x 27.6 cm. The auto-fit
+    # target keeps internet helmets close to that contract, while this envelope
+    # leaves extra clearance so the Prisoner3 scalp/face textures do not poke
+    # through helmets with open panels or thick sci-fi shells.
+    return socket_cm_vec(31.5, 35.5, 33.0)
+
+def prisoner3_socket_contract():
+    return dict(
+        upper_head=dict(socket="UpperHeadSocket", bone="head", loc=(0.0, 0.0, 0.0), rot=(90.0, 0.004807999823242426, -180.0)),
+        right_hand=dict(socket="hand_r_Socket", bone="hand_r", loc=(8.800000190734863, 3.5, -2.0), rot=(0.0, 0.0, 180.0)),
+        right_melee_holster=dict(socket="right_holster_socket_melee", bone="holster_rifle", loc=(16.858606338500977, 15.12028694152832, -15.202370643615723), rot=(80.19593811035156, 53.297218322753906, 64.09417724609375)),
+        left_melee_holster=dict(socket="left_holster_socket_melee", bone="holster_melee", loc=(16.313114166259766, 15.12028694152832, 15.206660270690918), rot=(-82.26349639892578, 65.55731964111328, 103.923095703125)),
+        male_head_attachment=dict(socket="Male_HeadAttachment_01", bone="head", loc=(17.276277542114258, -11.840441703796387, -0.0002130276698153466), rot=(90.0, -0.05267439782619476, 179.9476776123047)),
+        female_head_attachment=dict(socket="Female_HeadAttachment_01", bone="head", loc=(17.276853561401367, -13.117044448852539, -0.0009443674935027957), rot=(90.0, -0.020108073949813843, 179.97897338867188)),
+        eyes=dict(socket="Eyes", bone="head", loc=(8.623549461364746, -10.538731575012207, 0.0000058747828006744385), rot=(0.00013660377589985728, -95.00005340576172, 89.99995422363281)))
+
+def log_player_socket_contract(context):
+    c = prisoner3_socket_contract()
+    print("SCUM_MOD_STUDIO_PLAYER_SOCKET_CONTRACT context=" + str(context)
+        + " upper_head=" + str(c["upper_head"])
+        + " right_hand=" + str(c["right_hand"])
+        + " melee_holsters=" + str((c["right_melee_holster"], c["left_melee_holster"]))
+        + " head_attach=" + str((c["male_head_attachment"], c["female_head_attachment"])))
+
+def sanitize_fbx_identifier(value):
+    text = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "")).strip("_")
+    if not text:
+        text = "SMS_StaticWeapon"
+    if text[0].isdigit():
+        text = "SMS_" + text
+    return text[:48]
+
+def primary_export_mesh(meshes):
+    best = None
+    best_count = -1
+    for mesh in meshes:
+        if mesh.type != "MESH":
+            continue
+        count = len(mesh.data.vertices) if mesh.data else 0
+        if count > best_count:
+            best = mesh
+            best_count = count
+    return best
+
+def create_static_weapon_socket_markers(meshes):
+    if not static_weapon_adapter or not meshes:
+        return []
+    target = primary_export_mesh(meshes)
+    if target is None:
+        return []
+
+    export_stem = sanitize_fbx_identifier(os.path.splitext(os.path.basename(output_file))[0])
+    target.name = export_stem
+    try:
+        target.data.name = export_stem
+    except Exception:
+        pass
+
+    mins, maxs = world_bounds(meshes)
+    placement_center = Vector((
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ))
+
+    if weapon_target_profile == "melee-blade":
+        print("SCUM_MOD_STUDIO_STATIC_WEAPON_SOCKETS deferred_to_ue=True profile=melee-blade")
+        return []
+
+    specs = [
+        ("Grip", Vector((0.0, 0.0, 0.0)), (0.0, 0.0, 0.0)),
+        ("Holster", Vector((0.0, 0.0, 0.0)), (0.0, 0.0, 180.0)),
+        ("PlacementCenter", placement_center, (0.0, 0.0, 0.0)),
+    ]
+
+    created = []
+    for socket_name, location, rotation_deg in specs:
+        empty_name = "SOCKET_" + export_stem + "_" + socket_name
+        empty = bpy.data.objects.new(empty_name, None)
+        empty.empty_display_type = "ARROWS"
+        empty.empty_display_size = 0.08
+        bpy.context.collection.objects.link(empty)
+        empty.parent = target
+        empty.location = location
+        empty.rotation_euler = Euler((
+            math.radians(rotation_deg[0]),
+            math.radians(rotation_deg[1]),
+            math.radians(rotation_deg[2]),
+        ), "XYZ")
+        created.append(empty)
+
+    print("SCUM_MOD_STUDIO_STATIC_WEAPON_SOCKETS mesh=" + export_stem + " sockets=" + ",".join([obj.name for obj in created]))
+    return created
+
+def m1887_target_bounds():
+    if weapon_is_short:
+        return (
+            cm_vec(-8.691, -2.021, -9.716),
+            cm_vec(53.958, 2.024, 8.044),
+        )
+
+    return (
+        cm_vec(-26.386, -2.033, -10.392),
+        cm_vec(71.047, 2.033, 8.246),
+    )
+
+def m16_target_bounds():
+    return (
+        cm_vec(-22.0, -2.2, -6.5),
+        cm_vec(79.0, 2.2, 8.5),
+    )
+
+def weapon_target_bounds():
+    if weapon_target_profile == "m16-rifle":
+        return m16_target_bounds()
+    return m1887_target_bounds()
+
+def fit_weapon_mesh_to_target_box(meshes):
+    if not weapon_rig_enabled or weapon_target_profile != "m16-rifle":
+        return
+    mins, maxs = world_bounds(meshes)
+    target_mins, target_maxs = weapon_target_bounds()
+    size = Vector((maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]))
+    target_size = Vector((
+        target_maxs[0] - target_mins[0],
+        target_maxs[1] - target_mins[1],
+        target_maxs[2] - target_mins[2],
+    ))
+    if min(size.x, size.y, size.z) <= 0.000001:
+        return
+    scale_x = 1.0
+    scale_y = min(1.0, target_size.y / size.y)
+    scale_z = min(1.0, target_size.z / size.z)
+    if abs(scale_y - 1.0) <= 0.02 and abs(scale_z - 1.0) <= 0.02:
+        return
+    center = Vector((
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ))
+    scale_matrix = Matrix.Diagonal((scale_x, scale_y, scale_z, 1.0))
+    transform_mesh_vertices(meshes, Matrix.Translation(center) @ scale_matrix @ Matrix.Translation(-center))
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_WEAPON_BOX_FIT profile=" + str(weapon_target_profile) + " scale_y=" + str(scale_y) + " scale_z=" + str(scale_z))
+
+def median_value(values):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) * 0.5
+
+def robust_point_center(points):
+    if not points:
+        return Vector((0.0, 0.0, 0.0))
+    return Vector((
+        median_value([p.x for p in points]),
+        median_value([p.y for p in points]),
+        median_value([p.z for p in points]),
+    ))
+
+def axis_cross_sections(points, min_x, max_x, bins=72):
+    span_x = max(max_x - min_x, 0.000001)
+    sections = []
+    for index in range(bins):
+        start = min_x + span_x * index / bins
+        end = min_x + span_x * (index + 1) / bins
+        slice_points = [p for p in points if p.x >= start and (p.x < end or index == bins - 1)]
+        if not slice_points:
+            continue
+        y_span = max(p.y for p in slice_points) - min(p.y for p in slice_points)
+        z_span = max(p.z for p in slice_points) - min(p.z for p in slice_points)
+        sections.append(dict(
+            index=index,
+            x=(start + end) * 0.5,
+            count=len(slice_points),
+            radius=(y_span * y_span + z_span * z_span) ** 0.5,
+            center=robust_point_center(slice_points)))
+    return sections
+
+def detect_melee_blade_grip_anchor(points, min_x, max_x):
+    span_x = max(max_x - min_x, 0.000001)
+    fallback_x = min_x + max(target_longest_m * 0.16, 0.08)
+    fallback_points = [p for p in points if abs(p.x - fallback_x) <= span_x * 0.05]
+    fallback_center = robust_point_center(fallback_points if fallback_points else points)
+    fallback = Vector((fallback_x, fallback_center.y, fallback_center.z))
+
+    sections = axis_cross_sections(points, min_x, max_x)
+    if not sections:
+        return fallback, "fallback-no-sections", 0.0, fallback_x
+
+    min_count = max(4, int(len(points) / 900))
+    handle_candidates = [
+        section for section in sections
+        if section["x"] <= min_x + span_x * 0.42 and section["count"] >= min_count
+    ]
+    if len(handle_candidates) < 3:
+        return fallback, "fallback-low-samples", 0.0, fallback_x
+
+    handle_radii = sorted(section["radius"] for section in handle_candidates)
+    low_radius_count = max(1, len(handle_radii) // 3)
+    handle_radius = median_value(handle_radii[:low_radius_count])
+    guard_threshold = max(handle_radius * 1.55, handle_radius + span_x * 0.018, span_x * 0.040)
+    scan_start = min_x + max(span_x * 0.055, 0.025)
+    guard_x = 0.0
+    for section in handle_candidates:
+        if section["x"] >= scan_start and section["radius"] >= guard_threshold:
+            guard_x = section["x"]
+            break
+    if guard_x <= min_x:
+        guard_x = min_x + span_x * 0.24
+
+    guard_x = min(max(guard_x, min_x + span_x * 0.12), min_x + span_x * 0.36)
+    handle_span = max(guard_x - min_x, span_x * 0.08)
+    anchor_fraction = max(0.05, min(0.95, weapon_grip_anchor_percent / 100.0))
+    # The Grip socket must land on the real handle area, not on a stretched
+    # synthetic hilt. Percent is measured from pommel/handle end toward guard.
+    anchor_x = min_x + handle_span * anchor_fraction
+    two_hand_zone = min(max(weapon_grip_back_reach_m, handle_span * 0.25), handle_span)
+    local_half_width = min(max(two_hand_zone * 0.18, handle_span * 0.055, 0.012), handle_span * 0.22)
+    grip_points = [p for p in points if p.x >= anchor_x - local_half_width and p.x <= anchor_x + local_half_width]
+    if len(grip_points) < min_count:
+        lower = max(min_x, anchor_x - handle_span * 0.18)
+        upper = min(guard_x, anchor_x + handle_span * 0.18)
+        grip_points = [p for p in points if p.x >= lower and p.x <= upper]
+    if len(grip_points) < min_count:
+        grip_points = [p for p in points if p.x <= guard_x]
+    grip_center = robust_point_center(grip_points if grip_points else points)
+    lower_hand_x = max(min_x, anchor_x - two_hand_zone * 0.45)
+    upper_hand_x = min(guard_x, anchor_x + two_hand_zone * 0.45)
+    anchor = Vector((anchor_x, grip_center.y, grip_center.z))
+    anchor_mode = "two-hand-existing-handle-zone"
+    print("SCUM_MOD_STUDIO_STATIC_WEAPON_TWO_HAND_GRIP handle_start=" + str(min_x) + " guard_x=" + str(guard_x) + " anchor_x=" + str(anchor_x) + " lower_hand_x=" + str(lower_hand_x) + " upper_hand_x=" + str(upper_hand_x) + " handle_span=" + str(handle_span) + " two_hand_zone=" + str(two_hand_zone) + " local_half_width=" + str(local_half_width) + " anchor_percent=" + str(weapon_grip_anchor_percent) + " sample_points=" + str(len(grip_points)))
+    return anchor, anchor_mode, handle_radius, guard_x
+
+def extend_melee_blade_two_hand_grip(meshes, min_x, guard_x, grip_center):
+    if weapon_target_profile != "melee-blade" or weapon_grip_back_reach_m <= 0.0001:
+        return None
+    handle_span = max(guard_x - min_x, 0.000001)
+    anchor_fraction = max(0.05, min(0.95, weapon_grip_anchor_percent / 100.0))
+    current_back_reach = handle_span * anchor_fraction
+    desired_back_reach = max(0.0, weapon_grip_back_reach_m)
+    if current_back_reach >= desired_back_reach * 0.92:
+        print("SCUM_MOD_STUDIO_STATIC_WEAPON_HANDLE_EXTEND skipped=True current_back_reach=" + str(current_back_reach) + " target_back_reach=" + str(desired_back_reach))
+        return None
+
+    target_min_x = guard_x - (desired_back_reach / anchor_fraction)
+    target_anchor_x = target_min_x + ((guard_x - target_min_x) * anchor_fraction)
+    raw_scale = (guard_x - target_min_x) / handle_span
+    scale = min(max(raw_scale, 1.0), 5.0)
+    if scale < raw_scale:
+        target_min_x = guard_x - (handle_span * scale)
+        target_anchor_x = target_min_x + ((guard_x - target_min_x) * anchor_fraction)
+    changed = 0
+    for mesh in meshes:
+        if mesh.type != "MESH":
+            continue
+        for vertex in mesh.data.vertices:
+            x = vertex.co.x
+            if x > guard_x:
+                continue
+            vertex.co.x = guard_x - ((guard_x - x) * scale)
+            changed += 1
+        try:
+            mesh.data.update()
+        except Exception:
+            pass
+    bpy.context.view_layer.update()
+    back_reach = target_anchor_x - target_min_x
+    print("SCUM_MOD_STUDIO_STATIC_WEAPON_HANDLE_EXTEND vertices=" + str(changed) + " current_back_reach=" + str(current_back_reach) + " target_back_reach=" + str(desired_back_reach) + " final_back_reach=" + str(back_reach) + " raw_scale=" + str(raw_scale) + " scale=" + str(scale) + " handle_start=" + str(min_x) + " target_handle_start=" + str(target_min_x) + " guard_x=" + str(guard_x) + " target_anchor_x=" + str(target_anchor_x))
+    if changed <= 0:
+        return None
+    return Vector((target_anchor_x, grip_center.y, grip_center.z))
+
+def fit_melee_blade_handle_cross_section(meshes, min_x, guard_x, grip_center, handle_radius):
+    if weapon_target_profile != "melee-blade" or handle_radius <= 0.000001:
+        return
+    if weapon_grip_diameter_m <= 0.0001:
+        print("SCUM_MOD_STUDIO_STATIC_WEAPON_HANDLE_FIT skipped=True reason=disabled")
+        return
+    target_diag = max(weapon_grip_diameter_m, 0.001)
+    scale = min(1.0, max(0.35, target_diag / handle_radius))
+    if scale >= 0.985:
+        print("SCUM_MOD_STUDIO_STATIC_WEAPON_HANDLE_FIT skipped=True handle_diag=" + str(handle_radius) + " target_diag=" + str(target_diag))
+        return
+
+    handle_span = max(guard_x - min_x, 0.000001)
+    changed = 0
+    for mesh in meshes:
+        if mesh.type != "MESH":
+            continue
+        for vertex in mesh.data.vertices:
+            x = vertex.co.x
+            if x < min_x or x > guard_x:
+                continue
+            t = (x - min_x) / handle_span
+            if t < 0.10:
+                influence = max(0.0, min(1.0, t / 0.10))
+            elif t > 0.88:
+                influence = max(0.0, min(1.0, (1.0 - t) / 0.12))
+            else:
+                influence = 1.0
+            if influence <= 0.0001:
+                continue
+            local_scale = 1.0 - (1.0 - scale) * influence
+            vertex.co.y = grip_center.y + (vertex.co.y - grip_center.y) * local_scale
+            vertex.co.z = grip_center.z + (vertex.co.z - grip_center.z) * local_scale
+            changed += 1
+        try:
+            mesh.data.update()
+        except Exception:
+            pass
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_STATIC_WEAPON_HANDLE_FIT vertices=" + str(changed) + " handle_diag=" + str(handle_radius) + " target_diag=" + str(target_diag) + " scale=" + str(scale) + " handle_start=" + str(min_x) + " guard_x=" + str(guard_x))
+
+def prepare_static_weapon_mesh(meshes):
+    if not static_weapon_adapter:
+        return
+    points = mesh_vertex_points(meshes)
+    if not points:
+        return
+    log_player_socket_contract("static-weapon:" + str(weapon_target_profile))
+    min_x = min(p.x for p in points)
+    max_x = max(p.x for p in points)
+    span_x = max_x - min_x
+    if span_x > 0.000001:
+        low = [p for p in points if p.x <= min_x + span_x * 0.20]
+        high = [p for p in points if p.x >= max_x - span_x * 0.20]
+
+        def side_size(slice_points):
+            if not slice_points:
+                return 0.0
+            y_span = max(p.y for p in slice_points) - min(p.y for p in slice_points)
+            z_span = max(p.z for p in slice_points) - min(p.z for p in slice_points)
+            return (y_span * y_span + z_span * z_span) ** 0.5
+
+        low_size = side_size(low)
+        high_size = side_size(high)
+        should_flip = high_size > low_size * 1.05
+        if weapon_target_profile == "melee-blade":
+            # SCUM melee StaticMesh pivots are grip-first: the narrower handle side must stay
+            # near -X, while the heavier blade/teeth side extends away from the hand toward +X.
+            should_flip = high_size > low_size * 1.05
+        if should_flip:
+            transform_mesh_vertices(meshes, Matrix.Scale(-1.0, 4, Vector((1.0, 0.0, 0.0))))
+            print("SCUM_MOD_STUDIO_STATIC_WEAPON_ORIENT flipped_x=True profile=" + str(weapon_target_profile) + " low_side=" + str(low_size) + " high_side=" + str(high_size))
+        else:
+            print("SCUM_MOD_STUDIO_STATIC_WEAPON_ORIENT flipped_x=False profile=" + str(weapon_target_profile) + " low_side=" + str(low_size) + " high_side=" + str(high_size))
+
+    mins, maxs = world_bounds(meshes)
+    points = mesh_vertex_points(meshes)
+    if weapon_target_profile == "melee-blade":
+        anchor, anchor_mode, handle_radius, guard_x = detect_melee_blade_grip_anchor(points, mins[0], maxs[0])
+        fit_melee_blade_handle_cross_section(meshes, mins[0], guard_x, anchor, handle_radius)
+        points = mesh_vertex_points(meshes)
+        mins, maxs = world_bounds(meshes)
+        anchor, anchor_mode, handle_radius, guard_x = detect_melee_blade_grip_anchor(points, mins[0], maxs[0])
+    else:
+        profile_fraction = 0.12 if weapon_target_profile == "pistol" else 0.16
+        anchor_x = mins[0] + max(target_longest_m * profile_fraction, 0.06)
+        nearby = [p for p in points if abs(p.x - anchor_x) <= max((maxs[0] - mins[0]) * 0.06, 0.02)]
+        center = robust_point_center(nearby if nearby else points)
+        anchor = Vector((anchor_x, center.y, center.z))
+        anchor_mode = "held-static"
+        handle_radius = 0.0
+        guard_x = anchor_x
+
+    if weapon_target_profile == "melee-blade":
+        # Keep the Blender pivot at the runtime grip origin. The original Katana
+        # socket coordinates are written later inside UE, where the axes/units match.
+        target_anchor = Vector((0.0, 0.0, 0.0))
+        basis_rotation = Matrix.Rotation(math.radians(-90.0), 4, "Y")
+        second_hand_shift = Vector((0.0, 0.0, 0.0))
+        if abs(weapon_second_hand_shift_m) > 0.000001:
+            # Positive shift moves the whole model along its handle/blade axis toward
+            # the supporting hand zone. This keeps the mesh intact: no handle stretch.
+            second_hand_shift = basis_rotation @ Vector((weapon_second_hand_shift_m, 0.0, 0.0))
+            target_anchor = target_anchor + second_hand_shift
+        transformed_anchor = basis_rotation @ anchor
+        translation = target_anchor - transformed_anchor
+        transform_mesh_vertices(meshes, Matrix.Translation(target_anchor) @ basis_rotation @ Matrix.Translation(-anchor))
+        bpy.context.view_layer.update()
+        print("SCUM_MOD_STUDIO_STATIC_WEAPON_GRIP profile=" + str(weapon_target_profile) + " mode=" + str(anchor_mode) + " anchor=" + str(tuple(anchor)) + " target_anchor=" + str(tuple(target_anchor)) + " guard_x=" + str(guard_x) + " handle_radius=" + str(handle_radius) + " second_hand_shift=" + str(tuple(second_hand_shift)) + " second_hand_shift_cm=" + str(weapon_second_hand_shift_m * 100.0))
+        print("SCUM_MOD_STUDIO_STATIC_WEAPON_BASIS profile=melee-blade axis=X->Z rot_y=-90 translate=" + str(tuple(translation)))
+        return
+
+    target_anchor = Vector((0.0, 0.0, 0.0))
+    translation = target_anchor - anchor
+    transform_mesh_vertices(meshes, Matrix.Translation(translation))
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_STATIC_WEAPON_GRIP profile=" + str(weapon_target_profile) + " mode=" + str(anchor_mode) + " anchor=" + str(tuple(anchor)) + " target_anchor=" + str(tuple(target_anchor)) + " guard_x=" + str(guard_x) + " handle_radius=" + str(handle_radius))
+    print("SCUM_MOD_STUDIO_STATIC_WEAPON_PIVOT profile=" + str(weapon_target_profile) + " translate=" + str(tuple(translation)))
+
+def center_grounded_placement_mesh(meshes):
+    if placement_profile not in ("container-grounded", "world-grounded"):
+        return
+    mins, maxs = world_bounds(meshes)
+    center_x = (mins[0] + maxs[0]) * 0.5
+    center_y = (mins[1] + maxs[1]) * 0.5
+    ground_z = mins[2]
+    translation = Vector((-center_x, -center_y, -ground_z))
+    transform_mesh_vertices(meshes, Matrix.Translation(translation))
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_GROUNDED_PIVOT profile=" + str(placement_profile) + " translate=" + str(tuple(translation)))
+
+def center_npc_character_mesh(meshes):
+    if placement_profile != "npc-character":
+        return
+    log_player_socket_contract("npc-character")
+    mins, maxs = world_bounds(meshes)
+    center_x = (mins[0] + maxs[0]) * 0.5
+    center_y = (mins[1] + maxs[1]) * 0.5
+    ground_z = mins[2]
+    translation = Vector((-center_x, -center_y, -ground_z))
+    transform_mesh_vertices(meshes, Matrix.Translation(translation))
+    bpy.context.view_layer.update()
+    size = Vector((maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]))
+    print("SCUM_MOD_STUDIO_NPC_CHARACTER_PIVOT translate=" + str(tuple(translation)) + " size=" + str(tuple(size)) + " target_longest_m=" + str(target_longest_m))
+
+def center_wearable_head_mesh(meshes):
+    if placement_profile != "wearable-head":
+        return
+    log_player_socket_contract("wearable-head")
+    mins, maxs = world_bounds(meshes)
+    size = Vector((maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]))
+    target_size = military_helmet_02_blender_target_size()
+    if min(size.x, size.y, size.z) > 0.000001:
+        envelope_scale = min(1.0, target_size.x / size.x, target_size.y / size.y, target_size.z / size.z)
+        if envelope_scale < 0.995:
+            center_before = Vector((
+                (mins[0] + maxs[0]) * 0.5,
+                (mins[1] + maxs[1]) * 0.5,
+                (mins[2] + maxs[2]) * 0.5,
+            ))
+            transform_mesh_vertices(meshes, Matrix.Translation(center_before) @ Matrix.Scale(envelope_scale, 4) @ Matrix.Translation(-center_before))
+            bpy.context.view_layer.update()
+            print("SCUM_MOD_STUDIO_WEARABLE_HEAD_ENVELOPE scale=" + str(envelope_scale) + " size=" + str(tuple(size)) + " target=" + str(tuple(target_size)) + " source=SM_M/F_Helmet_02_V2+clearance")
+    mins, maxs = world_bounds(meshes)
+    size = Vector((maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2]))
+    center = Vector((
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ))
+    target_center = military_helmet_02_blender_target_center()
+    anchor = center - target_center
+    translation = -anchor
+    transform_mesh_vertices(meshes, Matrix.Translation(translation))
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_WEARABLE_HEAD_SOCKET_ANCHOR anchor=" + str(tuple(anchor)) + " target_center=" + str(tuple(target_center)) + " ue_center=" + str(tuple(military_helmet_02_bounds_center())) + " female_ue_center=" + str(tuple(military_helmet_02_female_bounds_center())) + " original_extent=" + str(tuple(military_helmet_02_bounds_extent())) + " size=" + str(tuple(size)))
+    print("SCUM_MOD_STUDIO_WEARABLE_HEAD_PIVOT translate=" + str(tuple(translation)))
+
+def choose_weapon_forward_and_pivot(meshes):
+    global weapon_markers
+    points = mesh_vertex_points(meshes)
+    if not points:
+        return
+    min_x = min(p.x for p in points)
+    max_x = max(p.x for p in points)
+    span_x = max_x - min_x
+    if span_x <= 0.000001:
+        return
+
+    low = [p for p in points if p.x <= min_x + span_x * 0.18]
+    high = [p for p in points if p.x >= max_x - span_x * 0.18]
+
+    def side_size(slice_points):
+        if not slice_points:
+            return 0.0
+        y_span = max(p.y for p in slice_points) - min(p.y for p in slice_points)
+        z_span = max(p.z for p in slice_points) - min(p.z for p in slice_points)
+        return (y_span * y_span + z_span * z_span) ** 0.5
+
+    low_size = side_size(low)
+    high_size = side_size(high)
+    if high_size > low_size * 1.08:
+        transform_mesh_vertices(meshes, Matrix.Scale(-1.0, 4, Vector((1.0, 0.0, 0.0))))
+        print("SCUM_MOD_STUDIO_WEAPON_ORIENT flipped_x=True low_side=" + str(low_size) + " high_side=" + str(high_size))
+
+    mins, maxs = world_bounds(meshes)
+    length = maxs[0] - mins[0]
+    width = maxs[1] - mins[1]
+    height = maxs[2] - mins[2]
+
+    target_mins, target_maxs = weapon_target_bounds()
+    current_center = Vector((
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ))
+    target_center = Vector((
+        (target_mins[0] + target_maxs[0]) * 0.5,
+        (target_mins[1] + target_maxs[1]) * 0.5,
+        (target_mins[2] + target_maxs[2]) * 0.5,
+    ))
+    translation = Vector((
+        target_mins[0] - mins[0],
+        target_center[1] - current_center[1],
+        target_center[2] - current_center[2],
+    ))
+    if weapon_target_profile == "m16-rifle":
+        weapon_markers = dict(
+            root=Vector((0.0, 0.0, 0.0)),
+            lever=cm_vec(8.0, 0.0, 1.0),
+            cock=cm_vec(10.0, 0.0, 1.5),
+            bullet=cm_vec(17.0, 0.0, 0.5),
+            left_hand=cm_vec(36.75453186035156, 0.0, -4.5),
+            muzzle=cm_vec(79.0, 0.0, 2.5),
+            bullet_shells=cm_vec(12.0, -2.0, 1.8),
+            reposition=cm_vec(0.0, 0.0, 0.5),
+            bullets=cm_vec(17.0, 0.0, -2.5),
+            aiming=cm_vec(35.0, 0.0, 2.2),
+            eject=cm_vec(12.0, -2.0, 1.8),
+            magazine=cm_vec(13.0, 0.0, -5.5),
+            trigger=cm_vec(1.5, 0.0, -2.0),
+        )
+    else:
+        weapon_markers = dict(
+            root=Vector((0.0, 0.0, 0.0)),
+            lever=cm_vec(8.770, 0.0, -0.656),
+            cock=cm_vec(8.770, 0.0, -0.656),
+            bullet=cm_vec(18.048, 0.0, 0.475),
+            left_hand=cm_vec(25.397, 0.0, -2.770),
+            muzzle=cm_vec(73.879, 0.0, -6.515),
+            bullet_shells=cm_vec(7.061, 0.0, -7.179),
+            reposition=cm_vec(-4.049, 0.0, 1.148),
+            bullets=cm_vec(14.561, 0.0, -3.682),
+        )
+    transform_mesh_vertices(meshes, Matrix.Translation(translation))
+    print("SCUM_MOD_STUDIO_WEAPON_PIVOT profile=" + str(weapon_target_profile) + " short=" + str(weapon_is_short) + " translate_m=" + str(tuple(translation)) + " length_m=" + str(length) + " width_m=" + str(width) + " height_m=" + str(height))
+
+def prepare_weapon_mesh_for_ue_import(meshes):
+    if not weapon_rig_enabled:
+        return
+    transform_mesh_vertices(meshes, Matrix.Scale(-1.0, 4, Vector((0.0, 0.0, 1.0))))
+    print("SCUM_MOD_STUDIO_WEAPON_PREIMPORT z_flipped_for_ue_pitch_180=True")
+
+def apply_user_baked_transform(meshes, armature_objects):
+    pitch, yaw, roll = bake_rotation_deg
+    offset_scale = 1.0 if weapon_rig_enabled else 0.01
+    offset = Vector((bake_offset_cm[0] * offset_scale, bake_offset_cm[1] * offset_scale, bake_offset_cm[2] * offset_scale))
+    has_rotation = abs(pitch) > 0.0001 or abs(yaw) > 0.0001 or abs(roll) > 0.0001
+    has_offset = offset.length > 0.000001
+    if not has_rotation and not has_offset:
+        return
+    rotation = Euler((math.radians(roll), math.radians(pitch), math.radians(yaw)), "XYZ").to_matrix().to_4x4()
+    translation = Matrix.Translation(offset)
+    baked = translation @ rotation
+    transform_mesh_vertices(meshes, baked)
+    for armature in armature_objects:
+        armature.matrix_world = baked @ armature.matrix_world
+    bpy.context.view_layer.update()
+    print("SCUM_MOD_STUDIO_BAKED_TRANSFORM offset_cm=" + str(bake_offset_cm) + " rotation_deg=" + str(bake_rotation_deg))
+
+def mesh_triangle_count(mesh):
+    total = 0
+    for polygon in mesh.data.polygons:
+        total += max(1, len(polygon.vertices) - 2)
+    return total
+
+def optimize_static_meshes(meshes):
+    if not optimization_enabled or (force_armature and not vehicle_rig_enabled):
+        return
+    total_triangles = sum(mesh_triangle_count(mesh) for mesh in meshes)
+    if total_triangles <= target_triangle_count or total_triangles <= 0:
+        print("SCUM_MOD_STUDIO_OPTIMIZE skipped triangles=" + str(total_triangles) + " target=" + str(target_triangle_count))
+        return
+
+    ratio = max(0.02, min(1.0, float(target_triangle_count) / float(total_triangles)))
+    for mesh in meshes:
+        if mesh_triangle_count(mesh) <= 0:
+            continue
+        bpy.context.view_layer.objects.active = mesh
+        mesh.select_set(True)
+        modifier = mesh.modifiers.new(name="SMS_Decimate", type="DECIMATE")
+        modifier.ratio = ratio
+        modifier.use_collapse_triangulate = True
+        try:
+            bpy.ops.object.modifier_apply(modifier=modifier.name)
+        except Exception as decimate_error:
+            print("SCUM_MOD_STUDIO_OPTIMIZE_WARNING " + mesh.name + " " + str(decimate_error))
+            try:
+                mesh.modifiers.remove(modifier)
+            except Exception:
+                pass
+        mesh.select_set(False)
+        try:
+            mesh.data.update()
+        except Exception:
+            pass
+
+    optimized_triangles = sum(mesh_triangle_count(mesh) for mesh in meshes)
+    print("SCUM_MOD_STUDIO_OPTIMIZE before=" + str(total_triangles) + " after=" + str(optimized_triangles) + " target=" + str(target_triangle_count) + " ratio=" + str(ratio))
+
+def create_bone(edit_bones, name, head, tail, parent=None):
+    bone = edit_bones.get(name) or edit_bones.new(name)
+    bone.head = head
+    bone.tail = tail if (tail - head).length > 0.001 else head + Vector((0.0, 0.0, 0.05))
+    if parent:
+        bone.parent = parent
+    return bone
+
+def create_scum_weapon_armature(meshes):
+    markers = weapon_markers if weapon_markers else dict()
+
+    bpy.ops.object.armature_add(enter_editmode=True, align="WORLD", location=(0.0, 0.0, 0.0))
+    armature = bpy.context.object
+    armature.name = "Armature"
+    armature.data.name = "Armature"
+    bones = armature.data.edit_bones
+    root = bones[0]
+    root.name = "Root"
+    root.head = Vector((0.0, 0.0, 0.0))
+    root.tail = cm_vec(5.0, 0.0, 0.0)
+
+    lever = create_bone(bones, "Lever", markers.get("lever", cm_vec(8.770, 0.0, 0.656)), markers.get("lever", cm_vec(8.770, 0.0, 0.656)) + cm_vec(4.0, 0.0, 0.0), root)
+    create_bone(bones, "Cock", markers.get("cock", cm_vec(8.770, 0.0, 0.656)), markers.get("cock", cm_vec(8.770, 0.0, 0.656)) + cm_vec(2.0, 0.0, 0.0), lever)
+    create_bone(bones, "Bullet", markers.get("bullet", cm_vec(18.048, 0.0, -0.475)), markers.get("bullet", cm_vec(18.048, 0.0, -0.475)) + cm_vec(3.0, 0.0, 0.0), root)
+    create_bone(bones, "LeftHandIK", markers.get("left_hand", cm_vec(25.397, 0.0, 2.770)), markers.get("left_hand", cm_vec(25.397, 0.0, 2.770)) + cm_vec(3.0, 0.0, 0.0), root)
+    create_bone(bones, "Muzzle", markers.get("muzzle", cm_vec(73.879, 0.0, 6.515)), markers.get("muzzle", cm_vec(73.879, 0.0, 6.515)) + cm_vec(4.0, 0.0, 0.0), root)
+    create_bone(bones, "BulletShells", markers.get("bullet_shells", cm_vec(7.061, 0.0, 7.179)), markers.get("bullet_shells", cm_vec(7.061, 0.0, 7.179)) + cm_vec(3.0, 0.0, 0.0), root)
+    create_bone(bones, "RepositionBone", markers.get("reposition", cm_vec(-4.049, 0.0, -1.148)), markers.get("reposition", cm_vec(-4.049, 0.0, -1.148)) + cm_vec(3.0, 0.0, 0.0), root)
+    create_bone(bones, "Bullets", markers.get("bullets", cm_vec(14.561, 0.0, 3.682)), markers.get("bullets", cm_vec(14.561, 0.0, 3.682)) + cm_vec(3.0, 0.0, 0.0), root)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    for pose_bone in armature.pose.bones:
+        pose_bone.rotation_mode = "QUATERNION"
+    print("SCUM_MOD_STUDIO_WEAPON_RIG bones=Root,Lever,Cock,Bullet,LeftHandIK,Muzzle,BulletShells,RepositionBone,Bullets; matches M1887 reference skeleton")
+    return armature
+
+def create_weapon_target_contract_armature(meshes, bone_names):
+    clean_names = []
+    for name in bone_names:
+        text = str(name).strip()
+        if text and text not in clean_names:
+            clean_names.append(text)
+    if not clean_names:
+        return create_scum_weapon_armature(meshes)
+
+    root_name = None
+    for candidate in ["Root", "root", "ROOT"]:
+        for name in clean_names:
+            if name == candidate:
+                root_name = name
+                break
+        if root_name:
+            break
+    if root_name is None:
+        for name in clean_names:
+            if name.lower() == "root":
+                root_name = name
+                break
+    if root_name is None:
+        root_name = clean_names[0]
+
+    ordered_names = [root_name] + [name for name in clean_names if name != root_name]
+    markers = weapon_markers if weapon_markers else dict()
+    marker_aliases = dict(
+        root="root",
+        weapon="root",
+        lever="lever",
+        cock="cock",
+        charginghandle="cock",
+        bolt="cock",
+        bullet="bullet",
+        lefthandik="left_hand",
+        lefthand="left_hand",
+        hand_l="left_hand",
+        muzzle="muzzle",
+        barrel="muzzle",
+        aimingdownthesightscenter="aiming",
+        adscenter="aiming",
+        sightcenter="aiming",
+        bulletshells="bullet_shells",
+        shells="bullet_shells",
+        ejectcasing="eject",
+        ejection="bullet_shells",
+        repositionbone="reposition",
+        reposition="reposition",
+        bullets="bullets",
+        magazine="magazine",
+        mag="magazine",
+        trigger="trigger",
+    )
+
+    def marker_for_bone(name, index):
+        normalized = "".join([c.lower() for c in name if c.isalnum() or c == "_"])
+        alias = marker_aliases.get(normalized)
+        if alias and alias in markers:
+            return markers[alias]
+        for key, alias_value in marker_aliases.items():
+            if key in normalized and alias_value in markers:
+                return markers[alias_value]
+        angle = (index % 18) / 18.0 * math.tau
+        ring = 1 + (index // 18)
+        return Vector((math.cos(angle) * 0.025 * ring, math.sin(angle) * 0.025 * ring, 0.005 * (index % 3)))
+
+    bpy.ops.object.armature_add(enter_editmode=True, align="WORLD", location=(0.0, 0.0, 0.0))
+    armature = bpy.context.object
+    armature.name = "Armature"
+    armature.data.name = "Armature"
+    bones = armature.data.edit_bones
+    root = bones[0]
+    root.name = root_name
+    root.head = Vector((0.0, 0.0, 0.0))
+    root.tail = cm_vec(5.0, 0.0, 0.0)
+
+    for index, name in enumerate(ordered_names[1:], start=1):
+        head = marker_for_bone(name, index)
+        create_bone(bones, name, head, head + cm_vec(2.0, 0.0, 0.0), root)
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    for pose_bone in armature.pose.bones:
+        pose_bone.rotation_mode = "QUATERNION"
+    print("SCUM_MOD_STUDIO_WEAPON_TARGET_RIG bones=" + str(len(ordered_names)) + " root=" + root_name)
+    return armature
+
+def create_target_contract_armature(meshes, bone_names):
+    clean_names = []
+    for name in bone_names:
+        text = str(name).strip()
+        if text and text not in clean_names:
+            clean_names.append(text)
+    if not clean_names:
+        clean_names = ["root"]
+
+    root_name = None
+    for name in clean_names:
+        if name.lower() == "root":
+            root_name = name
+            break
+    if root_name is None:
+        root_name = clean_names[0]
+
+    ordered_names = [root_name] + [name for name in clean_names if name != root_name]
+    mins, maxs = world_bounds(meshes)
+    center = Vector((
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ))
+    size = max(maxs[0] - mins[0], maxs[1] - mins[1], maxs[2] - mins[2], 0.1)
+    bone_len = max(size * 0.04, 0.05)
+
+    bpy.ops.object.armature_add(enter_editmode=True, align="WORLD", location=(center.x, center.y, center.z))
+    armature = bpy.context.object
+    armature.name = "SMS_TargetArmature"
+    armature.data.name = "SMS_TargetSkeleton"
+    bones = armature.data.edit_bones
+    root = bones[0]
+    root.name = root_name
+    root.head = center
+    root.tail = center + Vector((0.0, 0.0, bone_len))
+
+    for index, name in enumerate(ordered_names[1:], start=1):
+        angle = (index % 16) / 16.0 * math.tau
+        ring = 1 + (index // 16)
+        radius = bone_len * 0.35 * ring
+        head = center + Vector((math.cos(angle) * radius, math.sin(angle) * radius, 0.0))
+        tail = head + Vector((0.0, 0.0, bone_len * 0.5))
+        create_bone(bones, name, head, tail, root)
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    for pose_bone in armature.pose.bones:
+        pose_bone.rotation_mode = "QUATERNION"
+    print("SCUM_MOD_STUDIO_TARGET_RIG bones=" + str(len(ordered_names)) + " root=" + root_name)
+    return armature
+
+def create_vehicle_target_contract_armature(meshes, bone_names):
+    clean_names = []
+    for name in bone_names:
+        text = str(name).strip()
+        if text and text not in clean_names:
+            clean_names.append(text)
+    if not clean_names:
+        clean_names = ["root"]
+
+    root_name = None
+    for candidate in ["Root", "root", "ROOT"]:
+        for name in clean_names:
+            if name == candidate:
+                root_name = name
+                break
+        if root_name:
+            break
+    if root_name is None:
+        for name in clean_names:
+            if name.lower() == "root":
+                root_name = name
+                break
+    if root_name is None:
+        root_name = clean_names[0]
+
+    ordered_names = [root_name] + [name for name in clean_names if name != root_name]
+    bpy.ops.object.armature_add(enter_editmode=True, align="WORLD", location=(0.0, 0.0, 0.0))
+    armature = bpy.context.object
+    armature.name = "SMS_VehicleTargetArmature"
+    armature.data.name = "SMS_VehicleTargetSkeleton"
+    bones = armature.data.edit_bones
+    root = bones[0]
+    root.name = root_name
+    root.head = Vector((0.0, 0.0, 0.0))
+    root.tail = Vector((0.5, 0.0, 0.0))
+
+    for index, name in enumerate(ordered_names[1:], start=1):
+        angle = (index % 24) / 24.0 * math.tau
+        ring = 1 + (index // 24)
+        radius = 0.04 * ring
+        z = 0.015 * (index % 5)
+        head = Vector((math.cos(angle) * radius, math.sin(angle) * radius, z))
+        tail = head + Vector((0.06, 0.0, 0.0))
+        create_bone(bones, name, head, tail, root)
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    for pose_bone in armature.pose.bones:
+        pose_bone.rotation_mode = "QUATERNION"
+    print("SCUM_MOD_STUDIO_VEHICLE_TARGET_RIG bones=" + str(len(ordered_names)) + " root=" + root_name)
+    return armature
+
+if force_armature and (weapon_rig_enabled or vehicle_rig_enabled or target_contract_enabled):
+    collapse_meshes_to_scene_space(mesh_objects, armatures)
+    armatures = []
+    if weapon_rig_enabled:
+        orient_weapon_long_axis_to_x(mesh_objects)
+    elif vehicle_rig_enabled:
+        orient_vehicle_long_axis_to_x(mesh_objects)
+elif vehicle_visual_overlay or vehicle_query_proxy:
+    collapse_meshes_to_scene_space(mesh_objects, armatures)
+    armatures = []
+    orient_vehicle_long_axis_to_x(mesh_objects)
+elif static_weapon_adapter:
+    collapse_meshes_to_scene_space(mesh_objects, armatures)
+    armatures = []
+    orient_weapon_long_axis_to_x(mesh_objects)
+elif placement_profile == "wearable-head":
+    collapse_meshes_to_scene_space(mesh_objects, armatures)
+    armatures = []
+    orient_wearable_head_mesh_to_player_forward(mesh_objects)
+
+if selected_part_names and not force_armature:
+    collapse_meshes_to_scene_space(mesh_objects, armatures)
+    armatures = []
+    center_static_module_meshes_at_origin(mesh_objects)
+
+normalize_meshes_to_target(mesh_objects, armatures)
+
+if force_armature and weapon_rig_enabled:
+    fit_weapon_mesh_to_target_box(mesh_objects)
+    choose_weapon_forward_and_pivot(mesh_objects)
+elif static_weapon_adapter:
+    prepare_static_weapon_mesh(mesh_objects)
+elif force_armature and vehicle_rig_enabled:
+    center_vehicle_meshes_on_root(mesh_objects)
+elif vehicle_visual_overlay or vehicle_query_proxy:
+    center_vehicle_overlay_on_ground(mesh_objects)
+else:
+    center_wearable_head_mesh(mesh_objects)
+    center_grounded_placement_mesh(mesh_objects)
+    center_npc_character_mesh(mesh_objects)
+
+apply_user_baked_transform(mesh_objects, armatures)
+
+if vehicle_query_proxy:
+    mesh_objects = replace_with_vehicle_query_proxy(mesh_objects)
+    mesh_like = mesh_objects
+
+optimize_static_meshes(mesh_objects)
+
+if static_weapon_adapter:
+    weapon_socket_objects = create_static_weapon_socket_markers(mesh_objects)
+
+if force_armature and vehicle_rig_enabled:
+    center_vehicle_meshes_on_root(mesh_objects)
+
+if force_armature and weapon_rig_enabled:
+    prepare_weapon_mesh_for_ue_import(mesh_objects)
+
+ensure_mesh_material_slots(mesh_objects)
+
+if force_armature:
+    if not mesh_objects:
+        raise RuntimeError("Skeletal export needs at least one mesh object")
+
+    if vehicle_rig_enabled and target_contract_enabled:
+        armature = create_vehicle_target_contract_armature(mesh_objects, target_bone_names)
+        armatures = [armature]
+    elif weapon_rig_enabled and target_contract_enabled:
+        armature = create_weapon_target_contract_armature(mesh_objects, target_bone_names)
+        armatures = [armature]
+    elif weapon_rig_enabled:
+        armature = create_scum_weapon_armature(mesh_objects)
+        armatures = [armature]
+    elif target_contract_enabled:
+        armature = create_target_contract_armature(mesh_objects, target_bone_names)
+        armatures = [armature]
+    elif armatures:
+        armature = armatures[0]
+    else:
+        mins, maxs = world_bounds(mesh_objects)
+        cx = (mins[0] + maxs[0]) * 0.5
+        cy = (mins[1] + maxs[1]) * 0.5
+        min_z = mins[2]
+        max_z = maxs[2]
+        if max_z - min_z < 1.0:
+            max_z = min_z + 1.0
+        bpy.ops.object.armature_add(enter_editmode=True, align="WORLD", location=(cx, cy, min_z))
+        armature = bpy.context.object
+        armature.name = "SMS_GenericArmature"
+        armature.data.name = "SMS_GenericSkeleton"
+        bone = armature.data.edit_bones[0]
+        bone.name = "root"
+        bone.head = (cx, cy, min_z)
+        bone.tail = (cx, cy, max_z)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        armatures = [armature]
+
+    for mesh in mesh_objects:
+        if not mesh.data.vertices:
+            continue
+        group_name = "Root" if weapon_rig_enabled and armature.data.bones.get("Root") else ("Root" if armature.data.bones.get("Root") else ("root" if armature.data.bones.get("root") else (armature.data.bones[0].name if armature.data.bones else "Root")))
+        vertex_group = mesh.vertex_groups.get(group_name) or mesh.vertex_groups.new(name=group_name)
+        vertex_group.add([v.index for v in mesh.data.vertices], 1.0, "REPLACE")
+        modifier = mesh.modifiers.get("SMS_Armature") or mesh.modifiers.new(name="SMS_Armature", type="ARMATURE")
+        modifier.object = armature
+        old_matrix = mesh.matrix_world.copy()
+        mesh.parent = armature
+        mesh.matrix_world = old_matrix
+
+    mesh_like = mesh_objects + [armature]
+
+if static_weapon_adapter and weapon_socket_objects:
+    mesh_like = mesh_objects + weapon_socket_objects
+
+repair_mesh_geometry_for_unreal(mesh_objects)
+
+os.makedirs(os.path.dirname(output_file), exist_ok=True)
+bpy.ops.object.select_all(action="DESELECT")
+for obj in mesh_like:
+    obj.select_set(True)
+bpy.context.view_layer.objects.active = armatures[0] if force_armature and armatures else mesh_like[0]
+
+try:
+    if weapon_rig_enabled:
+        bpy.ops.export_scene.fbx(filepath=output_file, use_selection=True, apply_unit_scale=True, global_scale=1.0, bake_space_transform=False, add_leaf_bones=False, use_armature_deform_only=True, bake_anim=False, bake_anim_use_all_bones=False, object_types=set(["ARMATURE", "MESH"]), armature_nodetype="NULL", primary_bone_axis="X", secondary_bone_axis="Y", axis_forward="-Y", axis_up="Z")
+    else:
+        static_export_types = set(["ARMATURE", "MESH", "EMPTY"]) if static_weapon_adapter else set(["ARMATURE", "MESH"])
+        bpy.ops.export_scene.fbx(filepath=output_file, use_selection=True, apply_unit_scale=True, bake_space_transform=False, add_leaf_bones=False, object_types=static_export_types)
+except TypeError:
+    bpy.ops.export_scene.fbx(filepath=output_file, use_selection=True, apply_unit_scale=True, add_leaf_bones=False, bake_anim=False)
+""";
+    }
+
+    private static string CreateRawModelCookProject(string projectRoot, string projectName)
+    {
+        Directory.CreateDirectory(projectRoot);
+        Directory.CreateDirectory(Path.Combine(projectRoot, "Config"));
+        Directory.CreateDirectory(Path.Combine(projectRoot, "Content"));
+
+        var projectPath = Path.Combine(projectRoot, $"{projectName}.uproject");
+        File.WriteAllText(
+            projectPath,
+            """
+{
+  "FileVersion": 3,
+  "EngineAssociation": "4.27",
+  "Category": "SCUM Mod Studio",
+  "Description": "Temporary automated raw model cook project",
+  "Plugins": [
+    {
+      "Name": "PythonScriptPlugin",
+      "Enabled": true
+    },
+    {
+      "Name": "EditorScriptingUtilities",
+      "Enabled": true
+    }
+  ]
+}
+""",
+            Encoding.UTF8);
+
+        File.WriteAllText(
+            Path.Combine(projectRoot, "Config", "DefaultGame.ini"),
+            """
+[/Script/EngineSettings.GeneralProjectSettings]
+ProjectName=ScumModStudioCook
+
+[/Script/UnrealEd.ProjectPackagingSettings]
+BuildConfiguration=PPBC_Shipping
+FullRebuild=True
+ForDistribution=False
+""",
+            Encoding.UTF8);
+
+        return projectPath;
+    }
+
+    private static string BuildUnrealImportScript(
+        string sourcePath,
+        string destinationPath,
+        string assetName,
+        bool importAsSkeletal,
+        double scaleFactor,
+        RawModelPaintOptions paint,
+        RawModelWeaponRigOptions weaponRig,
+        RawModelPlacementOptions placement,
+        bool externalMaterialEnabled,
+        bool vehicleVisualOverlay,
+        bool vehicleQueryProxy)
+    {
+        var paintEnabled = paint.Enabled ? "True" : "False";
+        var weaponRigEnabled = weaponRig.Enabled ? "True" : "False";
+        var weaponTargetProfileJson = JsonSerializer.Serialize(weaponRig.TargetProfile ?? "none");
+        var placementProfileJson = JsonSerializer.Serialize(placement.Profile ?? "generic-center");
+        var externalMaterialEnabledPython = externalMaterialEnabled ? "True" : "False";
+        var vehicleVisualOverlayPython = vehicleVisualOverlay ? "True" : "False";
+        var vehicleQueryProxyPython = vehicleQueryProxy ? "True" : "False";
+        var paintRed = paint.Red.ToString(CultureInfo.InvariantCulture);
+        var paintGreen = paint.Green.ToString(CultureInfo.InvariantCulture);
+        var paintBlue = paint.Blue.ToString(CultureInfo.InvariantCulture);
+        var paintMetallic = paint.Metallic.ToString(CultureInfo.InvariantCulture);
+        var paintRoughness = paint.Roughness.ToString(CultureInfo.InvariantCulture);
+        return $"""
+import unreal
+import os
+import re
+
+source_file = {PythonStringLiteral(sourcePath)}
+destination_path = {PythonStringLiteral(destinationPath)}
+asset_name = {PythonStringLiteral(assetName)}
+import_as_skeletal = {(importAsSkeletal ? "True" : "False")}
+scale_factor = {scaleFactor.ToString(CultureInfo.InvariantCulture)}
+weapon_rig_enabled = {weaponRigEnabled}
+weapon_target_profile = {weaponTargetProfileJson}
+placement_profile = {placementProfileJson}
+static_weapon_adapter = (not import_as_skeletal) and weapon_rig_enabled and weapon_target_profile != "none"
+external_material_enabled = {externalMaterialEnabledPython}
+vehicle_visual_overlay = {vehicleVisualOverlayPython}
+vehicle_query_proxy = {vehicleQueryProxyPython}
+paint_enabled = {paintEnabled}
+paint_color = unreal.LinearColor({paintRed}, {paintGreen}, {paintBlue}, 1.0)
+paint_metallic = {paintMetallic}
+paint_roughness = {paintRoughness}
+
+def set_prop(obj, name, value):
+    try:
+        obj.set_editor_property(name, value)
+        return
+    except Exception:
+        pass
+    try:
+        setattr(obj, name, value)
+    except Exception:
+        pass
+
+def looks_like_glass_name(name):
+    key = str(name or "").lower()
+    return any(token in key for token in ("glass", "window", "canopy", "cockpit_glass", "windscreen", "windshield", "visor"))
+
+def set_material_opaque(material):
+    if not material:
+        return False
+    try:
+        set_prop(material, "blend_mode", unreal.BlendMode.BLEND_OPAQUE)
+    except Exception:
+        pass
+    for prop_name in ("b_can_masked_be_assumed_opaque", "bCanMaskedBeAssumedOpaque"):
+        try:
+            material.set_editor_property(prop_name, True)
+        except Exception:
+            pass
+    for prop_name in ("dither_opacity_mask", "DitherOpacityMask"):
+        try:
+            material.set_editor_property(prop_name, False)
+        except Exception:
+            pass
+    return True
+
+def set_material_two_sided(material):
+    if not material:
+        return False
+    changed = False
+    for prop_name in ("two_sided", "TwoSided"):
+        try:
+            material.set_editor_property(prop_name, True)
+            changed = True
+            break
+        except Exception:
+            pass
+        try:
+            setattr(material, prop_name, True)
+            changed = True
+            break
+        except Exception:
+            pass
+    return changed
+
+def create_sms_material(material_name, color, metallic, roughness, glass=False):
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    existing_path = destination_path + "/" + material_name
+    material = None
+    if unreal.EditorAssetLibrary.does_asset_exist(existing_path):
+        material = unreal.EditorAssetLibrary.load_asset(existing_path)
+    if not material:
+        material = asset_tools.create_asset(material_name, destination_path, unreal.Material, unreal.MaterialFactoryNew())
+    if not material:
+        unreal.log_warning("SCUM Mod Studio could not create material " + material_name)
+        return None
+
+    try:
+        material.get_editor_property("expressions").clear()
+    except Exception:
+        pass
+
+    tools = unreal.MaterialEditingLibrary
+    color_node = tools.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -420, -120)
+    set_prop(color_node, "constant", color)
+    tools.connect_material_property(color_node, "", unreal.MaterialProperty.MP_BASE_COLOR)
+
+    metallic_node = tools.create_material_expression(material, unreal.MaterialExpressionConstant, -420, 60)
+    set_prop(metallic_node, "r", metallic)
+    tools.connect_material_property(metallic_node, "", unreal.MaterialProperty.MP_METALLIC)
+
+    roughness_node = tools.create_material_expression(material, unreal.MaterialExpressionConstant, -420, 200)
+    set_prop(roughness_node, "r", roughness)
+    tools.connect_material_property(roughness_node, "", unreal.MaterialProperty.MP_ROUGHNESS)
+
+    try:
+        set_prop(material, "blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT if glass else unreal.BlendMode.BLEND_OPAQUE)
+        set_prop(material, "shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
+        set_material_two_sided(material)
+    except Exception:
+        pass
+
+    if glass:
+        try:
+            opacity_node = tools.create_material_expression(material, unreal.MaterialExpressionConstant, -420, 340)
+            set_prop(opacity_node, "r", 0.34)
+            tools.connect_material_property(opacity_node, "", unreal.MaterialProperty.MP_OPACITY)
+        except Exception:
+            pass
+
+    try:
+        tools.recompile_material(material)
+    except Exception:
+        pass
+    unreal.EditorAssetLibrary.save_loaded_asset(material)
+    return material
+
+def create_color_material():
+    if not paint_enabled:
+        return None
+    return create_sms_material("M_" + asset_name + "_SMSPaint", paint_color, paint_metallic, paint_roughness)
+
+def create_fallback_slot_material():
+    return create_sms_material(
+        "M_" + asset_name + "_SMSSlot",
+        unreal.LinearColor(0.28, 0.31, 0.31, 1.0),
+        0.0,
+        0.55)
+
+def create_glass_slot_material():
+    return create_sms_material(
+        "M_" + asset_name + "_SMSGlass",
+        unreal.LinearColor(0.18, 0.27, 0.32, 1.0),
+        0.0,
+        0.04,
+        glass=True)
+
+def harden_imported_material(material_asset):
+    if not material_asset:
+        return False
+    class_name = ""
+    try:
+        class_name = material_asset.get_class().get_name()
+    except Exception:
+        pass
+    if class_name not in ("Material", "MaterialInstanceConstant", "MaterialInstance"):
+        return False
+    changed = set_material_two_sided(material_asset)
+    asset_path = ""
+    try:
+        asset_path = material_asset.get_path_name()
+    except Exception:
+        pass
+    if class_name == "Material":
+        if looks_like_glass_name(asset_path):
+            try:
+                set_prop(material_asset, "blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+                tools = unreal.MaterialEditingLibrary
+                opacity_node = tools.create_material_expression(material_asset, unreal.MaterialExpressionConstant, -260, 360)
+                set_prop(opacity_node, "r", 0.34)
+                tools.connect_material_property(opacity_node, "", unreal.MaterialProperty.MP_OPACITY)
+                changed = True
+            except Exception:
+                pass
+        else:
+            changed = set_material_opaque(material_asset) or changed
+    if changed:
+        try:
+            unreal.MaterialEditingLibrary.recompile_material(material_asset)
+        except Exception:
+            pass
+        unreal.EditorAssetLibrary.save_loaded_asset(material_asset)
+    return changed
+
+def make_material_entry(property_name, material):
+    try:
+        entry = unreal.SkeletalMaterial() if property_name == "materials" else unreal.StaticMaterial()
+    except Exception:
+        return None
+
+    for prop_name in ("material_interface", "material"):
+        try:
+            entry.set_editor_property(prop_name, material)
+            break
+        except Exception:
+            pass
+        try:
+            setattr(entry, prop_name, material)
+            break
+        except Exception:
+            pass
+
+    for prop_name in ("material_slot_name", "imported_material_slot_name"):
+        try:
+            entry.set_editor_property(prop_name, "SMS_Default")
+        except Exception:
+            try:
+                setattr(entry, prop_name, "SMS_Default")
+            except Exception:
+                pass
+
+    return entry
+
+def replace_material_array(mesh_asset, property_name, material, create_missing):
+    try:
+        entries = list(mesh_asset.get_editor_property(property_name))
+    except Exception:
+        return False
+    if not entries:
+        if not create_missing:
+            return False
+        entry = make_material_entry(property_name, material)
+        if not entry:
+            return False
+        entries = [entry]
+        set_prop(mesh_asset, property_name, entries)
+        try:
+            mesh_asset.set_material(0, material)
+        except Exception:
+            pass
+        return True
+
+    changed = False
+    for entry in entries:
+        try:
+            entry.set_editor_property("material_interface", material)
+            changed = True
+            continue
+        except Exception:
+            pass
+        try:
+            entry.material_interface = material
+            changed = True
+        except Exception:
+            pass
+    if changed:
+        set_prop(mesh_asset, property_name, entries)
+    return changed
+
+def material_slot_count(mesh_asset):
+    count = 0
+    for property_name in ("materials", "static_materials"):
+        try:
+            entries = list(mesh_asset.get_editor_property(property_name))
+            count = max(count, len(entries))
+        except Exception:
+            pass
+    return count
+
+def mesh_slot_name(entry, index):
+    for prop_name in ("material_slot_name", "imported_material_slot_name"):
+        try:
+            value = entry.get_editor_property(prop_name)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+        try:
+            value = getattr(entry, prop_name)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+    return "slot_" + str(index)
+
+def apply_glass_slot_materials(mesh_asset, glass_material):
+    if not mesh_asset or not glass_material:
+        return False
+    changed = False
+    for property_name in ("materials", "static_materials"):
+        try:
+            entries = list(mesh_asset.get_editor_property(property_name))
+        except Exception:
+            continue
+        for index, entry in enumerate(entries):
+            if not looks_like_glass_name(mesh_slot_name(entry, index)):
+                continue
+            try:
+                mesh_asset.set_material(index, glass_material)
+                changed = True
+            except Exception:
+                pass
+            for prop_name in ("material_interface", "material"):
+                try:
+                    entry.set_editor_property(prop_name, glass_material)
+                    changed = True
+                    break
+                except Exception:
+                    pass
+                try:
+                    setattr(entry, prop_name, glass_material)
+                    changed = True
+                    break
+                except Exception:
+                    pass
+        if changed:
+            set_prop(mesh_asset, property_name, entries)
+    return changed
+
+def entry_material(entry):
+    for prop_name in ("material_interface", "material"):
+        try:
+            value = entry.get_editor_property(prop_name)
+            if value:
+                return value
+        except Exception:
+            pass
+        try:
+            value = getattr(entry, prop_name)
+            if value:
+                return value
+        except Exception:
+            pass
+    return None
+
+def ensure_mesh_material_slots(mesh_asset, fallback_material, replacement_material, glass_material, preferred_material=None):
+    if not mesh_asset or not fallback_material:
+        return
+
+    before_count = material_slot_count(mesh_asset)
+    material = replacement_material if replacement_material else (preferred_material if preferred_material else fallback_material)
+    should_replace_existing = replacement_material is not None or external_material_enabled or preferred_material is not None
+    assigned = False
+
+    if before_count == 0 or should_replace_existing:
+        try:
+            slot_count = max(1, before_count)
+            for index in range(slot_count):
+                mesh_asset.set_material(index, material)
+                assigned = True
+        except Exception:
+            pass
+
+    if before_count == 0 or should_replace_existing:
+        assigned = replace_material_array(mesh_asset, "materials", material, before_count == 0) or assigned
+        assigned = replace_material_array(mesh_asset, "static_materials", material, before_count == 0) or assigned
+    else:
+        for property_name in ("materials", "static_materials"):
+            try:
+                entries = list(mesh_asset.get_editor_property(property_name))
+            except Exception:
+                continue
+            changed = False
+            for entry in entries:
+                if entry_material(entry):
+                    continue
+                for prop_name in ("material_interface", "material"):
+                    try:
+                        entry.set_editor_property(prop_name, material)
+                        changed = True
+                        break
+                    except Exception:
+                        pass
+                    try:
+                        setattr(entry, prop_name, material)
+                        changed = True
+                        break
+                    except Exception:
+                        pass
+            if changed:
+                set_prop(mesh_asset, property_name, entries)
+                assigned = True
+
+    if before_count == 0 and material_slot_count(mesh_asset) == 0:
+        try:
+            mesh_asset.set_material(0, material)
+            assigned = True
+        except Exception:
+            pass
+
+    if assigned:
+        unreal.EditorAssetLibrary.save_loaded_asset(mesh_asset)
+        unreal.log("SCUM Mod Studio ensured material slot 0 on " + mesh_asset.get_path_name())
+    else:
+        unreal.log_warning("SCUM Mod Studio imported model but could not ensure mesh material slots")
+
+    if apply_glass_slot_materials(mesh_asset, glass_material):
+        unreal.EditorAssetLibrary.save_loaded_asset(mesh_asset)
+        unreal.log("SCUM Mod Studio applied semantic glass material on " + mesh_asset.get_path_name())
+
+def asset_class_name(asset):
+    if not asset:
+        return ""
+    try:
+        return asset.get_class().get_name()
+    except Exception:
+        return ""
+
+def asset_path_lower(asset):
+    try:
+        return asset.get_path_name().lower()
+    except Exception:
+        return ""
+
+def is_mesh_asset(asset):
+    return asset_class_name(asset) in ("SkeletalMesh", "StaticMesh")
+
+def is_static_mesh_asset(asset):
+    return asset_class_name(asset) == "StaticMesh"
+
+def should_apply_melee_static_weapon_sockets():
+    return (not import_as_skeletal) and (weapon_target_profile == "melee-blade" or placement_profile == "melee-blade")
+
+def remove_static_mesh_socket(static_mesh, socket_name):
+    removed = 0
+    for _ in range(0, 32):
+        existing = None
+        try:
+            existing = static_mesh.find_socket(socket_name)
+        except Exception:
+            existing = None
+        if not existing:
+            break
+        try:
+            static_mesh.remove_socket(existing)
+            removed += 1
+            continue
+        except Exception:
+            break
+    if removed > 0:
+        return removed
+
+    for prop_name in ("sockets", "Sockets"):
+        try:
+            sockets = list(static_mesh.get_editor_property(prop_name))
+        except Exception:
+            continue
+        kept = []
+        for socket in sockets:
+            current_name = ""
+            for socket_prop in ("socket_name", "SocketName"):
+                try:
+                    current_name = str(socket.get_editor_property(socket_prop))
+                    break
+                except Exception:
+                    pass
+            if current_name == socket_name:
+                removed += 1
+            else:
+                kept.append(socket)
+        if removed > 0:
+            try:
+                static_mesh.set_editor_property(prop_name, kept)
+                return removed
+            except Exception:
+                pass
+    return removed
+
+def add_static_mesh_socket(static_mesh, socket_name, location, rotation):
+    socket = None
+    try:
+        socket = unreal.new_object(unreal.StaticMeshSocket, static_mesh)
+    except Exception:
+        try:
+            socket = unreal.StaticMeshSocket()
+        except Exception:
+            socket = None
+    if not socket:
+        return False
+
+    set_prop(socket, "socket_name", socket_name)
+    set_prop(socket, "SocketName", socket_name)
+    set_prop(socket, "relative_location", unreal.Vector(location[0], location[1], location[2]))
+    set_prop(socket, "RelativeLocation", unreal.Vector(location[0], location[1], location[2]))
+    socket_rotation = unreal.Rotator(rotation[2], rotation[0], rotation[1])
+    set_prop(socket, "relative_rotation", socket_rotation)
+    set_prop(socket, "RelativeRotation", socket_rotation)
+    set_prop(socket, "relative_scale", unreal.Vector(1.0, 1.0, 1.0))
+    set_prop(socket, "RelativeScale", unreal.Vector(1.0, 1.0, 1.0))
+
+    try:
+        static_mesh.add_socket(socket)
+        return True
+    except Exception:
+        pass
+
+    for prop_name in ("sockets", "Sockets"):
+        try:
+            sockets = list(static_mesh.get_editor_property(prop_name))
+            sockets.append(socket)
+            static_mesh.set_editor_property(prop_name, sockets)
+            return True
+        except Exception:
+            pass
+    return False
+
+def apply_melee_static_weapon_sockets(static_mesh):
+    if not static_mesh or not should_apply_melee_static_weapon_sockets():
+        return False
+
+    specs = [
+        ("Grip", (-0.29106733202934265, 0.09999966621398926, -19.706043243408203), (353.0, 0.0, 0.0)),
+        ("Holster", (-0.47847241163253784, 0.000012305637028475758, -0.005241642706096172), (0.0004371320828795433, 180.00160217285156, 0.0000005952932724540005)),
+        ("PlacementCenter", (4.999996185302734, 3.000004768371582, 5.0), (270.0, 0.0, 0.00006103515625)),
+    ]
+
+    try:
+        static_mesh.modify()
+    except Exception:
+        pass
+
+    added = []
+    removed_total = 0
+    for socket_name, location, rotation in specs:
+        removed_total += remove_static_mesh_socket(static_mesh, socket_name)
+        if add_static_mesh_socket(static_mesh, socket_name, location, rotation):
+            added.append(socket_name)
+
+    if len(added) != len(specs):
+        unreal.log_warning("SCUM_MOD_STUDIO_UE_STATIC_WEAPON_SOCKETS failed asset=" + static_mesh.get_path_name() + " added=" + ",".join(added))
+        return False
+
+    try:
+        static_mesh.mark_package_dirty()
+    except Exception:
+        pass
+    unreal.EditorAssetLibrary.save_loaded_asset(static_mesh)
+    unreal.log("SCUM_MOD_STUDIO_UE_STATIC_WEAPON_SOCKETS asset=" + static_mesh.get_path_name() + " profile=" + str(weapon_target_profile) + " placement=" + str(placement_profile) + " sockets=" + ",".join(added) + " removed=" + str(removed_total))
+    return True
+
+def sanitize_asset_name(value):
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "")).strip("_")
+    if not normalized:
+        normalized = "Texture"
+    if normalized[0].isdigit():
+        normalized = "T_" + normalized
+    return normalized[:64]
+
+def import_sidecar_texture_assets():
+    if external_material_enabled or paint_enabled:
+        return []
+    source_dir = os.path.dirname(source_file)
+    if not source_dir or not os.path.isdir(source_dir):
+        return []
+    roots = [source_dir, os.path.join(source_dir, "textures")]
+    texture_exts = set([".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".exr", ".hdr"])
+    texture_files = []
+    seen = set()
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for current_root, _, files in os.walk(root):
+            for file_name in files:
+                ext = os.path.splitext(file_name)[1].lower()
+                if ext not in texture_exts:
+                    continue
+                full_path = os.path.abspath(os.path.join(current_root, file_name))
+                key = full_path.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                texture_files.append(full_path)
+    if not texture_files:
+        return []
+
+    tasks = []
+    for texture_file in texture_files:
+        task = unreal.AssetImportTask()
+        set_prop(task, "filename", texture_file)
+        set_prop(task, "destination_path", destination_path)
+        set_prop(task, "destination_name", sanitize_asset_name(os.path.splitext(os.path.basename(texture_file))[0]))
+        set_prop(task, "automated", True)
+        set_prop(task, "replace_existing", True)
+        set_prop(task, "save", True)
+        tasks.append(task)
+    unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks(tasks)
+    loaded = []
+    for task in tasks:
+        for imported_path in list(task.imported_object_paths or []):
+            asset = unreal.EditorAssetLibrary.load_asset(imported_path)
+            if asset:
+                loaded.append(asset)
+    unreal.log("SCUM Mod Studio imported sidecar texture assets: " + str(len(loaded)))
+    return loaded
+
+def create_imported_texture_material(loaded_assets):
+    if external_material_enabled or paint_enabled:
+        return None
+    textures = [asset for asset in loaded_assets if asset_class_name(asset) in ("Texture2D", "Texture")]
+    if not textures:
+        return None
+
+    def find_texture(include_tokens, reject_tokens=()):
+        best = None
+        best_score = -1
+        for texture in textures:
+            path = asset_path_lower(texture)
+            if any(token in path for token in reject_tokens):
+                continue
+            score = sum(1 for token in include_tokens if token in path)
+            if score > best_score and score > 0:
+                best = texture
+                best_score = score
+        return best
+
+    base_texture = find_texture(("base_color", "basecolor", "albedo", "diffuse", "_col", "color"), ("normal", "rough", "metal", "height", "ao"))
+    normal_texture = find_texture(("normal", "normalgl", "normaldx", "_nrm", "nrm"), ("height",))
+    roughness_texture = find_texture(("roughness", "rough", "_rgh", "rgh"), ())
+    metallic_texture = find_texture(("metallic", "metal", "_met", "met"), ())
+    ao_texture = find_texture(("ambient_occlusion", "ambientocclusion", "mixed_ao", "_ao", " ao"), ())
+    if not any((base_texture, normal_texture, roughness_texture, metallic_texture, ao_texture)):
+        return None
+
+    material_name = "M_" + asset_name + "_SMSPBR"
+    material_path = destination_path + "/" + material_name
+    asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
+    material = unreal.EditorAssetLibrary.load_asset(material_path) if unreal.EditorAssetLibrary.does_asset_exist(material_path) else None
+    if not material:
+        material = asset_tools.create_asset(material_name, destination_path, unreal.Material, unreal.MaterialFactoryNew())
+    if not material:
+        return None
+
+    try:
+        material.get_editor_property("expressions").clear()
+    except Exception:
+        pass
+
+    tools = unreal.MaterialEditingLibrary
+
+    def add_texture_sample(texture, x, y, material_property, output_name="RGB", normal=False):
+        if not texture:
+            return
+        node = tools.create_material_expression(material, unreal.MaterialExpressionTextureSample, x, y)
+        set_prop(node, "texture", texture)
+        if normal:
+            for sampler_prop in ("sampler_type", "SamplerType"):
+                try:
+                    node.set_editor_property(sampler_prop, unreal.MaterialSamplerType.SAMPLERTYPE_Normal)
+                    break
+                except Exception:
+                    pass
+        try:
+            tools.connect_material_property(node, output_name, material_property)
+        except Exception:
+            try:
+                tools.connect_material_property(node, "", material_property)
+            except Exception:
+                pass
+
+    add_texture_sample(base_texture, -520, -180, unreal.MaterialProperty.MP_BASE_COLOR, "RGB")
+    add_texture_sample(normal_texture, -520, 40, unreal.MaterialProperty.MP_NORMAL, "RGB", normal=True)
+    add_texture_sample(roughness_texture, -520, 240, unreal.MaterialProperty.MP_ROUGHNESS, "R")
+    add_texture_sample(metallic_texture, -520, 400, unreal.MaterialProperty.MP_METALLIC, "R")
+    try:
+        add_texture_sample(ao_texture, -520, 560, unreal.MaterialProperty.MP_AMBIENT_OCCLUSION, "R")
+    except Exception:
+        pass
+
+    try:
+        set_material_opaque(material)
+        set_prop(material, "shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
+        set_material_two_sided(material)
+        for prop_name in ("b_used_with_skeletal_mesh", "bUsedWithSkeletalMesh"):
+            try:
+                material.set_editor_property(prop_name, True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        tools.recompile_material(material)
+    except Exception:
+        pass
+    unreal.EditorAssetLibrary.save_loaded_asset(material)
+    unreal.log("SCUM Mod Studio created texture PBR material " + material_path)
+    return material
+
+unreal.EditorAssetLibrary.make_directory(destination_path)
+
+task = unreal.AssetImportTask()
+set_prop(task, "filename", source_file)
+set_prop(task, "destination_path", destination_path)
+set_prop(task, "destination_name", asset_name)
+set_prop(task, "automated", True)
+set_prop(task, "replace_existing", True)
+set_prop(task, "save", True)
+
+options = unreal.FbxImportUI()
+set_prop(options, "import_mesh", True)
+set_prop(options, "import_materials", not external_material_enabled)
+set_prop(options, "import_textures", not external_material_enabled)
+set_prop(options, "import_as_skeletal", import_as_skeletal)
+try:
+    mesh_type = unreal.FBXImportType.FBXIT_SKELETAL_MESH if import_as_skeletal else unreal.FBXImportType.FBXIT_STATIC_MESH
+    set_prop(options, "mesh_type_to_import", mesh_type)
+except Exception:
+    pass
+
+try:
+    static_data = options.static_mesh_import_data
+    set_prop(static_data, "combine_meshes", True)
+    set_prop(static_data, "auto_generate_collision", vehicle_query_proxy or not vehicle_visual_overlay)
+    set_prop(static_data, "generate_lightmap_u_vs", True)
+    set_prop(static_data, "import_uniform_scale", scale_factor)
+except Exception:
+    pass
+
+try:
+    skeletal_data = options.skeletal_mesh_import_data
+    set_prop(skeletal_data, "import_uniform_scale", scale_factor)
+    set_prop(skeletal_data, "convert_scene", True)
+    set_prop(skeletal_data, "convert_scene_unit", True)
+    set_prop(skeletal_data, "force_front_x_axis", False)
+    set_prop(skeletal_data, "import_translation", unreal.Vector(0.0, 0.0, 0.0))
+    if weapon_rig_enabled:
+        set_prop(skeletal_data, "import_rotation", unreal.Rotator(180.0, 0.0, 0.0))
+    else:
+        set_prop(skeletal_data, "import_rotation", unreal.Rotator(0.0, 0.0, 0.0))
+except Exception:
+    pass
+
+try:
+    set_prop(options, "create_physics_asset", True)
+except Exception:
+    pass
+
+set_prop(task, "options", options)
+unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+sidecar_texture_assets = import_sidecar_texture_assets()
+
+imported_paths = list(task.imported_object_paths or [])
+candidate_path = destination_path + "/" + asset_name
+if not imported_paths and unreal.EditorAssetLibrary.does_asset_exist(candidate_path):
+    imported_paths = [candidate_path]
+
+if not imported_paths:
+    raise RuntimeError("UE4 import returned no asset paths")
+
+loaded_assets = []
+for imported_path in imported_paths:
+    imported_asset = unreal.EditorAssetLibrary.load_asset(imported_path)
+    if imported_asset:
+        loaded_assets.append(imported_asset)
+for texture_asset in sidecar_texture_assets:
+    if texture_asset and texture_asset not in loaded_assets:
+        loaded_assets.append(texture_asset)
+try:
+    for asset_path in unreal.EditorAssetLibrary.list_assets(destination_path, recursive=True, include_folder=False):
+        if asset_path in imported_paths:
+            continue
+        asset = unreal.EditorAssetLibrary.load_asset(asset_path)
+        if asset and asset not in loaded_assets:
+            loaded_assets.append(asset)
+except Exception as list_error:
+    unreal.log_warning("SCUM Mod Studio could not list imported dependency assets: " + str(list_error))
+
+paint_material = create_color_material()
+fallback_slot_material = create_fallback_slot_material()
+glass_slot_material = create_glass_slot_material()
+texture_pbr_material = create_imported_texture_material(loaded_assets)
+source_model_material = None
+for imported_asset in loaded_assets:
+    if asset_class_name(imported_asset) not in ("Material", "MaterialInstanceConstant", "MaterialInstance"):
+        continue
+    path_lower = asset_path_lower(imported_asset)
+    if "_sms" in path_lower:
+        continue
+    source_model_material = imported_asset
+    break
+
+if static_weapon_adapter and source_model_material is not None:
+    preferred_model_material = source_model_material
+else:
+    preferred_model_material = texture_pbr_material if texture_pbr_material is not None else source_model_material
+
+for imported_asset in loaded_assets:
+    if harden_imported_material(imported_asset):
+        continue
+    if is_mesh_asset(imported_asset):
+        ensure_mesh_material_slots(imported_asset, fallback_slot_material, paint_material, glass_slot_material, preferred_model_material)
+
+if should_apply_melee_static_weapon_sockets():
+    socketed_meshes = 0
+    for imported_asset in loaded_assets:
+        if is_static_mesh_asset(imported_asset) and apply_melee_static_weapon_sockets(imported_asset):
+            socketed_meshes += 1
+    if socketed_meshes == 0:
+        unreal.log_warning("SCUM_MOD_STUDIO_UE_STATIC_WEAPON_SOCKETS no_static_mesh profile=" + str(weapon_target_profile) + " placement=" + str(placement_profile))
+
+unreal.EditorAssetLibrary.save_directory(destination_path, only_if_is_dirty=False, recursive=True)
+unreal.log("SCUM Mod Studio imported raw model to " + candidate_path)
+""";
+    }
+
+    private static int PatchCookedRawModelMaterialReferences(
+        string customTargetRoot,
+        RawModelExternalMaterialReference material,
+        List<string> warnings)
+    {
+        if (!material.Enabled || !Directory.Exists(customTargetRoot))
+        {
+            return 0;
+        }
+
+        var patchedSlots = 0;
+        foreach (var uassetPath in Directory.EnumerateFiles(customTargetRoot, "*.uasset", SearchOption.AllDirectories))
+        {
+            UAsset asset;
+            try
+            {
+                asset = new UAsset(uassetPath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Material patch skipped: не удалось прочитать {Path.GetFileName(uassetPath)} ({ex.Message})");
+                continue;
+            }
+
+            if (!IsMeshAssetForMaterialPatch(asset))
+            {
+                continue;
+            }
+
+            var materialImportIndices = new List<int>();
+            for (var i = 0; i < asset.Imports.Count; i++)
+            {
+                var import = asset.Imports[i];
+                var className = import.ClassName?.ToString() ?? string.Empty;
+                var objectName = import.ObjectName?.ToString() ?? string.Empty;
+                if (IsVehicleGlassSupportMaterialObject(objectName))
+                {
+                    continue;
+                }
+
+                if (className.Equals("Material", StringComparison.OrdinalIgnoreCase)
+                    || className.Equals("MaterialInstance", StringComparison.OrdinalIgnoreCase)
+                    || className.Equals("MaterialInstanceConstant", StringComparison.OrdinalIgnoreCase)
+                    || className.Equals("MaterialInterface", StringComparison.OrdinalIgnoreCase))
+                {
+                    materialImportIndices.Add(i);
+                }
+            }
+
+            if (materialImportIndices.Count == 0)
+            {
+                continue;
+            }
+
+            var packageImportIndex = EnsureImport(
+                asset,
+                "/Script/CoreUObject",
+                "Package",
+                new FPackageIndex(0),
+                material.PackagePath);
+            var outerIndex = new FPackageIndex(-(packageImportIndex + 1));
+            foreach (var materialImportIndex in materialImportIndices)
+            {
+                asset.Imports[materialImportIndex] = new Import(
+                    material.ClassPackage,
+                    material.ClassName,
+                    outerIndex,
+                    material.ObjectName,
+                    false,
+                    asset);
+                patchedSlots++;
+            }
+
+            patchedSlots += PatchCookedRawModelLocalMaterialPackageImports(asset, uassetPath, material);
+
+            try
+            {
+                asset.Write(uassetPath);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Material patch skipped: не удалось записать {Path.GetFileName(uassetPath)} ({ex.Message})");
+            }
+        }
+
+        return patchedSlots;
+    }
+
+    private static bool IsMeshAssetForMaterialPatch(UAsset asset)
+    {
+        return asset.Exports.OfType<NormalExport>().Any(export =>
+            TryResolveImportObjectName(asset, export.ClassIndex, out var exportClassName)
+            && (exportClassName.Equals("StaticMesh", StringComparison.OrdinalIgnoreCase)
+                || exportClassName.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static bool IsSkeletalMeshExport(UAsset asset, NormalExport export)
+    {
+        try
+        {
+            var className = export.GetExportClassType().Value.ToString();
+            if (className.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        catch
+        {
+            // Fall back to the import table below.
+        }
+
+        return TryResolveImportObjectName(asset, export.ClassIndex, out var exportClassName)
+            && exportClassName.Equals("SkeletalMesh", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int PatchCookedRawModelLocalMaterialPackageImports(
+        UAsset asset,
+        string uassetPath,
+        RawModelExternalMaterialReference material)
+    {
+        if (string.IsNullOrWhiteSpace(material.PackagePath)
+            || !TryBuildGamePackagePathFromCookedContentFile(uassetPath, out var currentPackagePath))
+        {
+            return 0;
+        }
+
+        var slashIndex = currentPackagePath.LastIndexOf('/');
+        if (slashIndex <= 0)
+        {
+            return 0;
+        }
+
+        var localPackagePrefix = currentPackagePath[..(slashIndex + 1)];
+        var patched = 0;
+        for (var i = 0; i < asset.Imports.Count; i++)
+        {
+            var import = asset.Imports[i];
+            var className = import.ClassName?.ToString() ?? string.Empty;
+            var objectName = import.ObjectName?.ToString() ?? string.Empty;
+            if (!className.Equals("Package", StringComparison.OrdinalIgnoreCase)
+                || !objectName.StartsWith(localPackagePrefix, StringComparison.OrdinalIgnoreCase)
+                || objectName.Equals(currentPackagePath, StringComparison.OrdinalIgnoreCase)
+                || objectName.Equals(material.PackagePath, StringComparison.OrdinalIgnoreCase)
+                || IsLikelyRawModelSupportPackage(objectName))
+            {
+                continue;
+            }
+
+            asset.Imports[i] = new Import(
+                "/Script/CoreUObject",
+                "Package",
+                new FPackageIndex(0),
+                material.PackagePath,
+                false,
+                asset);
+            patched++;
+        }
+
+        return patched;
+    }
+
+    private static bool TryBuildGamePackagePathFromCookedContentFile(string filePath, out string packagePath)
+    {
+        packagePath = string.Empty;
+        var normalized = Path.GetFullPath(filePath).Replace('\\', '/');
+        const string contentMarker = "/SCUM/Content/";
+        var contentIndex = normalized.LastIndexOf(contentMarker, StringComparison.OrdinalIgnoreCase);
+        if (contentIndex < 0 || !normalized.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var relativePath = normalized[(contentIndex + contentMarker.Length)..];
+        var withoutExtension = relativePath[..^".uasset".Length].Trim('/');
+        if (string.IsNullOrWhiteSpace(withoutExtension))
+        {
+            return false;
+        }
+
+        packagePath = "/Game/" + withoutExtension;
+        return true;
+    }
+
+    private static bool IsLikelyRawModelSupportPackage(string packagePath)
+    {
+        var leaf = packagePath[(packagePath.LastIndexOf('/') + 1)..];
+        return leaf.EndsWith("_Skeleton", StringComparison.OrdinalIgnoreCase)
+            || leaf.Contains("Skeleton", StringComparison.OrdinalIgnoreCase)
+            || IsVehicleGlassSupportMaterialObject(leaf)
+            || leaf.StartsWith("SK_", StringComparison.OrdinalIgnoreCase)
+            || leaf.StartsWith("SM_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsVehicleGlassSupportMaterialObject(string objectName)
+    {
+        return !string.IsNullOrWhiteSpace(objectName)
+               && (objectName.Contains("SMSGlass", StringComparison.OrdinalIgnoreCase)
+                   || objectName.Contains("_SMSGlass", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static int PatchCookedRawModelSkeletonReferences(
+        string customTargetRoot,
+        RawModelTargetSkeletonReference skeleton,
+        List<string> warnings)
+    {
+        if (!Directory.Exists(customTargetRoot)
+            || string.IsNullOrWhiteSpace(skeleton.PackagePath)
+            || string.IsNullOrWhiteSpace(skeleton.ObjectName))
+        {
+            return 0;
+        }
+
+        var patched = 0;
+        foreach (var uassetPath in Directory.EnumerateFiles(customTargetRoot, "*.uasset", SearchOption.AllDirectories))
+        {
+            UAsset asset;
+            try
+            {
+                asset = new UAsset(uassetPath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Skeleton patch skipped: не удалось прочитать {Path.GetFileName(uassetPath)} ({ex.Message})");
+                continue;
+            }
+
+            if (!asset.Exports.OfType<NormalExport>().Any(export =>
+                    IsSkeletalMeshExport(asset, export)))
+            {
+                continue;
+            }
+
+            var packageImportIndex = EnsureImport(
+                asset,
+                "/Script/CoreUObject",
+                "Package",
+                new FPackageIndex(0),
+                skeleton.PackagePath);
+            var skeletonImportIndex = EnsureImport(
+                asset,
+                "/Script/Engine",
+                "Skeleton",
+                new FPackageIndex(-(packageImportIndex + 1)),
+                skeleton.ObjectName);
+            var skeletonReference = new FPackageIndex(-(skeletonImportIndex + 1));
+            var changed = false;
+
+            foreach (var export in asset.Exports.OfType<NormalExport>())
+            {
+                if (!IsSkeletalMeshExport(asset, export))
+                {
+                    continue;
+                }
+
+                var skeletonProperty = EnsureTopLevelObjectProperty(asset, export, "Skeleton");
+                skeletonProperty.Value = skeletonReference;
+                patched++;
+                changed = true;
+            }
+
+            if (!changed)
+            {
+                continue;
+            }
+
+            try
+            {
+                asset.Write(uassetPath);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Skeleton patch skipped: не удалось записать {Path.GetFileName(uassetPath)} ({ex.Message})");
+            }
+        }
+
+        return patched;
+    }
+
+    private static int PatchCookedRawModelPhysicsAssetReferences(
+        string customTargetRoot,
+        RawModelTargetPhysicsAssetReference physicsAsset,
+        List<string> warnings)
+    {
+        if (!Directory.Exists(customTargetRoot)
+            || string.IsNullOrWhiteSpace(physicsAsset.PackagePath)
+            || string.IsNullOrWhiteSpace(physicsAsset.ObjectName))
+        {
+            return 0;
+        }
+
+        var patched = 0;
+        foreach (var uassetPath in Directory.EnumerateFiles(customTargetRoot, "*.uasset", SearchOption.AllDirectories))
+        {
+            UAsset asset;
+            try
+            {
+                asset = new UAsset(uassetPath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"PhysicsAsset patch skipped: не удалось прочитать {Path.GetFileName(uassetPath)} ({ex.Message})");
+                continue;
+            }
+
+            if (!asset.Exports.OfType<NormalExport>().Any(export => IsSkeletalMeshExport(asset, export)))
+            {
+                continue;
+            }
+
+            var packageImportIndex = EnsureImport(
+                asset,
+                "/Script/CoreUObject",
+                "Package",
+                new FPackageIndex(0),
+                physicsAsset.PackagePath);
+            var physicsImportIndex = EnsureImport(
+                asset,
+                "/Script/Engine",
+                "PhysicsAsset",
+                new FPackageIndex(-(packageImportIndex + 1)),
+                physicsAsset.ObjectName);
+            var physicsReference = new FPackageIndex(-(physicsImportIndex + 1));
+            var changed = false;
+
+            foreach (var export in asset.Exports.OfType<NormalExport>())
+            {
+                if (!IsSkeletalMeshExport(asset, export))
+                {
+                    continue;
+                }
+
+                var physicsProperty = EnsureTopLevelObjectProperty(asset, export, "PhysicsAsset");
+                physicsProperty.Value = physicsReference;
+                patched++;
+                changed = true;
+            }
+
+            if (!changed)
+            {
+                continue;
+            }
+
+            try
+            {
+                asset.Write(uassetPath);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"PhysicsAsset patch skipped: не удалось записать {Path.GetFileName(uassetPath)} ({ex.Message})");
+            }
+        }
+
+        return patched;
+    }
+
+    private static List<string> CopyCookedRawModelFiles(
+        string projectRoot,
+        string projectName,
+        string assetName,
+        string customTargetRoot,
+        List<string> warnings)
+    {
+        var cookedRoot = Path.Combine(projectRoot, "Saved", "Cooked", "WindowsNoEditor");
+        var expectedContentRoot = Path.Combine(
+            cookedRoot,
+            projectName,
+            "Content",
+            "SMS",
+            "R",
+            assetName);
+
+        var sourceRoot = Directory.Exists(expectedContentRoot)
+            ? expectedContentRoot
+            : Directory.Exists(cookedRoot)
+                ? Directory.EnumerateDirectories(cookedRoot, assetName, SearchOption.AllDirectories).FirstOrDefault()
+                : null;
+
+        if (string.IsNullOrWhiteSpace(sourceRoot) || !Directory.Exists(sourceRoot))
+        {
+            warnings.Add("UE4 cook output folder for imported model was not found.");
+            return [];
+        }
+
+        var copied = new List<string>();
+        foreach (var sourceFile in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+        {
+            var extension = Path.GetExtension(sourceFile);
+            if (!IsAllowedCustomVisualUploadExtension(extension))
+            {
+                continue;
+            }
+
+            var relative = Path.GetRelativePath(sourceRoot, sourceFile);
+            var destination = Path.GetFullPath(Path.Combine(customTargetRoot, relative));
+            if (!IsPathInsideDirectory(destination, customTargetRoot))
+            {
+                warnings.Add($"Cooked-файл пропущен из-за небезопасного пути: {relative}");
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? customTargetRoot);
+            File.Copy(sourceFile, destination, overwrite: true);
+            copied.Add(destination);
+        }
+
+        return copied;
+    }
+
+    private static string? MergeProcessTail(ProcessRunResult? result)
+    {
+        if (result is null)
+        {
+            return null;
+        }
+
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(result.StdErrTail))
+        {
+            parts.Add(result.StdErrTail);
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.StdOutTail))
+        {
+            parts.Add(result.StdOutTail);
+        }
+
+        return parts.Count == 0 ? null : string.Join(Environment.NewLine, parts);
     }
 
     private List<CustomVisualAssetInfo> BuildCustomVisualAssetCatalog()
@@ -2744,9 +10945,1405 @@ internal sealed class StudioRuntime
     {
         return extension.Equals(".fbx", StringComparison.OrdinalIgnoreCase)
                || extension.Equals(".glb", StringComparison.OrdinalIgnoreCase)
-               || extension.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".dae", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".stl", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".ply", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".obj", StringComparison.OrdinalIgnoreCase)
+                || extension.Equals(".blend", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRawModelArchiveExtension(string extension)
+    {
+        return extension.Equals(".zip", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".rar", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".7z", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRawModelSidecarUploadExtension(string extension)
+    {
+        return extension.Equals(".png", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".jpg", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".jpeg", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".tga", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".bmp", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".tif", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".tiff", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".exr", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".hdr", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".dds", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".mtl", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".bin", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".wav", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".ogg", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".mp3", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".flac", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool TryGetBlendRawModelAnalysis(string sourcePath, out BlendRawModelAnalysis analysis)
+    {
+        return TryGetBlenderRawModelAnalysis(sourcePath, Path.GetExtension(sourcePath), out analysis);
+    }
+
+    private bool TryGetBlenderRawModelAnalysis(string sourcePath, string extension, out BlendRawModelAnalysis analysis)
+    {
+        analysis = null!;
+        if (!IsBlenderRawModelAnalysisExtension(extension))
+        {
+            return false;
+        }
+
+        try
+        {
+            var info = new FileInfo(sourcePath);
+            if (!info.Exists)
+            {
+                return false;
+            }
+
+            var cacheKey = $"{extension.ToLowerInvariant()}|{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+            if (_blendRawModelAnalysisCache.TryGetValue(cacheKey, out analysis!))
+            {
+                return true;
+            }
+
+            var blenderPath = FindBlenderExecutablePath();
+            if (string.IsNullOrWhiteSpace(blenderPath) || !File.Exists(blenderPath))
+            {
+                return false;
+            }
+
+            var scratchRoot = Path.Combine(Path.GetTempPath(), "ScumPakWizard", "raw-model-analysis", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(scratchRoot);
+            try
+            {
+                var scriptPath = Path.Combine(scratchRoot, "scum_mod_studio_raw_model_analysis.py");
+                File.WriteAllText(scriptPath, BuildBlendRawModelAnalysisScript(sourcePath), Encoding.UTF8);
+
+                const string prefix = "SCUM_MOD_STUDIO_BLEND_ANALYSIS ";
+                var capturedAnalysisLines = new List<string>();
+                var result = ProcessRunner.Run(
+                    blenderPath,
+                    $"--background --python {QuoteCommandArgument(scriptPath)}",
+                    scratchRoot,
+                    line =>
+                    {
+                        if (line.StartsWith(prefix, StringComparison.Ordinal))
+                        {
+                            capturedAnalysisLines.Add(line);
+                        }
+                    },
+                    timeoutMs: 2 * 60 * 1000);
+
+                if (result.ExitCode != 0)
+                {
+                    return false;
+                }
+
+                var analysisLine = capturedAnalysisLines.LastOrDefault();
+                if (string.IsNullOrWhiteSpace(analysisLine))
+                {
+                    analysisLine = (result.StdOutTail ?? string.Empty)
+                        .Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries)
+                        .LastOrDefault(line => line.StartsWith(prefix, StringComparison.Ordinal));
+                }
+
+                if (string.IsNullOrWhiteSpace(analysisLine))
+                {
+                    return false;
+                }
+
+                var json = analysisLine[prefix.Length..].Trim();
+                if (!TryParseBlendRawModelAnalysis(json, out analysis))
+                {
+                    return false;
+                }
+
+                _blendRawModelAnalysisCache[cacheKey] = analysis;
+                return true;
+            }
+            finally
+            {
+                TryDeleteDirectory(scratchRoot);
+            }
+        }
+        catch
+        {
+            analysis = null!;
+            return false;
+        }
+    }
+
+    private static bool IsBlenderRawModelAnalysisExtension(string extension)
+    {
+        return extension.Equals(".blend", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".fbx", StringComparison.OrdinalIgnoreCase)
                || extension.Equals(".obj", StringComparison.OrdinalIgnoreCase)
-               || extension.Equals(".blend", StringComparison.OrdinalIgnoreCase);
+               || extension.Equals(".glb", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".dae", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".stl", StringComparison.OrdinalIgnoreCase)
+               || extension.Equals(".ply", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildBlendRawModelAnalysisScript(string sourcePath)
+    {
+        return """
+import bpy
+import json
+import math
+import os
+
+source_file = __SOURCE_FILE__
+ext = os.path.splitext(source_file)[1].lower()
+
+def clean_float(value):
+    try:
+        value = float(value)
+        if math.isfinite(value):
+            return value
+    except Exception:
+        pass
+    return 0.0
+
+def build_bounds(points):
+    if not points:
+        return None
+    xs = [clean_float(p[0]) for p in points]
+    ys = [clean_float(p[1]) for p in points]
+    zs = [clean_float(p[2]) for p in points]
+    mn = [min(xs), min(ys), min(zs)]
+    mx = [max(xs), max(ys), max(zs)]
+    return {
+        "min": mn,
+        "max": mx,
+        "size": [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]],
+    }
+
+def merge_bounds(bounds_items):
+    points = []
+    for item in bounds_items:
+        if not item:
+            continue
+        mn = item.get("min") or [0.0, 0.0, 0.0]
+        mx = item.get("max") or [0.0, 0.0, 0.0]
+        points.append(mn)
+        points.append(mx)
+    return build_bounds(points)
+
+def material_names(obj):
+    result = []
+    try:
+        for slot in obj.material_slots:
+            material = getattr(slot, "material", None)
+            if material and material.name:
+                result.append(str(material.name))
+    except Exception:
+        pass
+    return result
+
+def semantic_text(parts, armature_bone_names, all_materials):
+    values = []
+    for part in parts:
+        values.append(part.get("name", ""))
+        values.extend(part.get("materials", []))
+    values.extend(armature_bone_names)
+    values.extend(all_materials)
+    return " ".join(str(value).lower() for value in values)
+
+def humanoid_score(parts, armature_bone_names, all_materials):
+    text = semantic_text(parts, armature_bone_names, all_materials)
+    token_groups = [
+        ("head", "face", "hair", "eye", "neck"),
+        ("spine", "pelvis", "hips", "torso", "chest"),
+        ("arm", "forearm", "hand", "finger", "shoulder", "clavicle"),
+        ("leg", "thigh", "calf", "foot", "toe"),
+        ("body", "skin", "jacket", "shirt", "pants", "sneaker", "shoe", "boot", "fabric"),
+        ("helmet", "armor", "armour", "vest", "belt", "glove", "gauntlet"),
+    ]
+    score = 0
+    for group in token_groups:
+        if any(token in text for token in group):
+            score += 2
+    if len(armature_bone_names) >= 12:
+        score += 3
+    if len(parts) >= 2:
+        score += 1
+    return score
+
+def import_source_file(filepath):
+    if ext == ".blend":
+        bpy.ops.wm.open_mainfile(filepath=filepath)
+        return
+
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete()
+
+    if ext == ".fbx":
+        bpy.ops.import_scene.fbx(filepath=filepath)
+    elif ext == ".obj":
+        if hasattr(bpy.ops.wm, "obj_import"):
+            bpy.ops.wm.obj_import(filepath=filepath)
+        else:
+            bpy.ops.import_scene.obj(filepath=filepath)
+    elif ext in [".glb", ".gltf"]:
+        bpy.ops.import_scene.gltf(filepath=filepath)
+    elif ext == ".dae":
+        bpy.ops.wm.collada_import(filepath=filepath)
+    elif ext == ".stl":
+        if hasattr(bpy.ops.wm, "stl_import"):
+            bpy.ops.wm.stl_import(filepath=filepath)
+        else:
+            bpy.ops.import_mesh.stl(filepath=filepath)
+    elif ext == ".ply":
+        if hasattr(bpy.ops.wm, "ply_import"):
+            bpy.ops.wm.ply_import(filepath=filepath)
+        else:
+            bpy.ops.import_mesh.ply(filepath=filepath)
+    else:
+        raise RuntimeError("Unsupported model format for analysis: " + ext)
+
+import_source_file(source_file)
+depsgraph = bpy.context.evaluated_depsgraph_get()
+
+parts = []
+all_bounds = []
+all_materials = set()
+for obj in list(bpy.context.scene.objects):
+    if getattr(obj, "type", "") != "MESH":
+        continue
+    mesh = None
+    vertices = 0
+    triangles = 0
+    points = []
+    try:
+        evaluated = obj.evaluated_get(depsgraph)
+        mesh = evaluated.to_mesh()
+        vertices = len(mesh.vertices)
+        triangles = sum(max(1, len(poly.vertices) - 2) for poly in mesh.polygons)
+        matrix = evaluated.matrix_world
+        for vertex in mesh.vertices:
+            point = matrix @ vertex.co
+            points.append((point.x, point.y, point.z))
+    except Exception:
+        points = []
+    finally:
+        try:
+            if mesh is not None:
+                evaluated.to_mesh_clear()
+        except Exception:
+            pass
+
+    bounds = build_bounds(points)
+    if not bounds:
+        continue
+    mats = material_names(obj)
+    for material in mats:
+        all_materials.add(material)
+    part = {
+        "name": str(obj.name or "Mesh"),
+        "vertices": int(vertices),
+        "triangles": int(triangles),
+        "bounds": bounds,
+        "materials": mats,
+    }
+    parts.append(part)
+    all_bounds.append(bounds)
+
+armature_bone_names = []
+armature_count = 0
+for obj in list(bpy.context.scene.objects):
+    if getattr(obj, "type", "") != "ARMATURE":
+        continue
+    armature_count += 1
+    try:
+        for bone in obj.data.bones:
+            armature_bone_names.append(str(bone.name))
+    except Exception:
+        pass
+
+parts.sort(key=lambda item: (item.get("triangles", 0), max(item.get("bounds", {}).get("size", [0, 0, 0]))), reverse=True)
+result = {
+    "bounds": merge_bounds(all_bounds),
+    "parts": parts[:120],
+    "armatureCount": armature_count,
+    "boneCount": len(set(armature_bone_names)),
+    "materialCount": len(all_materials),
+    "humanoidScore": humanoid_score(parts, armature_bone_names, all_materials),
+}
+
+print("SCUM_MOD_STUDIO_BLEND_ANALYSIS " + json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+""".Replace("__SOURCE_FILE__", PythonStringLiteral(sourcePath), StringComparison.Ordinal);
+    }
+
+    private static bool TryParseBlendRawModelAnalysis(string json, out BlendRawModelAnalysis analysis)
+    {
+        analysis = null!;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("bounds", out var boundsNode)
+                || !TryReadBlendBounds(boundsNode, out var bounds))
+            {
+                return false;
+            }
+
+            var parts = new List<StudioRawModelPartDto>();
+            if (root.TryGetProperty("parts", out var partsNode)
+                && partsNode.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var partNode in partsNode.EnumerateArray())
+                {
+                    var name = partNode.TryGetProperty("name", out var nameNode)
+                        ? nameNode.GetString() ?? "Mesh"
+                        : "Mesh";
+                    var vertices = partNode.TryGetProperty("vertices", out var verticesNode)
+                                   && verticesNode.TryGetInt32(out var parsedVertices)
+                        ? parsedVertices
+                        : 0;
+                    var triangles = partNode.TryGetProperty("triangles", out var trianglesNode)
+                                    && trianglesNode.TryGetInt32(out var parsedTriangles)
+                        ? parsedTriangles
+                        : 0;
+                    if (!partNode.TryGetProperty("bounds", out var partBoundsNode)
+                        || !TryReadBlendBounds(partBoundsNode, out var partBounds))
+                    {
+                        continue;
+                    }
+
+                    var semanticName = name;
+                    if (partNode.TryGetProperty("materials", out var materialsNode)
+                        && materialsNode.ValueKind == JsonValueKind.Array)
+                    {
+                        var materialNames = materialsNode
+                            .EnumerateArray()
+                            .Select(node => node.GetString())
+                            .Where(value => !string.IsNullOrWhiteSpace(value))
+                            .ToList();
+                        if (materialNames.Count > 0)
+                        {
+                            semanticName = $"{semanticName} {string.Join(' ', materialNames)}";
+                        }
+                    }
+
+                    var role = ClassifyRawModelPartRole(semanticName, partBounds, vertices, triangles);
+                    parts.Add(new StudioRawModelPartDto(
+                        name,
+                        role,
+                        vertices,
+                        triangles,
+                        partBounds,
+                        BuildRawModelPartRecommendation(role, partBounds, vertices, triangles)));
+                }
+            }
+
+            var armatureCount = ReadJsonInt(root, "armatureCount");
+            var boneCount = ReadJsonInt(root, "boneCount");
+            var materialCount = ReadJsonInt(root, "materialCount");
+            var humanoidScore = ReadJsonInt(root, "humanoidScore");
+            analysis = new BlendRawModelAnalysis(
+                bounds,
+                parts
+                    .OrderByDescending(part => part.Triangles)
+                    .ThenByDescending(part => Math.Max(part.Bounds.SizeX, Math.Max(part.Bounds.SizeY, part.Bounds.SizeZ)))
+                    .Take(120)
+                    .ToList(),
+                armatureCount,
+                boneCount,
+                materialCount,
+                humanoidScore);
+            return true;
+        }
+        catch
+        {
+            analysis = null!;
+            return false;
+        }
+    }
+
+    private static int ReadJsonInt(JsonElement root, string propertyName)
+    {
+        return root.TryGetProperty(propertyName, out var node)
+               && node.TryGetInt32(out var value)
+            ? value
+            : 0;
+    }
+
+    private static bool TryReadBlendBounds(JsonElement node, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        if (node.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (!node.TryGetProperty("min", out var minNode)
+            || !node.TryGetProperty("max", out var maxNode)
+            || !TryReadJsonVector3(minNode, out var min)
+            || !TryReadJsonVector3(maxNode, out var max))
+        {
+            return false;
+        }
+
+        bounds = new StudioModelBoundsDto(
+            min[0],
+            min[1],
+            min[2],
+            max[0],
+            max[1],
+            max[2],
+            max[0] - min[0],
+            max[1] - min[1],
+            max[2] - min[2]);
+        return true;
+    }
+
+    private static bool TryReadJsonVector3(JsonElement node, out double[] value)
+    {
+        value = [0d, 0d, 0d];
+        if (node.ValueKind != JsonValueKind.Array || node.GetArrayLength() < 3)
+        {
+            return false;
+        }
+
+        var index = 0;
+        foreach (var item in node.EnumerateArray())
+        {
+            if (index >= 3)
+            {
+                break;
+            }
+
+            if (!item.TryGetDouble(out value[index]))
+            {
+                return false;
+            }
+
+            index++;
+        }
+
+        return index == 3;
+    }
+
+    private bool TryAnalyzeRawModelBounds(string sourcePath, string extension, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        try
+        {
+            if (TryGetBlenderRawModelAnalysis(sourcePath, extension, out var blenderAnalysis))
+            {
+                bounds = blenderAnalysis.Bounds;
+                return true;
+            }
+
+            if (extension.Equals(".obj", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryAnalyzeObjBounds(sourcePath, out bounds);
+            }
+
+            if (extension.Equals(".gltf", StringComparison.OrdinalIgnoreCase))
+            {
+                var root = JsonNode.Parse(File.ReadAllText(sourcePath));
+                return TryAnalyzeGltfBounds(root, out bounds);
+            }
+
+            if (extension.Equals(".glb", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryAnalyzeGlbBounds(sourcePath, out bounds);
+            }
+
+            if (extension.Equals(".fbx", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryAnalyzeAsciiFbxBounds(sourcePath, out bounds);
+            }
+
+            if (extension.Equals(".dae", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryAnalyzeColladaBounds(sourcePath, out bounds);
+            }
+
+            if (extension.Equals(".stl", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryAnalyzeStlBounds(sourcePath, out bounds);
+            }
+
+            if (extension.Equals(".ply", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryAnalyzeAsciiPlyBounds(sourcePath, out bounds);
+            }
+        }
+        catch
+        {
+            bounds = null!;
+        }
+
+        return false;
+    }
+
+    private bool TryAnalyzeRawModelParts(string sourcePath, string extension, out List<StudioRawModelPartDto> parts)
+    {
+        parts = [];
+        try
+        {
+            if (TryGetBlenderRawModelAnalysis(sourcePath, extension, out var blenderAnalysis))
+            {
+                parts = blenderAnalysis.Parts;
+                return parts.Count > 0;
+            }
+
+            if (extension.Equals(".dae", StringComparison.OrdinalIgnoreCase))
+            {
+                return TryAnalyzeColladaParts(sourcePath, out parts);
+            }
+        }
+        catch
+        {
+            parts = [];
+        }
+
+        return false;
+    }
+
+    private static bool TryAnalyzeColladaBounds(string sourcePath, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        var info = new FileInfo(sourcePath);
+        if (!info.Exists || info.Length > 256L * 1024L * 1024L)
+        {
+            return false;
+        }
+
+        var doc = XDocument.Load(sourcePath, LoadOptions.None);
+        var accumulator = new ModelBoundsAccumulator();
+        foreach (var floatArray in doc
+                     .Descendants()
+                     .Where(element => element.Name.LocalName.Equals("float_array", StringComparison.OrdinalIgnoreCase)))
+        {
+            var id = ((string?)floatArray.Attribute("id")
+                      ?? (string?)floatArray.Attribute("name")
+                      ?? string.Empty).ToLowerInvariant();
+            if (!id.Contains("position", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var numberMatches = Regex.Matches(
+                floatArray.Value,
+                @"[-+]?(?:\d+\.\d+|\d+|\.\d+)(?:[eE][-+]?\d+)?",
+                RegexOptions.CultureInvariant);
+            for (var i = 0; i + 2 < numberMatches.Count; i += 3)
+            {
+                if (double.TryParse(numberMatches[i].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+                    && double.TryParse(numberMatches[i + 1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+                    && double.TryParse(numberMatches[i + 2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+                {
+                    accumulator.Add(x, y, z);
+                }
+            }
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static bool TryAnalyzeColladaParts(string sourcePath, out List<StudioRawModelPartDto> parts)
+    {
+        parts = [];
+        var info = new FileInfo(sourcePath);
+        if (!info.Exists || info.Length > 256L * 1024L * 1024L)
+        {
+            return false;
+        }
+
+        var doc = XDocument.Load(sourcePath, LoadOptions.None);
+        var geometryNodeNames = BuildColladaGeometryNodeNames(doc);
+        foreach (var geometry in doc
+                     .Descendants()
+                     .Where(element => element.Name.LocalName.Equals("geometry", StringComparison.OrdinalIgnoreCase)))
+        {
+            var geometryId = ((string?)geometry.Attribute("id") ?? string.Empty).Trim();
+            var name = (geometryNodeNames.TryGetValue(geometryId, out var nodeName)
+                        ? nodeName
+                        : (string?)geometry.Attribute("name")
+                          ?? geometryId
+                        ?? "geometry").Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                name = "geometry";
+            }
+
+            var accumulator = new ModelBoundsAccumulator();
+            var vertices = 0;
+            foreach (var floatArray in geometry
+                         .Descendants()
+                         .Where(element => element.Name.LocalName.Equals("float_array", StringComparison.OrdinalIgnoreCase)))
+            {
+                var id = ((string?)floatArray.Attribute("id")
+                          ?? (string?)floatArray.Attribute("name")
+                          ?? string.Empty).ToLowerInvariant();
+                if (!id.Contains("position", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var numberMatches = Regex.Matches(
+                    floatArray.Value,
+                    @"[-+]?(?:\d+\.\d+|\d+|\.\d+)(?:[eE][-+]?\d+)?",
+                    RegexOptions.CultureInvariant);
+                vertices = Math.Max(vertices, numberMatches.Count / 3);
+                for (var i = 0; i + 2 < numberMatches.Count; i += 3)
+                {
+                    if (double.TryParse(numberMatches[i].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+                        && double.TryParse(numberMatches[i + 1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+                        && double.TryParse(numberMatches[i + 2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+                    {
+                        accumulator.Add(x, y, z);
+                    }
+                }
+            }
+
+            if (!accumulator.TryBuild(out var bounds))
+            {
+                continue;
+            }
+
+            var triangles = EstimateColladaGeometryTriangles(geometry);
+            var role = ClassifyRawModelPartRole(name, bounds, vertices, triangles);
+            parts.Add(new StudioRawModelPartDto(
+                name,
+                role,
+                vertices,
+                triangles,
+                bounds,
+                BuildRawModelPartRecommendation(role, bounds, vertices, triangles)));
+        }
+
+        parts = parts
+            .OrderByDescending(part => part.Triangles)
+            .ThenByDescending(part => Math.Max(part.Bounds.SizeX, Math.Max(part.Bounds.SizeY, part.Bounds.SizeZ)))
+            .Take(80)
+            .ToList();
+        return parts.Count > 0;
+    }
+
+    private static Dictionary<string, string> BuildColladaGeometryNodeNames(XDocument doc)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var node in doc
+                     .Descendants()
+                     .Where(element => element.Name.LocalName.Equals("node", StringComparison.OrdinalIgnoreCase)))
+        {
+            var nodeName = ((string?)node.Attribute("name")
+                            ?? (string?)node.Attribute("id")
+                            ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(nodeName))
+            {
+                continue;
+            }
+
+            foreach (var instance in node
+                         .Descendants()
+                         .Where(element => element.Name.LocalName.Equals("instance_geometry", StringComparison.OrdinalIgnoreCase)))
+            {
+                var url = ((string?)instance.Attribute("url") ?? string.Empty).Trim();
+                if (url.StartsWith("#", StringComparison.Ordinal))
+                {
+                    url = url[1..];
+                }
+
+                if (!string.IsNullOrWhiteSpace(url) && !result.ContainsKey(url))
+                {
+                    result[url] = nodeName;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static int EstimateColladaGeometryTriangles(XElement geometry)
+    {
+        var total = 0;
+        foreach (var primitive in geometry.Descendants())
+        {
+            var localName = primitive.Name.LocalName;
+            if (!localName.Equals("triangles", StringComparison.OrdinalIgnoreCase)
+                && !localName.Equals("polylist", StringComparison.OrdinalIgnoreCase)
+                && !localName.Equals("polygons", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (int.TryParse(
+                    (string?)primitive.Attribute("count"),
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var count)
+                && count > 0)
+            {
+                total += localName.Equals("triangles", StringComparison.OrdinalIgnoreCase)
+                    ? count
+                    : count * 2;
+                continue;
+            }
+
+            var indexCount = primitive
+                .Elements()
+                .Where(element => element.Name.LocalName.Equals("p", StringComparison.OrdinalIgnoreCase))
+                .SelectMany(element => Regex.Matches(
+                        element.Value,
+                        @"[-+]?\d+",
+                        RegexOptions.CultureInvariant)
+                    .Cast<Match>())
+                .Count();
+            if (indexCount > 0)
+            {
+                total += Math.Max(1, indexCount / 9);
+            }
+        }
+
+        return total;
+    }
+
+    private static string ClassifyRawModelPartRole(
+        string name,
+        StudioModelBoundsDto bounds,
+        int vertices,
+        int triangles)
+    {
+        var normalized = name.ToLowerInvariant();
+        var compact = Regex.Replace(normalized, @"[^a-z0-9]+", string.Empty);
+        var tokens = Regex
+            .Split(normalized, @"[^a-z0-9]+")
+            .Where(token => !string.IsNullOrWhiteSpace(token))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool HasToken(string token) => tokens.Contains(token);
+
+        if (normalized.Contains("collision", StringComparison.Ordinal)
+            || normalized.Contains("query", StringComparison.Ordinal)
+            || normalized.Contains("proxy", StringComparison.Ordinal)
+            || normalized.Contains("ucx", StringComparison.Ordinal)
+            || normalized.Contains("simple", StringComparison.Ordinal))
+        {
+            return "query-proxy";
+        }
+
+        if (normalized.Contains("helmet", StringComparison.Ordinal)
+            || normalized.Contains("headwear", StringComparison.Ordinal)
+            || normalized.Contains("head_armor", StringComparison.Ordinal)
+            || compact.Contains("headarmor", StringComparison.Ordinal))
+        {
+            return "armor-helmet";
+        }
+
+        if (HasToken("av")
+            || normalized.Contains("armor vest", StringComparison.Ordinal)
+            || normalized.Contains("armour vest", StringComparison.Ordinal)
+            || normalized.Contains("body armor", StringComparison.Ordinal)
+            || normalized.Contains("body armour", StringComparison.Ordinal)
+            || normalized.Contains("chest armor", StringComparison.Ordinal)
+            || normalized.Contains("chest armour", StringComparison.Ordinal)
+            || compact.Contains("bodyarmor", StringComparison.Ordinal)
+            || compact.Contains("armoredvest", StringComparison.Ordinal)
+            || compact.Contains("armouredvest", StringComparison.Ordinal))
+        {
+            return "armor-vest";
+        }
+
+        if (normalized.Contains("belt", StringComparison.Ordinal)
+            || normalized.Contains("waist", StringComparison.Ordinal))
+        {
+            return "armor-belt";
+        }
+
+        if (compact.StartsWith("aarmor", StringComparison.Ordinal)
+            || normalized.Contains("arm armor", StringComparison.Ordinal)
+            || normalized.Contains("arm armour", StringComparison.Ordinal)
+            || normalized.Contains("shoulder", StringComparison.Ordinal)
+            || normalized.Contains("forearm", StringComparison.Ordinal)
+            || normalized.Contains("bracer", StringComparison.Ordinal)
+            || normalized.Contains("elbow", StringComparison.Ordinal))
+        {
+            return "armor-arms";
+        }
+
+        if (compact.StartsWith("larmor", StringComparison.Ordinal)
+            || normalized.Contains("leg armor", StringComparison.Ordinal)
+            || normalized.Contains("leg armour", StringComparison.Ordinal)
+            || normalized.Contains("thigh", StringComparison.Ordinal)
+            || normalized.Contains("knee", StringComparison.Ordinal)
+            || normalized.Contains("shin", StringComparison.Ordinal))
+        {
+            return "armor-legs";
+        }
+
+        if (normalized.Contains("glove", StringComparison.Ordinal)
+            || normalized.Contains("gauntlet", StringComparison.Ordinal))
+        {
+            return "armor-hands";
+        }
+
+        if (normalized.Contains("boot", StringComparison.Ordinal)
+            || normalized.Contains("shoe", StringComparison.Ordinal))
+        {
+            return "armor-boots";
+        }
+
+        if (normalized.Contains("armor", StringComparison.Ordinal)
+            || normalized.Contains("armour", StringComparison.Ordinal))
+        {
+            return "armor-detail";
+        }
+
+        var hasHumanoidContext =
+            normalized.Contains("human", StringComparison.Ordinal)
+            || normalized.Contains("character", StringComparison.Ordinal)
+            || normalized.Contains("npc", StringComparison.Ordinal)
+            || normalized.Contains("person", StringComparison.Ordinal)
+            || normalized.Contains("pilot", StringComparison.Ordinal)
+            || normalized.Contains("skin", StringComparison.Ordinal)
+            || normalized.Contains("jacket", StringComparison.Ordinal)
+            || normalized.Contains("shirt", StringComparison.Ordinal)
+            || normalized.Contains("pants", StringComparison.Ordinal)
+            || normalized.Contains("sneaker", StringComparison.Ordinal)
+            || normalized.Contains("shoe", StringComparison.Ordinal)
+            || normalized.Contains("boot", StringComparison.Ordinal)
+            || normalized.Contains("fabric", StringComparison.Ordinal);
+
+        if (normalized.Contains("head", StringComparison.Ordinal)
+            || normalized.Contains("face", StringComparison.Ordinal)
+            || normalized.Contains("hair", StringComparison.Ordinal)
+            || normalized.Contains("eye", StringComparison.Ordinal)
+            || normalized.Contains("neck", StringComparison.Ordinal))
+        {
+            return "humanoid-head";
+        }
+
+        if (normalized.Contains("jacket", StringComparison.Ordinal)
+            || normalized.Contains("shirt", StringComparison.Ordinal)
+            || normalized.Contains("pants", StringComparison.Ordinal)
+            || normalized.Contains("fabric", StringComparison.Ordinal)
+            || normalized.Contains("sneaker", StringComparison.Ordinal)
+            || normalized.Contains("shoe", StringComparison.Ordinal)
+            || normalized.Contains("boot", StringComparison.Ordinal)
+            || normalized.Contains("glove", StringComparison.Ordinal))
+        {
+            return "humanoid-clothing";
+        }
+
+        if (hasHumanoidContext
+            && (normalized.Contains("body", StringComparison.Ordinal)
+                || normalized.Contains("torso", StringComparison.Ordinal)
+                || normalized.Contains("skin", StringComparison.Ordinal)
+                || normalized.Contains("arm", StringComparison.Ordinal)
+                || normalized.Contains("hand", StringComparison.Ordinal)
+                || normalized.Contains("leg", StringComparison.Ordinal)
+                || normalized.Contains("foot", StringComparison.Ordinal)
+                || normalized.Contains("pelvis", StringComparison.Ordinal)
+                || normalized.Contains("spine", StringComparison.Ordinal)
+                || normalized.Contains("hips", StringComparison.Ordinal)))
+        {
+            return "humanoid-body";
+        }
+
+        if (normalized.Contains("weapon", StringComparison.Ordinal)
+            || normalized.Contains("gun", StringComparison.Ordinal)
+            || normalized.Contains("bolter", StringComparison.Ordinal)
+            || normalized.Contains("turret", StringComparison.Ordinal)
+            || normalized.Contains("missile", StringComparison.Ordinal)
+            || normalized.Contains("rocket", StringComparison.Ordinal))
+        {
+            return "weapon";
+        }
+
+        if (normalized.Contains("engine", StringComparison.Ordinal)
+            || normalized.Contains("eng", StringComparison.Ordinal)
+            || normalized.Contains("prop", StringComparison.Ordinal)
+            || normalized.Contains("rotor", StringComparison.Ordinal)
+            || normalized.Contains("cylinder", StringComparison.Ordinal)
+            || normalized.Contains("nacelle", StringComparison.Ordinal))
+        {
+            return "engine";
+        }
+
+        if (normalized.Contains("interior", StringComparison.Ordinal)
+            || normalized.Contains("seat", StringComparison.Ordinal)
+            || normalized.Contains("cockpit", StringComparison.Ordinal)
+            || normalized.Contains("cabin", StringComparison.Ordinal))
+        {
+            return "seat-interior";
+        }
+
+        if (normalized.Contains("wing", StringComparison.Ordinal)
+            || normalized.Contains("aileron", StringComparison.Ordinal)
+            || normalized.Contains("airfoil", StringComparison.Ordinal)
+            || (bounds.SizeX > bounds.SizeY * 2.5 && bounds.SizeX > bounds.SizeZ * 2.0))
+        {
+            return "wing";
+        }
+
+        if (normalized.Contains("tail", StringComparison.Ordinal)
+            || normalized.Contains("rudder", StringComparison.Ordinal)
+            || normalized.Contains("stabilizer", StringComparison.Ordinal)
+            || normalized.Contains("elevator", StringComparison.Ordinal))
+        {
+            return "tail-control";
+        }
+
+        if (normalized.Contains("wheel", StringComparison.Ordinal)
+            || normalized.Contains("leg", StringComparison.Ordinal)
+            || normalized.Contains("gear", StringComparison.Ordinal)
+            || normalized.Contains("skid", StringComparison.Ordinal))
+        {
+            return "landing-gear";
+        }
+
+        if (normalized.Contains("hull", StringComparison.Ordinal)
+            || normalized.Contains("body", StringComparison.Ordinal)
+            || normalized.Contains("fuselage", StringComparison.Ordinal)
+            || normalized.Contains("dec", StringComparison.Ordinal)
+            || triangles > 5000
+            || vertices > 5000)
+        {
+            return "hull";
+        }
+
+        return "detail";
+    }
+
+    private static string BuildRawModelPartRecommendation(
+        string role,
+        StudioModelBoundsDto bounds,
+        int vertices,
+        int triangles)
+    {
+        var longest = Math.Max(bounds.SizeX, Math.Max(bounds.SizeY, bounds.SizeZ));
+        var sizeText = $"{bounds.SizeX:0.#}/{bounds.SizeY:0.#}/{bounds.SizeZ:0.#}";
+        var complexityText = triangles > 0
+            ? $"{triangles:N0} tris"
+            : $"{vertices:N0} verts";
+        return role switch
+        {
+            "armor-helmet" => $"Шлем/головной слот. Подгонять под UpperHeadSocket, оставлять запас вокруг головы и не трогать внутренний HeadWear component. {complexityText}, XYZ {sizeText}.",
+            "armor-vest" => $"Бронежилет/торс. Лучше вести как worn visual для male/female тела или как часть комплекта брони; нужен clearance поверх груди/плеч и отдельные материалы. {complexityText}, XYZ {sizeText}.",
+            "armor-arms" => $"Защита рук/плеч. Можно объединять с бронежилетом или маппить в слот куртки/рукавов; проверять локти, кисти и clipping при анимации. {complexityText}.",
+            "armor-legs" => $"Защита ног. Кандидат для слота pants/boots или нижней части брони; нужна проверка коленей, бедра и походки. {complexityText}, XYZ {sizeText}.",
+            "armor-belt" => $"Пояс/талия. Обычно лучше объединять с бронежилетом или pants-слотом, если в игре нет отдельного безопасного worn поля. XYZ {sizeText}.",
+            "armor-hands" => $"Перчатки/кисти. Нужен glove/hands слот или объединение с рукавами; важно не ломать hand bones и хват оружия. {complexityText}.",
+            "armor-boots" => $"Ботинки/ступни. Нужен boots/shoes слот и проверка foot/toe bones, иначе лучше объединить с нижней бронёй. {complexityText}.",
+            "armor-detail" => $"Деталь брони. Программа может оставить её частью ближайшего worn visual или вынести в отдельный модуль после выбора игрового слота. {complexityText}, XYZ {sizeText}.",
+            "humanoid-body" => $"Кандидат на тело NPC/персонажа. Нужен SkeletalMesh под SCUM skeleton, skin weights, physics asset и проверка clearance по голове/одежде. {complexityText}, XYZ {sizeText}.",
+            "humanoid-head" => $"Голова/лицо персонажа. Для NPC нельзя ставить как простой StaticMesh: нужны head/neck bones, morph/face материалы и совпадение с UpperHead/neck сокетами. XYZ {sizeText}.",
+            "humanoid-clothing" => $"Слой одежды/экипировки персонажа. Можно объединять с телом NPC или делать worn visual, но требуется запас поверх skin, material slots и проверка clipping. {complexityText}.",
+            "query-proxy" => $"Можно использовать как базу QueryMesh/Collision proxy после упрощения. Размер XYZ {sizeText}.",
+            "weapon" => $"Кандидат на weapon mount модуль, не смешивать с chassis. Проверить сокеты s_Weapon_Left/s_Weapon_Right. {complexityText}.",
+            "engine" => $"Кандидат на engine/propeller/VTOL nacelle модуль. Для Duster нужен отдельный propeller/rotor visual и безопасный material slot 0. Размер {longest:0.#}.",
+            "seat-interior" => $"Кандидат на перенос мест посадки. Проверить будущие s_Driver/s_Passenger и camera/mount offsets. Размер XYZ {sizeText}.",
+            "wing" => $"Кандидат на wing/airfoil attachment. Для самолёта важно сохранить аэродинамические body/surface связи, а не заменять всё одним mesh. {complexityText}.",
+            "tail-control" => $"Кандидат на rudder/stabilizer/elevator attachment. Нужны отдельные sockets и collision/query proxy.",
+            "landing-gear" => $"Кандидат на legs/wheels/skids attachment. Не заменять wheels без проверки physics и damage region.",
+            "hull" => $"Кандидат на chassis/root visual. Нужно уменьшить полигоны/LOD и оставить игровые cooked материалы. {complexityText}, XYZ {sizeText}.",
+            _ => $"Деталь модели. Можно объединить с ближайшим hull/engine модулем после проверки размера XYZ {sizeText}."
+        };
+    }
+
+    private static bool TryAnalyzeStlBounds(string sourcePath, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        var info = new FileInfo(sourcePath);
+        if (!info.Exists || info.Length < 15 || info.Length > 512L * 1024L * 1024L)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (TryAnalyzeAsciiStlBounds(sourcePath, out bounds))
+            {
+                return true;
+            }
+        }
+        catch
+        {
+            bounds = null!;
+        }
+
+        var bytes = File.ReadAllBytes(sourcePath);
+        if (bytes.Length < 84)
+        {
+            return false;
+        }
+
+        var triangleCount = BitConverter.ToUInt32(bytes, 80);
+        var expectedLength = 84L + triangleCount * 50L;
+        if (expectedLength > bytes.Length)
+        {
+            return false;
+        }
+
+        var accumulator = new ModelBoundsAccumulator();
+        var offset = 84;
+        for (var triangle = 0; triangle < triangleCount; triangle++)
+        {
+            var vertexOffset = offset + 12;
+            for (var vertex = 0; vertex < 3; vertex++)
+            {
+                var x = BitConverter.ToSingle(bytes, vertexOffset);
+                var y = BitConverter.ToSingle(bytes, vertexOffset + 4);
+                var z = BitConverter.ToSingle(bytes, vertexOffset + 8);
+                accumulator.Add(x, y, z);
+                vertexOffset += 12;
+            }
+
+            offset += 50;
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static bool TryAnalyzeAsciiStlBounds(string sourcePath, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        var accumulator = new ModelBoundsAccumulator();
+        var sawSolid = false;
+        foreach (var line in File.ReadLines(sourcePath))
+        {
+            var trimmed = line.Trim();
+            if (!sawSolid)
+            {
+                if (!trimmed.StartsWith("solid", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                sawSolid = true;
+                continue;
+            }
+
+            if (!trimmed.StartsWith("vertex ", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var parts = trimmed["vertex ".Length..].Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 3
+                && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+                && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+                && double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+            {
+                accumulator.Add(x, y, z);
+            }
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static bool TryAnalyzeAsciiPlyBounds(string sourcePath, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        using var reader = new StreamReader(sourcePath, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        if (!string.Equals(reader.ReadLine()?.Trim(), "ply", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var vertexCount = 0;
+        var isAscii = false;
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Equals("format ascii 1.0", StringComparison.OrdinalIgnoreCase))
+            {
+                isAscii = true;
+            }
+            else if (trimmed.StartsWith("element vertex ", StringComparison.OrdinalIgnoreCase))
+            {
+                _ = int.TryParse(trimmed["element vertex ".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out vertexCount);
+            }
+            else if (trimmed.Equals("end_header", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+        }
+
+        if (!isAscii || vertexCount <= 0)
+        {
+            return false;
+        }
+
+        var accumulator = new ModelBoundsAccumulator();
+        for (var i = 0; i < vertexCount && (line = reader.ReadLine()) is not null; i++)
+        {
+            var parts = line.Trim().Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 3
+                && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+                && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+                && double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+            {
+                accumulator.Add(x, y, z);
+            }
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static bool TryAnalyzeObjBounds(string sourcePath, out StudioModelBoundsDto bounds)
+    {
+        var accumulator = new ModelBoundsAccumulator();
+        foreach (var line in File.ReadLines(sourcePath))
+        {
+            var trimmed = line.TrimStart();
+            if (!trimmed.StartsWith("v ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var parts = trimmed[2..].Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 3
+                || !double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+                || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+                || !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+            {
+                continue;
+            }
+
+            accumulator.Add(x, y, z);
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static bool TryAnalyzeGlbBounds(string sourcePath, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        var bytes = File.ReadAllBytes(sourcePath);
+        if (bytes.Length < 20
+            || Encoding.ASCII.GetString(bytes, 0, 4) != "glTF")
+        {
+            return false;
+        }
+
+        var offset = 12;
+        while (offset + 8 <= bytes.Length)
+        {
+            var chunkLength = BitConverter.ToInt32(bytes, offset);
+            var chunkType = BitConverter.ToUInt32(bytes, offset + 4);
+            offset += 8;
+            if (chunkLength < 0 || offset + chunkLength > bytes.Length)
+            {
+                return false;
+            }
+
+            if (chunkType == 0x4E4F534A)
+            {
+                var json = Encoding.UTF8.GetString(bytes, offset, chunkLength).TrimEnd('\0', ' ');
+                var root = JsonNode.Parse(json);
+                return TryAnalyzeGltfBounds(root, out bounds);
+            }
+
+            offset += chunkLength;
+        }
+
+        return false;
+    }
+
+    private static bool TryAnalyzeGltfBounds(JsonNode? root, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        var accessors = root?["accessors"] as JsonArray;
+        if (accessors is null)
+        {
+            return false;
+        }
+
+        var positionAccessorIndices = new HashSet<int>();
+        if (root?["meshes"] is JsonArray meshes)
+        {
+            foreach (var meshNode in meshes)
+            {
+                if (meshNode?["primitives"] is not JsonArray primitives)
+                {
+                    continue;
+                }
+
+                foreach (var primitive in primitives)
+                {
+                    var positionIndex = primitive?["attributes"]?["POSITION"]?.GetValue<int?>();
+                    if (positionIndex is int index)
+                    {
+                        positionAccessorIndices.Add(index);
+                    }
+                }
+            }
+        }
+
+        if (positionAccessorIndices.Count == 0)
+        {
+            for (var i = 0; i < accessors.Count; i++)
+            {
+                if (accessors[i]?["type"]?.GetValue<string>()?.Equals("VEC3", StringComparison.OrdinalIgnoreCase) == true
+                    && accessors[i]?["min"] is JsonArray
+                    && accessors[i]?["max"] is JsonArray)
+                {
+                    positionAccessorIndices.Add(i);
+                }
+            }
+        }
+
+        var accumulator = new ModelBoundsAccumulator();
+        foreach (var index in positionAccessorIndices)
+        {
+            if (index < 0 || index >= accessors.Count)
+            {
+                continue;
+            }
+
+            var accessor = accessors[index];
+            if (accessor?["min"] is not JsonArray minArray
+                || accessor?["max"] is not JsonArray maxArray
+                || minArray.Count < 3
+                || maxArray.Count < 3)
+            {
+                continue;
+            }
+
+            if (TryGetJsonDouble(minArray[0], out var minX)
+                && TryGetJsonDouble(minArray[1], out var minY)
+                && TryGetJsonDouble(minArray[2], out var minZ)
+                && TryGetJsonDouble(maxArray[0], out var maxX)
+                && TryGetJsonDouble(maxArray[1], out var maxY)
+                && TryGetJsonDouble(maxArray[2], out var maxZ))
+            {
+                accumulator.Add(minX, minY, minZ);
+                accumulator.Add(maxX, maxY, maxZ);
+            }
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static bool TryAnalyzeAsciiFbxBounds(string sourcePath, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        var info = new FileInfo(sourcePath);
+        if (!info.Exists || info.Length > 64L * 1024L * 1024L)
+        {
+            return false;
+        }
+
+        var text = File.ReadAllText(sourcePath);
+        if (!text.Contains("Vertices:", StringComparison.Ordinal)
+            || text.IndexOf('\0') >= 0)
+        {
+            return false;
+        }
+
+        var match = Regex.Match(
+            text,
+            @"Vertices:\s*\*\d+\s*\{(?<body>.*?)\}",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        var body = match.Groups["body"].Value;
+        var aIndex = body.IndexOf("a:", StringComparison.OrdinalIgnoreCase);
+        if (aIndex >= 0)
+        {
+            body = body[(aIndex + 2)..];
+        }
+
+        var numberMatches = Regex.Matches(
+            body,
+            @"[-+]?(?:\d+\.\d+|\d+|\.\d+)(?:[eE][-+]?\d+)?",
+            RegexOptions.CultureInvariant);
+        var accumulator = new ModelBoundsAccumulator();
+        for (var i = 0; i + 2 < numberMatches.Count; i += 3)
+        {
+            if (double.TryParse(numberMatches[i].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+                && double.TryParse(numberMatches[i + 1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+                && double.TryParse(numberMatches[i + 2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+            {
+                accumulator.Add(x, y, z);
+            }
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static bool TryGetJsonDouble(JsonNode? node, out double value)
+    {
+        value = 0;
+        try
+        {
+            value = node?.GetValue<double>() ?? 0;
+            return node is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private sealed record BlendRawModelAnalysis(
+        StudioModelBoundsDto Bounds,
+        List<StudioRawModelPartDto> Parts,
+        int ArmatureCount,
+        int BoneCount,
+        int MaterialCount,
+        int HumanoidScore);
+
+    private sealed class ModelBoundsAccumulator
+    {
+        private bool _hasValue;
+        private double _minX;
+        private double _minY;
+        private double _minZ;
+        private double _maxX;
+        private double _maxY;
+        private double _maxZ;
+
+        public void Add(double x, double y, double z)
+        {
+            if (!_hasValue)
+            {
+                _hasValue = true;
+                _minX = _maxX = x;
+                _minY = _maxY = y;
+                _minZ = _maxZ = z;
+                return;
+            }
+
+            _minX = Math.Min(_minX, x);
+            _minY = Math.Min(_minY, y);
+            _minZ = Math.Min(_minZ, z);
+            _maxX = Math.Max(_maxX, x);
+            _maxY = Math.Max(_maxY, y);
+            _maxZ = Math.Max(_maxZ, z);
+        }
+
+        public bool TryBuild(out StudioModelBoundsDto bounds)
+        {
+            bounds = null!;
+            if (!_hasValue)
+            {
+                return false;
+            }
+
+            bounds = new StudioModelBoundsDto(
+                _minX,
+                _minY,
+                _minZ,
+                _maxX,
+                _maxY,
+                _maxZ,
+                _maxX - _minX,
+                _maxY - _minY,
+                _maxZ - _minZ);
+            return true;
+        }
     }
 
     private static bool IsPathInsideDirectory(string path, string directory)
@@ -2778,9 +12375,7 @@ internal sealed class StudioRuntime
 
         var kind = ResolveCustomVisualAssetKind(targetRelativePath);
         var className = ResolveCustomVisualAssetClassName(kind, targetRelativePath);
-        if ((string.IsNullOrWhiteSpace(kind) || string.IsNullOrWhiteSpace(className))
-            && TryInferCustomVisualAssetIdentity(sourcePath, out var inferredKind, out var inferredClassName)
-            && (string.IsNullOrWhiteSpace(kind) || kind.Equals(inferredKind, StringComparison.OrdinalIgnoreCase)))
+        if (TryInferCustomVisualAssetIdentity(sourcePath, out var inferredKind, out var inferredClassName))
         {
             kind = inferredKind;
             className = inferredClassName;
@@ -2947,6 +12542,20 @@ internal sealed class StudioRuntime
         {
             kind = "skeletal-mesh";
             className = "SkeletalMesh";
+            return true;
+        }
+
+        if (normalized.Equals("Skeleton", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = "supporting-asset";
+            className = "Skeleton";
+            return true;
+        }
+
+        if (normalized.Equals("PhysicsAsset", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = "supporting-asset";
+            className = "PhysicsAsset";
             return true;
         }
 
@@ -3211,9 +12820,12 @@ internal sealed class StudioRuntime
 
         return path.Contains("/materials/", StringComparison.Ordinal)
                || path.Contains("/material/", StringComparison.Ordinal)
+               || path.Contains("/textures/", StringComparison.Ordinal)
+               || path.Contains("/texture/", StringComparison.Ordinal)
                || path.Contains("/skins/", StringComparison.Ordinal)
                || path.Contains("/paint/", StringComparison.Ordinal)
-               || path.Contains("/camouflage/", StringComparison.Ordinal);
+               || path.Contains("/camouflage/", StringComparison.Ordinal)
+               || path.Contains("/models/", StringComparison.Ordinal);
     }
 
     private static bool IsVisualTextureAssetCandidate(string relativePath)
@@ -3559,6 +13171,55 @@ internal sealed class StudioRuntime
                         && stem.EndsWith("encounter", StringComparison.Ordinal));
             },
             assetInfo => PrefixReferenceOptionLabel("Класс события", assetInfo.DisplayName));
+    }
+
+    private List<StudioReferenceOptionDto> BuildEncounterSpawnAmountCurveReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            relativePath =>
+                relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && relativePath.Contains("/encounters/spawn_amount_curves/", StringComparison.OrdinalIgnoreCase),
+            "/Script/Engine",
+            "CurveFloat",
+            assetInfo => PrefixReferenceOptionLabel(
+                "Кривая количества спавна",
+                ResolveEncounterSpawnAmountCurveDisplayName(assetInfo.RelativePath)));
+    }
+
+    private static string ResolveEncounterSpawnAmountCurveDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        if (string.IsNullOrWhiteSpace(stem))
+        {
+            return string.Empty;
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(stem)));
+    }
+
+    private List<StudioReferenceOptionDto> BuildEconomyCurveReferenceOptions()
+    {
+        return BuildGameObjectReferenceOptions(
+            relativePath =>
+                relativePath.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && relativePath.Contains("/economy/", StringComparison.OrdinalIgnoreCase)
+                && Path.GetFileNameWithoutExtension(relativePath).Contains("curve", StringComparison.OrdinalIgnoreCase),
+            "/Script/Engine",
+            "CurveFloat",
+            assetInfo => PrefixReferenceOptionLabel(
+                "Кривая экономики",
+                ResolveEconomyCurveDisplayName(assetInfo.RelativePath)));
+    }
+
+    private static string ResolveEconomyCurveDisplayName(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        if (string.IsNullOrWhiteSpace(stem))
+        {
+            return string.Empty;
+        }
+
+        return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(stem)));
     }
 
     private List<StudioReferenceOptionDto> BuildCargoDropEncounterClassReferenceOptions()
@@ -5317,6 +14978,150 @@ internal sealed class StudioRuntime
             }
         }
 
+        if (normalizedPicker is "encounterspawnamountcurve" or "spawnamountcurve")
+        {
+            if (normalizedTerm.Contains("выс", StringComparison.Ordinal)
+                || normalizedTerm.Contains("high", StringComparison.Ordinal)
+                || normalizedTerm.Contains("htz", StringComparison.Ordinal))
+            {
+                Add("high threat", "htz", "зона высокой угрозы");
+            }
+
+            if (normalizedTerm.Contains("сред", StringComparison.Ordinal)
+                || normalizedTerm.Contains("medium", StringComparison.Ordinal)
+                || normalizedTerm.Contains("mtz", StringComparison.Ordinal))
+            {
+                Add("medium threat", "mtz", "зона средней угрозы");
+            }
+
+            if (normalizedTerm.Contains("низ", StringComparison.Ordinal)
+                || normalizedTerm.Contains("low", StringComparison.Ordinal)
+                || normalizedTerm.Contains("ltz", StringComparison.Ordinal))
+            {
+                Add("low threat", "ltz", "зона низкой угрозы");
+            }
+
+            if (normalizedTerm.Contains("воен", StringComparison.Ordinal)
+                || normalizedTerm.Contains("mil", StringComparison.Ordinal))
+            {
+                Add("military", "военные");
+            }
+
+            if (normalizedTerm.Contains("граж", StringComparison.Ordinal)
+                || normalizedTerm.Contains("civil", StringComparison.Ordinal))
+            {
+                Add("civilian", "гражданские");
+            }
+        }
+
+        if (normalizedPicker is "economycurve" or "economycurvefloat")
+        {
+            if (normalizedTerm.Contains("проч", StringComparison.Ordinal)
+                || normalizedTerm.Contains("dur", StringComparison.Ordinal))
+            {
+                Add("durability", "прочность");
+            }
+
+            if (normalizedTerm.Contains("покуп", StringComparison.Ordinal)
+                || normalizedTerm.Contains("buy", StringComparison.Ordinal)
+                || normalizedTerm.Contains("purchase", StringComparison.Ordinal))
+            {
+                Add("buy", "purchase", "покупка");
+            }
+
+            if (normalizedTerm.Contains("прод", StringComparison.Ordinal)
+                || normalizedTerm.Contains("sell", StringComparison.Ordinal))
+            {
+                Add("sell", "продажа");
+            }
+
+            if (normalizedTerm.Contains("игрок", StringComparison.Ordinal)
+                || normalizedTerm.Contains("player", StringComparison.Ordinal))
+            {
+                Add("player", "player count", "number of players");
+            }
+
+            if (normalizedTerm.Contains("шанс", StringComparison.Ordinal)
+                || normalizedTerm.Contains("chance", StringComparison.Ordinal))
+            {
+                Add("chance", "delta");
+            }
+        }
+
+        if (normalizedPicker is "itemhandscorrections" or "handscorrectionsdata")
+        {
+            if (normalizedTerm.Contains("однор", StringComparison.Ordinal)
+                || normalizedTerm.Contains("1h", StringComparison.Ordinal))
+            {
+                Add("1h", "one hand", "generic 1h");
+            }
+
+            if (normalizedTerm.Contains("двуру", StringComparison.Ordinal)
+                || normalizedTerm.Contains("2h", StringComparison.Ordinal))
+            {
+                Add("2h", "two hand", "generic 2h");
+            }
+
+            if (normalizedTerm.Contains("оруж", StringComparison.Ordinal)
+                || normalizedTerm.Contains("rifle", StringComparison.Ordinal)
+                || normalizedTerm.Contains("pistol", StringComparison.Ordinal))
+            {
+                Add("weapon", "rifle", "pistol");
+            }
+        }
+
+        if (normalizedPicker is "itemfirstpersonanimations" or "firstpersonanimationsdata")
+        {
+            if (normalizedTerm.Contains("однор", StringComparison.Ordinal)
+                || normalizedTerm.Contains("1h", StringComparison.Ordinal))
+            {
+                Add("1h", "one hand", "generic 1h");
+            }
+
+            if (normalizedTerm.Contains("двуру", StringComparison.Ordinal)
+                || normalizedTerm.Contains("2h", StringComparison.Ordinal))
+            {
+                Add("2h", "two hand", "generic 2h");
+            }
+
+            if (normalizedTerm.Contains("еда", StringComparison.Ordinal)
+                || normalizedTerm.Contains("food", StringComparison.Ordinal))
+            {
+                Add("food", "eat", "drink");
+            }
+        }
+
+        if (normalizedPicker is "itemattachmentsocketmounttype" or "attachmentsocketmounttype")
+        {
+            if (normalizedTerm.Contains("рук", StringComparison.Ordinal)
+                || normalizedTerm.Contains("кист", StringComparison.Ordinal)
+                || normalizedTerm.Contains("hand", StringComparison.Ordinal))
+            {
+                Add("hand", "prisoner hand", "рука");
+            }
+
+            if (normalizedTerm.Contains("коб", StringComparison.Ordinal)
+                || normalizedTerm.Contains("holster", StringComparison.Ordinal))
+            {
+                Add("holster", "кобура");
+            }
+
+            if (normalizedTerm.Contains("магаз", StringComparison.Ordinal)
+                || normalizedTerm.Contains("mag", StringComparison.Ordinal))
+            {
+                Add("magazine", "mag", "магазин");
+            }
+
+            if (normalizedTerm.Contains("оруж", StringComparison.Ordinal)
+                || normalizedTerm.Contains("weapon", StringComparison.Ordinal)
+                || normalizedTerm.Contains("rifle", StringComparison.Ordinal)
+                || normalizedTerm.Contains("pistol", StringComparison.Ordinal)
+                || normalizedTerm.Contains("melee", StringComparison.Ordinal))
+            {
+                Add("weapon", "rifle", "pistol", "melee", "оружие");
+            }
+        }
+
         if (normalizedPicker is "craftingingredientasset" or "craftingingredient")
         {
             if (normalizedTerm.Contains("вер", StringComparison.Ordinal)
@@ -5547,6 +15352,3886 @@ internal sealed class StudioRuntime
                 [],
                 warnings);
         }
+    }
+
+    public StudioWeaponContractDto GetWeaponContract(string assetId)
+    {
+        var warnings = new List<string>();
+        if (!TryBuildSelectionFromAssetId(assetId, out var selection))
+        {
+            return new StudioWeaponContractDto(
+                false,
+                "Ассет не найден.",
+                assetId,
+                string.Empty,
+                "Unknown",
+                "unknown",
+                [],
+                [],
+                [],
+                [],
+                ["Ассет не найден."],
+                []);
+        }
+
+        var rootRelativePath = PathUtil.NormalizeRelative(selection.TargetRelativePath);
+        if (!IsWeaponContractPath(rootRelativePath))
+        {
+            warnings.Add("Ассет не похож на оружие. Scanner всё равно построит отчёт, но профиль может быть неполным.");
+        }
+
+        var queue = new Queue<string>();
+        var enqueued = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var assets = new List<StudioWeaponContractAssetDto>();
+        var links = new List<StudioWeaponContractLinkDto>();
+        queue.Enqueue(assetId);
+        enqueued.Add(assetId);
+
+        var deadlineUtc = DateTime.UtcNow.AddSeconds(16);
+        const int maxWeaponAssets = 24;
+        while (queue.Count > 0 && visited.Count < maxWeaponAssets)
+        {
+            var currentAssetId = queue.Dequeue();
+            if (!visited.Add(currentAssetId))
+            {
+                continue;
+            }
+
+            if (DateTime.UtcNow > deadlineUtc)
+            {
+                warnings.Add("Weapon contract scanner остановлен по time budget. Часть связанных ассетов не раскрыта, но первичный контракт уже собран.");
+                break;
+            }
+
+            var reportLimit = visited.Count == 1 ? 3200 : 1100;
+            var report = GetFieldDiscoveryReport(currentAssetId, reportLimit, hiddenOnly: false);
+            foreach (var warning in report.Warnings)
+            {
+                if (!warnings.Contains(warning, StringComparer.OrdinalIgnoreCase))
+                {
+                    warnings.Add(warning);
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(report.RelativePath))
+            {
+                continue;
+            }
+
+            assets.Add(BuildWeaponContractAsset(report));
+
+            foreach (var field in report.Fields)
+            {
+                if (!IsWeaponContractLinkField(field)
+                    || !TryResolveRelativeAssetPathFromGameReference(field.CurrentValue, out var targetRelativePath))
+                {
+                    continue;
+                }
+
+                targetRelativePath = PathUtil.NormalizeRelative(targetRelativePath).ToLowerInvariant();
+                if (!IsWeaponContractTraversableAssetPath(targetRelativePath))
+                {
+                    continue;
+                }
+
+                var targetAssetId = $"game::{targetRelativePath}";
+                links.Add(new StudioWeaponContractLinkDto(
+                    report.AssetId,
+                    targetAssetId,
+                    field.Label,
+                    field.FieldPath,
+                    field.CurrentValue));
+
+                if (enqueued.Count < maxWeaponAssets && enqueued.Add(targetAssetId))
+                {
+                    queue.Enqueue(targetAssetId);
+                }
+            }
+        }
+
+        if (queue.Count > 0)
+        {
+            warnings.Add($"Weapon contract scanner ограничен первыми {maxWeaponAssets} ассетами, чтобы диагностика не зависала на большом дереве зависимостей.");
+        }
+
+        var requiredSockets = assets
+            .SelectMany(asset => asset.RequiredSockets)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var materialReferences = assets
+            .SelectMany(asset => asset.MaterialReferences)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Take(120)
+            .ToList();
+
+        return new StudioWeaponContractDto(
+            true,
+            null,
+            assetId,
+            rootRelativePath,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(rootRelativePath)),
+            ClassifyWeaponContractProfile(rootRelativePath),
+            assets,
+            links,
+            requiredSockets,
+            materialReferences,
+            warnings,
+            BuildWeaponContractRecommendations(rootRelativePath, assets, requiredSockets, materialReferences));
+    }
+
+    public StudioReplacementContractDto GetReplacementContract(string assetId)
+    {
+        var warnings = new List<string>();
+        if (!TryBuildSelectionFromAssetId(assetId, out var selection))
+        {
+            return new StudioReplacementContractDto(
+                false,
+                "Ассет не найден.",
+                assetId,
+                string.Empty,
+                "Unknown",
+                "unknown",
+                "manual",
+                [],
+                [],
+                [],
+                [],
+                [],
+                ["Ассет не найден."],
+                []);
+        }
+
+        var rootRelativePath = PathUtil.NormalizeRelative(selection.TargetRelativePath);
+        var domainKind = ClassifyReplacementContractDomain(rootRelativePath);
+        var queue = new PriorityQueue<string, int>();
+        var enqueued = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var assets = new List<StudioReplacementContractAssetDto>();
+        var links = new List<StudioReplacementContractLinkDto>();
+        queue.Enqueue(assetId, 0);
+        enqueued.Add(assetId);
+
+        var deadlineUtc = DateTime.UtcNow.AddSeconds(18);
+        const int maxAssets = 96;
+        while (queue.Count > 0 && visited.Count < maxAssets)
+        {
+            var currentAssetId = queue.Dequeue();
+            if (!visited.Add(currentAssetId))
+            {
+                continue;
+            }
+
+            if (DateTime.UtcNow > deadlineUtc)
+            {
+                warnings.Add("Replacement contract scanner остановлен по time budget. Первичный контракт собран, часть зависимостей оставлена как ссылки.");
+                break;
+            }
+
+            var isRootAsset = visited.Count == 1;
+            List<StudioReplacementContractFieldDto> linkFields;
+            string fromAssetId;
+            if (!isRootAsset && TryBuildFastReplacementContractAsset(currentAssetId, warnings, out var fastAsset))
+            {
+                assets.Add(fastAsset);
+                linkFields = fastAsset.KeyFields;
+                fromAssetId = fastAsset.AssetId;
+            }
+            else
+            {
+                var report = GetFieldDiscoveryReport(currentAssetId, isRootAsset ? 1800 : 600, hiddenOnly: false);
+                foreach (var warning in report.Warnings)
+                {
+                    if (!warnings.Contains(warning, StringComparer.OrdinalIgnoreCase))
+                    {
+                        warnings.Add(warning);
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(report.RelativePath))
+                {
+                    continue;
+                }
+
+                var reportAsset = BuildReplacementContractAsset(report);
+                assets.Add(reportAsset);
+                linkFields = reportAsset.KeyFields;
+                fromAssetId = report.AssetId;
+            }
+
+            foreach (var field in linkFields)
+            {
+                var kind = field.Kind;
+                if (!IsReplacementContractTraversableKind(kind)
+                    || !TryResolveRelativeAssetPathFromGameReference(field.CurrentValue, out var targetRelativePath))
+                {
+                    continue;
+                }
+
+                targetRelativePath = PathUtil.NormalizeRelative(targetRelativePath).ToLowerInvariant();
+                if (!IsReplacementContractTraversableAssetPath(targetRelativePath))
+                {
+                    continue;
+                }
+
+                var targetAssetId = $"game::{targetRelativePath}";
+                links.Add(new StudioReplacementContractLinkDto(
+                    fromAssetId,
+                    targetAssetId,
+                    field.Label,
+                    field.FieldPath,
+                    field.CurrentValue,
+                    kind));
+
+                if (enqueued.Count < maxAssets && enqueued.Add(targetAssetId))
+                {
+                    queue.Enqueue(targetAssetId, GetReplacementContractTraversalPriority(kind, targetRelativePath));
+                }
+            }
+        }
+
+        if (queue.Count > 0)
+        {
+            warnings.Add($"Replacement contract scanner ограничен первыми {maxAssets} ассетами, чтобы диагностика не зависала на большом дереве.");
+        }
+
+        var requiredSockets = assets
+            .SelectMany(asset => asset.RequiredSockets)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var materialReferences = assets
+            .SelectMany(asset => asset.MaterialReferences)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Take(160)
+            .ToList();
+        var textureReferences = assets
+            .SelectMany(asset => asset.TextureReferences)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Take(160)
+            .ToList();
+
+        return new StudioReplacementContractDto(
+            true,
+            null,
+            assetId,
+            rootRelativePath,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(rootRelativePath)),
+            domainKind,
+            ResolveReplacementContractStrategy(domainKind, assets),
+            assets,
+            links,
+            requiredSockets,
+            materialReferences,
+            textureReferences,
+            warnings,
+            BuildReplacementContractRecommendations(domainKind, rootRelativePath, assets, requiredSockets, materialReferences, textureReferences));
+    }
+
+    private StudioReplacementContractAssetDto BuildReplacementContractAsset(StudioFieldDiscoveryReportDto report)
+    {
+        var keyFields = report.Fields
+            .Where(field => !ClassifyReplacementContractFieldKind(field).Equals("other", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(GetReplacementContractFieldPriority)
+            .ThenBy(field => field.FieldPath, StringComparer.OrdinalIgnoreCase)
+            .Select(field => new StudioReplacementContractFieldDto(
+                field.FieldPath,
+                field.Label,
+                ClassifyReplacementContractFieldKind(field),
+                field.CurrentValue,
+                field.CurrentDisplayValue,
+                field.Exposed,
+                field.Visibility,
+                field.ReferencePickerKind))
+            .Take(220)
+            .ToList();
+
+        var requiredSockets = report.Fields
+            .Where(field => ClassifyReplacementContractFieldKind(field) is "socket" or "attachment")
+            .Select(field => TryExtractRequiredSocketName(field, out var socketName) ? socketName : string.Empty)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var directMaterials = report.Fields
+            .Where(field => ClassifyReplacementContractFieldKind(field) is "material" or "material-override" or "skin-material")
+            .Select(field => field.CurrentValue)
+            .Where(LooksLikeMaterialObjectReference);
+        var inferredMaterials = report.Fields
+            .Where(field => ClassifyReplacementContractFieldKind(field).Equals("mesh", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(field => InferMaterialReferencesFromGameMeshReference(field.CurrentValue))
+            .Where(LooksLikeMaterialObjectReference);
+        var materialReferences = directMaterials
+            .Concat(inferredMaterials)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(100)
+            .ToList();
+        var textureReferences = report.Fields
+            .Where(field => ClassifyReplacementContractFieldKind(field) is "texture" or "icon")
+            .Select(field => field.CurrentValue)
+            .Where(LooksLikeTextureObjectReference)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(100)
+            .ToList();
+
+        var fieldKinds = keyFields
+            .GroupBy(field => field.Kind, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+        var assetWarnings = new List<string>();
+        if (fieldKinds.GetValueOrDefault("mesh") > 0 && materialReferences.Count == 0)
+        {
+            assetWarnings.Add("Mesh найден, но material references не определены из полей/imports: перед заменой проверить material slots cooked mesh.");
+        }
+        if (fieldKinds.GetValueOrDefault("collision") > 0 || fieldKinds.GetValueOrDefault("physics") > 0)
+        {
+            assetWarnings.Add("Есть physics/collision контракт: visual replacement без collision/proxy может выглядеть верно, но ломать попадания, размещение или взаимодействие.");
+        }
+        if (fieldKinds.GetValueOrDefault("skin-material") > 0 || fieldKinds.GetValueOrDefault("material-override") > 0)
+        {
+            assetWarnings.Add("Есть skin/material override слой: он может перекрыть материалы новой модели в runtime.");
+        }
+        if (fieldKinds.GetValueOrDefault("icon") > 0)
+        {
+            assetWarnings.Add("Есть icon/UI поле: иконка предмета не изменится от одной замены mesh.");
+        }
+
+        return new StudioReplacementContractAssetDto(
+            report.AssetId,
+            report.RelativePath,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(report.RelativePath)),
+            ClassifyReplacementContractAssetRole(report.RelativePath),
+            fieldKinds.Where(pair => pair.Key is "mesh" or "visual" or "skeletal-contract").Sum(pair => pair.Value),
+            fieldKinds.GetValueOrDefault("mesh"),
+            fieldKinds.GetValueOrDefault("material") + fieldKinds.GetValueOrDefault("material-override"),
+            fieldKinds.GetValueOrDefault("texture"),
+            fieldKinds.GetValueOrDefault("animation") + fieldKinds.GetValueOrDefault("presentation"),
+            fieldKinds.GetValueOrDefault("physics"),
+            fieldKinds.GetValueOrDefault("collision"),
+            fieldKinds.GetValueOrDefault("socket"),
+            fieldKinds.GetValueOrDefault("attachment"),
+            fieldKinds.GetValueOrDefault("skin") + fieldKinds.GetValueOrDefault("skin-material"),
+            fieldKinds.GetValueOrDefault("icon"),
+            requiredSockets,
+            materialReferences,
+            textureReferences,
+            keyFields,
+            assetWarnings);
+    }
+
+    private bool TryBuildFastReplacementContractAsset(
+        string assetId,
+        List<string> warnings,
+        out StudioReplacementContractAssetDto assetDto)
+    {
+        assetDto = null!;
+        if (!TryBuildSelectionFromAssetId(assetId, out var selection))
+        {
+            return false;
+        }
+
+        var normalized = PathUtil.NormalizeRelative(selection.TargetRelativePath);
+        if (!ShouldUseFastReplacementContractAssetScan(normalized))
+        {
+            return false;
+        }
+
+        var extension = Path.GetExtension(normalized);
+        if (!IsUassetPackageExtension(extension))
+        {
+            return false;
+        }
+
+        var sourceMode = ResolveSourceMode(null, selection.PresetSourcePath is not null);
+        var localWarnings = new List<string>();
+        var sourcePath = ResolveAssetSourcePath(selection, sourceMode, localWarnings, includeCompanions: false);
+        foreach (var warning in localWarnings)
+        {
+            if (!warnings.Contains(warning, StringComparer.OrdinalIgnoreCase))
+            {
+                warnings.Add(warning);
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return false;
+        }
+
+        UAsset asset;
+        try
+        {
+            var flags = CustomSerializationFlags.SkipLoadingExports | CustomSerializationFlags.SkipPreloadDependencyLoading;
+            asset = new UAsset(sourcePath, false, EngineVersion.VER_UE4_27, null, flags);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Fast contract scan skipped: не удалось прочитать imports {Path.GetFileName(normalized)} ({ex.Message})");
+            return false;
+        }
+
+        var keyFields = new List<StudioReplacementContractFieldDto>();
+        for (var i = 0; i < asset.Imports.Count; i++)
+        {
+            var import = asset.Imports[i];
+            if (!TryBuildReplacementImportContractField(asset, import, i, out var field))
+            {
+                continue;
+            }
+
+            keyFields.Add(field);
+        }
+
+        foreach (var softPath in asset.SoftObjectPathList ?? [])
+        {
+            var reference = ExtractSoftObjectReference(softPath);
+            if (!reference.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+                || !reference.Contains('.', StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var kind = ClassifyReplacementReferencePathKind(reference);
+            if (kind.Equals("other", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            keyFields.Add(new StudioReplacementContractFieldDto(
+                $"soft:{keyFields.Count}",
+                $"Soft reference {Path.GetFileNameWithoutExtension(reference)}",
+                kind,
+                reference,
+                ResolveReferenceDisplayValue(reference),
+                true,
+                "dependency",
+                GetReplacementReferencePickerKind(kind)));
+        }
+
+        keyFields = keyFields
+            .GroupBy(field => $"{field.Kind}|{field.CurrentValue}", StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(field => GetReplacementContractFieldPriority(ToDiscoveryCandidate(field)))
+            .ThenBy(field => field.CurrentValue, StringComparer.OrdinalIgnoreCase)
+            .Take(220)
+            .ToList();
+
+        var fieldKinds = keyFields
+            .GroupBy(field => field.Kind, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+        var materialReferences = keyFields
+            .Where(field => field.Kind is "material" or "material-override" or "skin-material")
+            .Select(field => field.CurrentValue)
+            .Where(LooksLikeMaterialObjectReference)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(120)
+            .ToList();
+        var textureReferences = keyFields
+            .Where(field => field.Kind is "texture" or "icon")
+            .Select(field => field.CurrentValue)
+            .Where(value => LooksLikeTextureObjectReference(value) || LooksLikePlainTextureReference(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(120)
+            .ToList();
+        var assetWarnings = new List<string>
+        {
+            "Fast import scan: зависимости взяты из import/soft-path таблиц без тяжёлой загрузки export data."
+        };
+        if (materialReferences.Count > 0)
+        {
+            assetWarnings.Add("MaterialInstance/material dependency найден напрямую в uasset imports; его нужно сохранить или клонировать вместе с texture parameters.");
+        }
+        if (textureReferences.Count > 0 && materialReferences.Count == 0)
+        {
+            assetWarnings.Add("Texture imports найдены без явного material import: проверить, не используется ли внешний master/material instance.");
+        }
+        var materialParameters = ExtractKnownMaterialParameterNamesForContract(sourcePath);
+        if (materialParameters.Count > 0)
+        {
+            assetWarnings.Add($"MaterialInstance параметры: {string.Join(", ", materialParameters)}.");
+        }
+
+        assetDto = new StudioReplacementContractAssetDto(
+            assetId,
+            normalized,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(normalized)),
+            ClassifyReplacementContractAssetRole(normalized),
+            fieldKinds.Where(pair => pair.Key is "mesh" or "visual" or "skeletal-contract").Sum(pair => pair.Value),
+            fieldKinds.GetValueOrDefault("mesh"),
+            fieldKinds.GetValueOrDefault("material") + fieldKinds.GetValueOrDefault("material-override"),
+            fieldKinds.GetValueOrDefault("texture"),
+            fieldKinds.GetValueOrDefault("animation") + fieldKinds.GetValueOrDefault("presentation"),
+            fieldKinds.GetValueOrDefault("physics"),
+            fieldKinds.GetValueOrDefault("collision"),
+            fieldKinds.GetValueOrDefault("socket"),
+            fieldKinds.GetValueOrDefault("attachment"),
+            fieldKinds.GetValueOrDefault("skin") + fieldKinds.GetValueOrDefault("skin-material"),
+            fieldKinds.GetValueOrDefault("icon"),
+            [],
+            materialReferences,
+            textureReferences,
+            keyFields,
+            assetWarnings);
+        return true;
+    }
+
+    private static bool ShouldUseFastReplacementContractAssetScan(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var leaf = Path.GetFileNameWithoutExtension(normalized);
+        return leaf.StartsWith("sk_", StringComparison.Ordinal)
+            || leaf.StartsWith("sm_", StringComparison.Ordinal)
+            || leaf.StartsWith("mi_", StringComparison.Ordinal)
+            || leaf.StartsWith("m_", StringComparison.Ordinal)
+            || leaf.StartsWith("mat_", StringComparison.Ordinal)
+            || leaf.StartsWith("t_", StringComparison.Ordinal)
+            || leaf.StartsWith("tx_", StringComparison.Ordinal)
+            || normalized.Contains("/textures/", StringComparison.Ordinal)
+            || normalized.Contains("/materials/", StringComparison.Ordinal);
+    }
+
+    private static bool TryBuildReplacementImportContractField(
+        UAsset asset,
+        Import import,
+        int importIndex,
+        out StudioReplacementContractFieldDto field)
+    {
+        field = null!;
+        var classPackage = import.ClassPackage?.ToString() ?? string.Empty;
+        var className = import.ClassName?.ToString() ?? string.Empty;
+        var objectName = import.ObjectName?.ToString() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(objectName)
+            || !TryResolvePackageImportPath(asset, import.OuterIndex, out var packagePath))
+        {
+            return false;
+        }
+
+        var objectPath = $"{packagePath}.{objectName}";
+        var kind = ClassifyReplacementImportKind(packagePath, objectName, classPackage, className);
+        if (kind.Equals("other", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var rawValue = BuildImportedObjectReferenceRawValue(packagePath, objectName, classPackage, className);
+        field = new StudioReplacementContractFieldDto(
+            $"import:{importIndex}",
+            $"{ClassifyReplacementImportLabel(kind)} {objectName}",
+            kind,
+            rawValue,
+            ResolveReferenceDisplayValue(objectPath),
+            true,
+            "dependency",
+            GetReplacementReferencePickerKind(kind));
+        return true;
+    }
+
+    private static string ClassifyReplacementImportKind(
+        string packagePath,
+        string objectName,
+        string classPackage,
+        string className)
+    {
+        var path = $"{packagePath}.{objectName}";
+        var lower = path.ToLowerInvariant();
+        var classLower = $"{classPackage}|{className}".ToLowerInvariant();
+
+        if (classLower.Contains("texture", StringComparison.Ordinal)
+            || LooksLikePlainTextureReference(path))
+        {
+            return lower.Contains("ico_", StringComparison.Ordinal) || lower.Contains("icon", StringComparison.Ordinal)
+                ? "icon"
+                : "texture";
+        }
+        if (classLower.Contains("material", StringComparison.Ordinal)
+            || LooksLikePlainMaterialReference(path))
+        {
+            return lower.Contains("skin", StringComparison.Ordinal)
+                ? "skin-material"
+                : "material";
+        }
+        if (classLower.Contains("skeletalmesh", StringComparison.Ordinal)
+            || classLower.Contains("staticmesh", StringComparison.Ordinal)
+            || lower.Contains("/sk_", StringComparison.Ordinal)
+            || lower.Contains("/sm_", StringComparison.Ordinal))
+        {
+            return "mesh";
+        }
+        if (classLower.Contains("physicsasset", StringComparison.Ordinal)
+            || lower.Contains("physicsasset", StringComparison.Ordinal))
+        {
+            return "physics";
+        }
+        if (classLower.Contains("skeleton", StringComparison.Ordinal)
+            || lower.Contains("skeleton", StringComparison.Ordinal))
+        {
+            return "skeletal-contract";
+        }
+        if (lower.Contains("/attachmentsockets/", StringComparison.Ordinal)
+            || lower.Contains("mounttype", StringComparison.Ordinal)
+            || lower.Contains("holster", StringComparison.Ordinal))
+        {
+            return "attachment";
+        }
+        if (lower.Contains("/hands", StringComparison.Ordinal)
+            || lower.Contains("takeinhands", StringComparison.Ordinal)
+            || lower.Contains("grip", StringComparison.Ordinal))
+        {
+            return "presentation";
+        }
+        if (lower.Contains("/itemfirstpersonanimations/", StringComparison.Ordinal)
+            || lower.Contains("firstperson", StringComparison.Ordinal))
+        {
+            return "presentation";
+        }
+        if (lower.Contains("/animations", StringComparison.Ordinal)
+            || lower.Contains("/anims/", StringComparison.Ordinal)
+            || classLower.Contains("anim", StringComparison.Ordinal))
+        {
+            return "animation";
+        }
+        if (lower.Contains("/collision", StringComparison.Ordinal)
+            || lower.Contains("bodysetup", StringComparison.Ordinal)
+            || lower.Contains("navcollision", StringComparison.Ordinal))
+        {
+            return "collision";
+        }
+
+        return ClassifyReplacementReferencePathKind(path);
+    }
+
+    private static string ClassifyReplacementReferencePathKind(string reference)
+    {
+        if (LooksLikePlainTextureReference(reference))
+        {
+            return reference.Contains("ico_", StringComparison.OrdinalIgnoreCase) || reference.Contains("icon", StringComparison.OrdinalIgnoreCase)
+                ? "icon"
+                : "texture";
+        }
+        if (LooksLikePlainMaterialReference(reference))
+        {
+            return reference.Contains("skin", StringComparison.OrdinalIgnoreCase) ? "skin-material" : "material";
+        }
+
+        var normalized = reference.ToLowerInvariant();
+        if (normalized.Contains("/animations/", StringComparison.Ordinal)
+            || normalized.Contains("/anims/", StringComparison.Ordinal))
+        {
+            return "animation";
+        }
+        if (normalized.Contains("/attachmentsockets/", StringComparison.Ordinal)
+            || normalized.Contains("mounttype", StringComparison.Ordinal)
+            || normalized.Contains("holster", StringComparison.Ordinal))
+        {
+            return "attachment";
+        }
+        if (normalized.Contains("firstperson", StringComparison.Ordinal)
+            || normalized.Contains("takeinhands", StringComparison.Ordinal)
+            || normalized.Contains("handscorrections", StringComparison.Ordinal))
+        {
+            return "presentation";
+        }
+
+        return "other";
+    }
+
+    private static string ClassifyReplacementImportLabel(string kind)
+    {
+        return kind switch
+        {
+            "mesh" => "Mesh",
+            "material" or "material-override" or "skin-material" => "Material",
+            "texture" => "Texture",
+            "icon" => "Icon",
+            "physics" => "Physics",
+            "skeletal-contract" => "Skeleton",
+            "attachment" => "Attachment",
+            "presentation" => "Presentation",
+            "animation" => "Animation",
+            "collision" => "Collision",
+            _ => "Dependency"
+        };
+    }
+
+    private static string? GetReplacementReferencePickerKind(string kind)
+    {
+        return kind switch
+        {
+            "mesh" => "visual-static-mesh-object",
+            "material" or "material-override" or "skin-material" => "visual-material-object",
+            "texture" => "visual-texture-object",
+            "icon" => "visual-icon-object",
+            _ => null
+        };
+    }
+
+    private static StudioFieldDiscoveryCandidateDto ToDiscoveryCandidate(StudioReplacementContractFieldDto field)
+    {
+        return new StudioFieldDiscoveryCandidateDto(
+            field.FieldPath,
+            "Fast dependency",
+            field.Label,
+            "Reference",
+            field.CurrentValue,
+            field.CurrentDisplayValue,
+            field.Exposed,
+            field.Visibility,
+            "Dependencies",
+            "Fast import/soft-path dependency discovered without loading full export data.",
+            "reference",
+            field.ReferencePickerKind);
+    }
+
+    private static int GetReplacementContractFieldPriority(StudioFieldDiscoveryCandidateDto field)
+    {
+        return ClassifyReplacementContractFieldKind(field) switch
+        {
+            "mesh" => 0,
+            "visual" => 1,
+            "skeletal-contract" => 2,
+            "presentation" => 3,
+            "animation" => 4,
+            "socket" => 5,
+            "attachment" => 6,
+            "physics" => 7,
+            "collision" => 8,
+            "material-override" => 9,
+            "skin-material" => 10,
+            "material" => 11,
+            "texture" => 12,
+            "skin" => 13,
+            "icon" => 14,
+            _ => 40
+        };
+    }
+
+    private static string ClassifyReplacementContractFieldKind(StudioFieldDiscoveryCandidateDto field)
+    {
+        var picker = (field.ReferencePickerKind ?? string.Empty).ToLowerInvariant();
+        var label = $"{field.Label} {field.SourceLabel}".ToLowerInvariant();
+        var value = field.CurrentValue ?? string.Empty;
+        var valueLower = value.ToLowerInvariant();
+
+        if (label.Contains("icon", StringComparison.Ordinal)
+            || label.Contains("inventory", StringComparison.Ordinal)
+            || label.Contains("vicinity", StringComparison.Ordinal)
+            || valueLower.Contains("/ui/", StringComparison.Ordinal))
+        {
+            return "icon";
+        }
+        if (label.Contains("override materials", StringComparison.Ordinal)
+            || label.Contains("override material", StringComparison.Ordinal))
+        {
+            return "material-override";
+        }
+        if (label.Contains("skin", StringComparison.Ordinal)
+            || label.Contains("durability", StringComparison.Ordinal)
+            || label.Contains("condition", StringComparison.Ordinal)
+            || label.Contains("damage material", StringComparison.Ordinal))
+        {
+            return LooksLikeMaterialObjectReference(value) ? "skin-material" : "skin";
+        }
+        if (LooksLikeMaterialObjectReference(value)
+            || picker.Contains("material", StringComparison.Ordinal)
+            || label.Contains("material", StringComparison.Ordinal))
+        {
+            return "material";
+        }
+        if (LooksLikeTextureObjectReference(value)
+            || picker.Contains("texture", StringComparison.Ordinal)
+            || label.Contains("texture", StringComparison.Ordinal))
+        {
+            return "texture";
+        }
+        if (label.Contains("collision", StringComparison.Ordinal)
+            || label.Contains("query mesh", StringComparison.Ordinal)
+            || label.Contains("nav collision", StringComparison.Ordinal)
+            || label.Contains("body setup", StringComparison.Ordinal))
+        {
+            return "collision";
+        }
+        if (label.Contains("physics", StringComparison.Ordinal)
+            || label.Contains("physicsasset", StringComparison.Ordinal)
+            || label.Contains("skeleton", StringComparison.Ordinal)
+            || label.Contains("fixed skel bounds", StringComparison.Ordinal)
+            || label.Contains("bounds", StringComparison.Ordinal))
+        {
+            return label.Contains("skeleton", StringComparison.Ordinal) ? "skeletal-contract" : "physics";
+        }
+        if (label.Contains("socket", StringComparison.Ordinal)
+            || label.Contains("mount", StringComparison.Ordinal)
+            || label.Contains("holster", StringComparison.Ordinal)
+            || label.Contains("slot", StringComparison.Ordinal))
+        {
+            return label.Contains("slot", StringComparison.Ordinal) || label.Contains("mount", StringComparison.Ordinal)
+                ? "attachment"
+                : "socket";
+        }
+        if (label.Contains("firstperson", StringComparison.Ordinal)
+            || label.Contains("first person", StringComparison.Ordinal)
+            || label.Contains("hands", StringComparison.Ordinal)
+            || label.Contains("takeinhands", StringComparison.Ordinal)
+            || label.Contains("grip", StringComparison.Ordinal)
+            || label.Contains("presentation", StringComparison.Ordinal))
+        {
+            return "presentation";
+        }
+        if (label.Contains("animation", StringComparison.Ordinal)
+            || label.Contains("anim class", StringComparison.Ordinal)
+            || valueLower.Contains("/animations/", StringComparison.Ordinal))
+        {
+            return "animation";
+        }
+        if (picker.Contains("skeletal", StringComparison.Ordinal)
+            || picker.Contains("static", StringComparison.Ordinal)
+            || label.Contains("skeletalmesh", StringComparison.Ordinal)
+            || label.Contains("staticmesh", StringComparison.Ordinal)
+            || label.Contains(" mesh", StringComparison.Ordinal)
+            || label.Contains("model", StringComparison.Ordinal)
+            || value.Contains("|/Script/Engine|SkeletalMesh", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("|/Script/Engine|StaticMesh", StringComparison.OrdinalIgnoreCase))
+        {
+            return "mesh";
+        }
+        if (label.Contains("visual", StringComparison.Ordinal)
+            || label.Contains("appearance", StringComparison.Ordinal)
+            || label.Contains("building", StringComparison.Ordinal)
+            || label.Contains("construction", StringComparison.Ordinal))
+        {
+            return "visual";
+        }
+
+        return "other";
+    }
+
+    private static bool IsReplacementContractTraversableKind(string kind)
+    {
+        return kind is "mesh" or "visual" or "skeletal-contract" or "presentation" or "animation" or "physics" or "collision" or "attachment" or "skin" or "material" or "material-override" or "skin-material";
+    }
+
+    private static bool IsReplacementContractTraversableAssetPath(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var leaf = Path.GetFileNameWithoutExtension(normalized);
+        if (leaf.StartsWith("t_", StringComparison.Ordinal)
+            || leaf.StartsWith("tx_", StringComparison.Ordinal)
+            || leaf.StartsWith("tex_", StringComparison.Ordinal)
+            || leaf.StartsWith("ico_", StringComparison.Ordinal)
+            || leaf.StartsWith("icon_", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (leaf.StartsWith("m_", StringComparison.Ordinal)
+            || leaf.StartsWith("mi_", StringComparison.Ordinal)
+            || leaf.StartsWith("mat_", StringComparison.Ordinal)
+            || leaf.StartsWith("pm_", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return normalized.Contains("/items/", StringComparison.Ordinal)
+            || normalized.Contains("/weapons/", StringComparison.Ordinal)
+            || normalized.Contains("/characters/", StringComparison.Ordinal)
+            || normalized.Contains("/clothes", StringComparison.Ordinal)
+            || normalized.Contains("/armor", StringComparison.Ordinal)
+            || normalized.Contains("/helmet", StringComparison.Ordinal)
+            || normalized.Contains("/build", StringComparison.Ordinal)
+            || normalized.Contains("/construction", StringComparison.Ordinal)
+            || normalized.Contains("/structures/", StringComparison.Ordinal)
+            || normalized.Contains("/vehicles/", StringComparison.Ordinal)
+            || normalized.Contains("/animations/", StringComparison.Ordinal)
+            || normalized.Contains("/data/", StringComparison.Ordinal)
+            || leaf.StartsWith("bp_", StringComparison.Ordinal)
+            || leaf.StartsWith("bpc_", StringComparison.Ordinal)
+            || leaf.StartsWith("da_", StringComparison.Ordinal)
+            || leaf.StartsWith("dt_", StringComparison.Ordinal)
+            || leaf.StartsWith("sk_", StringComparison.Ordinal)
+            || leaf.StartsWith("sm_", StringComparison.Ordinal);
+    }
+
+    private static int GetReplacementContractTraversalPriority(string kind, string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var leaf = Path.GetFileNameWithoutExtension(normalized);
+        if (leaf.StartsWith("sk_", StringComparison.Ordinal)
+            || leaf.StartsWith("sm_", StringComparison.Ordinal)
+            || kind is "mesh" or "visual" or "skeletal-contract")
+        {
+            return 10;
+        }
+
+        if (leaf.StartsWith("mi_", StringComparison.Ordinal)
+            || leaf.StartsWith("m_", StringComparison.Ordinal)
+            || leaf.StartsWith("mat_", StringComparison.Ordinal)
+            || leaf.StartsWith("pm_", StringComparison.Ordinal)
+            || kind is "material" or "material-override" or "skin-material")
+        {
+            return 20;
+        }
+
+        if (kind is "physics" or "collision")
+        {
+            return 30;
+        }
+
+        if (kind is "attachment" or "skin")
+        {
+            return 40;
+        }
+
+        if (kind is "presentation")
+        {
+            return 55;
+        }
+
+        if (kind is "animation")
+        {
+            return 70;
+        }
+
+        return 90;
+    }
+
+    private static string ClassifyReplacementContractDomain(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (normalized.Contains("/items/weapons/", StringComparison.Ordinal)
+            || normalized.Contains("/weapons/", StringComparison.Ordinal))
+        {
+            return "weapon";
+        }
+        if (normalized.Contains("helmet", StringComparison.Ordinal))
+        {
+            return "helmet";
+        }
+        if (normalized.Contains("/clothes", StringComparison.Ordinal)
+            || normalized.Contains("/clothing", StringComparison.Ordinal)
+            || normalized.Contains("/armor", StringComparison.Ordinal)
+            || normalized.Contains("/vest", StringComparison.Ordinal)
+            || normalized.Contains("/backpack", StringComparison.Ordinal))
+        {
+            return "wearable";
+        }
+        if (normalized.Contains("/build", StringComparison.Ordinal)
+            || normalized.Contains("/construction", StringComparison.Ordinal)
+            || normalized.Contains("/structures/", StringComparison.Ordinal)
+            || normalized.Contains("/basebuilding", StringComparison.Ordinal))
+        {
+            return "building";
+        }
+        if (normalized.Contains("/vehicles/", StringComparison.Ordinal)
+            || normalized.Contains("/models/vehicles", StringComparison.Ordinal))
+        {
+            return "vehicle";
+        }
+        if (normalized.Contains("/items/", StringComparison.Ordinal))
+        {
+            return "item";
+        }
+        if (normalized.Contains("/characters/", StringComparison.Ordinal))
+        {
+            return "character";
+        }
+
+        return "world-asset";
+    }
+
+    private static string ClassifyReplacementContractAssetRole(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var leaf = Path.GetFileNameWithoutExtension(normalized);
+        if (leaf.StartsWith("sk_", StringComparison.Ordinal) || leaf.StartsWith("sm_", StringComparison.Ordinal))
+        {
+            return "visual-mesh";
+        }
+        if (leaf.StartsWith("mi_", StringComparison.Ordinal)
+            || leaf.StartsWith("m_", StringComparison.Ordinal)
+            || leaf.StartsWith("mat_", StringComparison.Ordinal)
+            || leaf.StartsWith("pm_", StringComparison.Ordinal))
+        {
+            return "material-contract";
+        }
+        if (leaf.StartsWith("t_", StringComparison.Ordinal)
+            || leaf.StartsWith("tx_", StringComparison.Ordinal)
+            || leaf.StartsWith("tex_", StringComparison.Ordinal)
+            || leaf.StartsWith("ico_", StringComparison.Ordinal)
+            || leaf.StartsWith("icon_", StringComparison.Ordinal))
+        {
+            return "texture";
+        }
+        if (leaf.StartsWith("bp_", StringComparison.Ordinal) || leaf.StartsWith("bpc_", StringComparison.Ordinal))
+        {
+            return "blueprint";
+        }
+        if (leaf.StartsWith("da_", StringComparison.Ordinal) || leaf.StartsWith("dt_", StringComparison.Ordinal))
+        {
+            return "data";
+        }
+
+        return "root";
+    }
+
+    private static string ResolveReplacementContractStrategy(string domainKind, List<StudioReplacementContractAssetDto> assets)
+    {
+        if (domainKind is "weapon")
+        {
+            return "weapon-contract-aware";
+        }
+        if (domainKind is "wearable" or "helmet")
+        {
+            return assets.Any(asset => asset.AnimationFieldCount > 0 || asset.PhysicsFieldCount > 0)
+                ? "wearable-skeletal-contract"
+                : "wearable-visual-contract";
+        }
+        if (domainKind is "building")
+        {
+            return "building-visual-collision-contract";
+        }
+        if (domainKind is "vehicle")
+        {
+            return "vehicle-module-contract";
+        }
+
+        return assets.Any(asset => asset.CollisionFieldCount > 0)
+            ? "visual-plus-collision-contract"
+            : "visual-material-icon-contract";
+    }
+
+    private static List<string> BuildReplacementContractRecommendations(
+        string domainKind,
+        string rootRelativePath,
+        List<StudioReplacementContractAssetDto> assets,
+        List<string> requiredSockets,
+        List<string> materialReferences,
+        List<string> textureReferences)
+    {
+        var recommendations = new List<string>
+        {
+            "Любую замену модели делать по контракту: visual mesh, material/texture dependencies, collision/physics, animation/presentation, sockets/attachments и UI icon проверяются как один набор."
+        };
+
+        if (materialReferences.Count > 0 || textureReferences.Count > 0)
+        {
+            recommendations.Add("Материалы и текстуры нужно не только cook-нуть, но и убедиться, что runtime asset не заменяет их skin/material override слоем.");
+        }
+        if (assets.Any(asset => asset.CollisionFieldCount > 0 || asset.PhysicsFieldCount > 0))
+        {
+            recommendations.Add("Для интерактивных предметов и зданий новая visual-модель должна иметь совместимый collision/query/physics proxy, иначе вид и взаимодействие разойдутся.");
+        }
+        if (requiredSockets.Count > 0)
+        {
+            recommendations.Add($"Сохранить/сымитировать sockets/slots: {string.Join(", ", requiredSockets.Take(12))}.");
+        }
+        if (assets.Any(asset => asset.IconFieldCount > 0))
+        {
+            recommendations.Add("Inventory/vicinity/UI иконки готовятся отдельным pass: mesh replacement сам по себе их не меняет.");
+        }
+
+        switch (domainKind)
+        {
+            case "weapon":
+                recommendations.Add("Оружие требует отдельного first-person/hand/IK контракта; для ranged-оружия проверять ADS center, muzzle, casing eject и fixed bounds.");
+                break;
+            case "wearable":
+            case "helmet":
+                recommendations.Add("Одежда/шлемы требуют совместимости skeleton/skin weights/body slot и материалов повреждения/грязи; простой StaticMesh replacement обычно недостаточен.");
+                break;
+            case "building":
+                recommendations.Add("Здания требуют collision, destruction/damage state, placement footprint, LOD и material slots; нужна отдельная low-poly collision/query геометрия.");
+                break;
+            case "vehicle":
+                recommendations.Add("Транспорт заменяется модульно: root mesh, visual overlay, query proxy, seats/mount slots и attachments не должны сливаться в один монолит.");
+                break;
+            default:
+                if (rootRelativePath.Contains("/items/", StringComparison.OrdinalIgnoreCase))
+                {
+                    recommendations.Add("Для обычных предметов проверять world mesh, inventory/vicinity icon, pickup collision и attachment/slot поля.");
+                }
+
+                break;
+        }
+
+        return recommendations;
+    }
+
+    private static bool LooksLikeTextureObjectReference(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim();
+        if (normalized.StartsWith("object:", StringComparison.OrdinalIgnoreCase))
+        {
+            return normalized.Contains("|/Script/Engine|Texture", StringComparison.OrdinalIgnoreCase)
+                   || normalized.Contains("|/Script/Engine|Texture2D", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!normalized.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || !normalized.Contains('.', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var objectName = normalized[(normalized.LastIndexOf('.') + 1)..];
+        return objectName.StartsWith("T_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("TX_", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("/Textures/", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("/UI/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikePlainTextureReference(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim();
+        if (TryParseImportedObjectReferenceRawValue(normalized, out var objectPath, out _, out _))
+        {
+            normalized = objectPath;
+        }
+
+        if (!normalized.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || !normalized.Contains('.', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var objectName = normalized[(normalized.LastIndexOf('.') + 1)..];
+        return objectName.StartsWith("T_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("TX_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("TEX_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("ICO_", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("/Textures/", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("/UI/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikePlainMaterialReference(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim();
+        if (TryParseImportedObjectReferenceRawValue(normalized, out var objectPath, out _, out _))
+        {
+            normalized = objectPath;
+        }
+
+        if (!normalized.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || !normalized.Contains('.', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var objectName = normalized[(normalized.LastIndexOf('.') + 1)..];
+        return objectName.StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("M_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("MAT_", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("/Materials/", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("/MaterialInstances/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static List<string> ExtractKnownMaterialParameterNamesForContract(string sourcePath)
+    {
+        var leaf = Path.GetFileNameWithoutExtension(sourcePath);
+        var normalizedPath = sourcePath.Replace('\\', '/');
+        if (!leaf.StartsWith("mi_", StringComparison.OrdinalIgnoreCase)
+            && !leaf.StartsWith("m_", StringComparison.OrdinalIgnoreCase)
+            && !leaf.StartsWith("mat_", StringComparison.OrdinalIgnoreCase)
+            && !leaf.StartsWith("pm_", StringComparison.OrdinalIgnoreCase)
+            && !normalizedPath.Contains("/Materials/", StringComparison.OrdinalIgnoreCase)
+            && !normalizedPath.Contains("/MaterialInstances/", StringComparison.OrdinalIgnoreCase))
+        {
+            return [];
+        }
+
+        var probes = new (string Label, string[] Tokens)[]
+        {
+            ("Diffuse/BaseColor", ["Diffuse", "BaseColor", "Base_Color", "Albedo"]),
+            ("Normal", ["Normal", "Normal_DirectX", "NormalDX", "NormalGL"]),
+            ("Roughness", ["Roughness", "Rough"]),
+            ("Metallic", ["Metallic", "Metalness", "Metal"]),
+            ("Specular", ["Specular"]),
+            ("Opacity", ["Opacity", "Alpha"]),
+            ("AO", ["AmbientOcclusion", "Ambient_Occlusion", "Mixed_AO", "AO"]),
+            ("Mask", ["Mask"]),
+            ("Skin", ["Skin"]),
+            ("Dirt/Blood/Wear", ["Dirt", "Blood", "Grunge", "Weather", "Spraypaint"])
+        };
+
+        var companionPaths = new[]
+        {
+            sourcePath,
+            Path.ChangeExtension(sourcePath, ".uexp")
+        };
+        var detected = new List<string>();
+        foreach (var (label, tokens) in probes)
+        {
+            if (companionPaths.Any(path => File.Exists(path) && FileContainsAnyAsciiOrUtf16Token(path, tokens)))
+            {
+                detected.Add(label);
+            }
+        }
+
+        return detected;
+    }
+
+    private static bool FileContainsAnyAsciiOrUtf16Token(string path, IReadOnlyCollection<string> tokens)
+    {
+        byte[] data;
+        try
+        {
+            data = File.ReadAllBytes(path);
+        }
+        catch
+        {
+            return false;
+        }
+
+        foreach (var token in tokens)
+        {
+            if (data.AsSpan().IndexOf(Encoding.ASCII.GetBytes(token)) >= 0
+                || data.AsSpan().IndexOf(Encoding.Unicode.GetBytes(token)) >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private StudioWeaponContractAssetDto BuildWeaponContractAsset(StudioFieldDiscoveryReportDto report)
+    {
+        var keyFields = report.Fields
+            .Where(IsWeaponContractInterestingField)
+            .OrderBy(GetWeaponContractFieldPriority)
+            .ThenBy(field => field.FieldPath, StringComparer.OrdinalIgnoreCase)
+            .Select(field => new StudioWeaponContractFieldDto(
+                field.FieldPath,
+                field.Label,
+                ClassifyWeaponContractFieldKind(field),
+                field.CurrentValue,
+                field.CurrentDisplayValue,
+                field.Exposed,
+                field.Visibility,
+                field.ReferencePickerKind))
+            .Take(180)
+            .ToList();
+
+        var requiredSockets = report.Fields
+            .Where(IsWeaponSocketField)
+            .Select(field => TryExtractRequiredSocketName(field, out var socketName) ? socketName : string.Empty)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var directMaterialReferences = report.Fields
+            .Where(field => ClassifyWeaponContractFieldKind(field) is "material" or "material-override" or "skin-material")
+            .Select(field => field.CurrentValue)
+            .Where(LooksLikeMaterialObjectReference);
+        var inferredMaterialReferences = report.Fields
+            .Where(field => ClassifyWeaponContractFieldKind(field).Equals("mesh", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(field => InferMaterialReferencesFromGameMeshReference(field.CurrentValue))
+            .Where(LooksLikeMaterialObjectReference);
+        var materialReferences = directMaterialReferences
+            .Concat(inferredMaterialReferences)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value.Contains("/Materials/", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .Take(80)
+            .ToList();
+
+        var fieldKinds = keyFields
+            .GroupBy(field => field.Kind, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+        var assetWarnings = new List<string>();
+        if (fieldKinds.GetValueOrDefault("mesh") > 0
+            && fieldKinds.GetValueOrDefault("socket") == 0
+            && fieldKinds.GetValueOrDefault("hands") == 0)
+        {
+            assetWarnings.Add("Visual mesh найден без явных socket/hand fields: для оружия нужна дополнительная проверка skeleton/socket контракта.");
+        }
+        if (fieldKinds.GetValueOrDefault("material-override") > 0
+            || fieldKinds.GetValueOrDefault("skin-material") > 0)
+        {
+            assetWarnings.Add("Найдены material override/skin поля: они могут перекрывать cooked PBR-материал новой модели во время runtime.");
+        }
+        if (fieldKinds.GetValueOrDefault("icon") > 0)
+        {
+            assetWarnings.Add("Найдены inventory/icon поля: визуал в инвентаре останется оригинальным, пока эти ссылки не заменяются отдельно.");
+        }
+        if (fieldKinds.GetValueOrDefault("fixed-bounds") > 0)
+        {
+            assetWarnings.Add("Найден fixed bounds флаг: для custom first-person mesh его нужно проверять, иначе модель может визуально обрезаться.");
+        }
+
+        return new StudioWeaponContractAssetDto(
+            report.AssetId,
+            report.RelativePath,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(report.RelativePath)),
+            ClassifyWeaponContractAssetRole(report.RelativePath),
+            fieldKinds.GetValueOrDefault("mesh"),
+            fieldKinds.GetValueOrDefault("first-person"),
+            fieldKinds.GetValueOrDefault("hands"),
+            fieldKinds.GetValueOrDefault("socket"),
+            fieldKinds.GetValueOrDefault("material") + fieldKinds.GetValueOrDefault("material-override"),
+            fieldKinds.GetValueOrDefault("skin") + fieldKinds.GetValueOrDefault("skin-material"),
+            fieldKinds.GetValueOrDefault("icon"),
+            requiredSockets,
+            materialReferences,
+            keyFields,
+            assetWarnings);
+    }
+
+    private static int GetWeaponContractFieldPriority(StudioFieldDiscoveryCandidateDto field)
+    {
+        return ClassifyWeaponContractFieldKind(field) switch
+        {
+            "mesh" => 0,
+            "fixed-bounds" => 1,
+            "first-person" => 2,
+            "hands" => 3,
+            "socket" => 4,
+            "animation" => 5,
+            "physics" => 6,
+            "material-override" => 7,
+            "skin-material" => 8,
+            "material" => 9,
+            "skin" => 10,
+            "icon" => 11,
+            _ => 30
+        };
+    }
+
+    private static bool IsWeaponContractPath(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        return normalized.Contains("/items/weapons/", StringComparison.Ordinal)
+            || normalized.Contains("/weapons/", StringComparison.Ordinal)
+            || normalized.Contains("/ranged_weapons/", StringComparison.Ordinal)
+            || normalized.Contains("/new_melee/", StringComparison.Ordinal);
+    }
+
+    private static bool IsWeaponContractTraversableAssetPath(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var leaf = Path.GetFileNameWithoutExtension(normalized);
+        if (leaf.StartsWith("t_", StringComparison.Ordinal)
+            || leaf.StartsWith("tx_", StringComparison.Ordinal)
+            || leaf.StartsWith("m_", StringComparison.Ordinal)
+            || leaf.StartsWith("mi_", StringComparison.Ordinal)
+            || leaf.StartsWith("mat_", StringComparison.Ordinal)
+            || leaf.StartsWith("pm_", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return IsWeaponContractPath(normalized)
+            || normalized.Contains("/animations/", StringComparison.Ordinal)
+            || normalized.Contains("/firstperson", StringComparison.Ordinal)
+            || normalized.Contains("/hands", StringComparison.Ordinal)
+            || leaf.StartsWith("da_", StringComparison.Ordinal)
+            || leaf.StartsWith("bp_", StringComparison.Ordinal)
+            || leaf.StartsWith("bpc_", StringComparison.Ordinal)
+            || leaf.StartsWith("sk_", StringComparison.Ordinal)
+            || leaf.StartsWith("sm_", StringComparison.Ordinal);
+    }
+
+    private static bool IsWeaponContractLinkField(StudioFieldDiscoveryCandidateDto field)
+    {
+        if (!TryResolveRelativeAssetPathFromGameReference(field.CurrentValue, out var relativePath))
+        {
+            return false;
+        }
+
+        if (!IsWeaponContractTraversableAssetPath(relativePath))
+        {
+            return false;
+        }
+
+        var kind = ClassifyWeaponContractFieldKind(field);
+        return kind is "mesh" or "first-person" or "hands" or "socket" or "animation" or "physics" or "skin";
+    }
+
+    private static bool IsWeaponContractInterestingField(StudioFieldDiscoveryCandidateDto field)
+    {
+        return !ClassifyWeaponContractFieldKind(field).Equals("other", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWeaponSocketField(StudioFieldDiscoveryCandidateDto field)
+    {
+        var haystack = $"{field.Label} {field.SourceLabel}".ToLowerInvariant();
+        return haystack.Contains("socket", StringComparison.Ordinal)
+            || haystack.Contains("muzzle", StringComparison.Ordinal)
+            || haystack.Contains("lefthandik", StringComparison.Ordinal)
+            || haystack.Contains("supporting hand ik", StringComparison.Ordinal)
+            || haystack.Contains("repositionbone", StringComparison.Ordinal)
+            || haystack.Contains("grip correction", StringComparison.Ordinal)
+            || haystack.Contains("eject casing", StringComparison.Ordinal);
+    }
+
+    private static bool TryExtractRequiredSocketName(StudioFieldDiscoveryCandidateDto field, out string socketName)
+    {
+        socketName = string.Empty;
+        var label = $"{field.Label} {field.SourceLabel}";
+        var fieldPath = field.FieldPath ?? string.Empty;
+        if (IsSocketTransformComponentField(label, fieldPath))
+        {
+            return false;
+        }
+
+        foreach (var candidate in new[] { field.CurrentValue, field.CurrentDisplayValue })
+        {
+            var normalized = (candidate ?? string.Empty).Trim();
+            if (!IsLikelyWeaponSocketName(normalized))
+            {
+                continue;
+            }
+
+            socketName = normalized;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsSocketTransformComponentField(string label, string fieldPath)
+    {
+        var haystack = $"{label} {fieldPath}".ToLowerInvariant();
+        return haystack.Contains("/vc:", StringComparison.Ordinal)
+            || haystack.Contains("/rc:", StringComparison.Ordinal)
+            || haystack.Contains("relative location", StringComparison.Ordinal)
+            || haystack.Contains("relative rotation", StringComparison.Ordinal)
+            || haystack.Contains("location /", StringComparison.Ordinal)
+            || haystack.Contains("rotation /", StringComparison.Ordinal)
+            || haystack.Contains("позиция x", StringComparison.Ordinal)
+            || haystack.Contains("позиция y", StringComparison.Ordinal)
+            || haystack.Contains("позиция z", StringComparison.Ordinal)
+            || haystack.Contains("наклон", StringComparison.Ordinal)
+            || haystack.Contains("крен", StringComparison.Ordinal)
+            || haystack.Contains("разворот", StringComparison.Ordinal)
+            || haystack.Contains("pitch", StringComparison.Ordinal)
+            || haystack.Contains("roll", StringComparison.Ordinal)
+            || haystack.Contains("yaw", StringComparison.Ordinal);
+    }
+
+    private static bool IsLikelyWeaponSocketName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Length > 80
+            || value.Contains('/', StringComparison.Ordinal)
+            || value.Contains('|', StringComparison.Ordinal)
+            || value.Contains(' ', StringComparison.Ordinal)
+            || value.StartsWith("object:", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("class:", StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith("export:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+        {
+            return false;
+        }
+
+        return value.Any(char.IsLetter);
+    }
+
+    private static string ClassifyWeaponContractFieldKind(StudioFieldDiscoveryCandidateDto field)
+    {
+        var picker = (field.ReferencePickerKind ?? string.Empty).ToLowerInvariant();
+        var label = $"{field.Label} {field.SourceLabel}".ToLowerInvariant();
+        var value = field.CurrentValue ?? string.Empty;
+        var valueLower = value.ToLowerInvariant();
+
+        if (label.Contains("override materials", StringComparison.Ordinal)
+            || label.Contains("override material", StringComparison.Ordinal))
+        {
+            return "material-override";
+        }
+        if (label.Contains("fixed skel bounds", StringComparison.Ordinal)
+            || label.Contains("componentusefixedskelbounds", StringComparison.Ordinal)
+            || label.Contains("use fixed", StringComparison.Ordinal) && label.Contains("bounds", StringComparison.Ordinal))
+        {
+            return "fixed-bounds";
+        }
+        if (label.Contains("icon", StringComparison.Ordinal)
+            || label.Contains("inventory", StringComparison.Ordinal)
+            || label.Contains("vicinity", StringComparison.Ordinal)
+            || valueLower.Contains("/ui/", StringComparison.Ordinal))
+        {
+            return "icon";
+        }
+        if (label.Contains("skin", StringComparison.Ordinal)
+            || label.Contains("durability", StringComparison.Ordinal)
+            || label.Contains("condition", StringComparison.Ordinal)
+            || label.Contains("damage material", StringComparison.Ordinal))
+        {
+            return LooksLikeMaterialObjectReference(value) ? "skin-material" : "skin";
+        }
+        if (LooksLikeMaterialObjectReference(value)
+            || picker.Contains("material", StringComparison.Ordinal)
+            || label.Contains("material", StringComparison.Ordinal))
+        {
+            return "material";
+        }
+        if (label.Contains("firstperson", StringComparison.Ordinal)
+            || label.Contains("first person", StringComparison.Ordinal)
+            || label.Contains("fpv", StringComparison.Ordinal)
+            || valueLower.Contains("firstperson", StringComparison.Ordinal)
+            || valueLower.Contains("da_weapon", StringComparison.Ordinal))
+        {
+            return "first-person";
+        }
+        if (label.Contains("hands corrections", StringComparison.Ordinal)
+            || label.Contains("handscorrections", StringComparison.Ordinal)
+            || label.Contains("takeinhands", StringComparison.Ordinal)
+            || label.Contains("take in hands", StringComparison.Ordinal)
+            || label.Contains("supporting hand", StringComparison.Ordinal)
+            || label.Contains("lefthandik", StringComparison.Ordinal)
+            || label.Contains("left hand ik", StringComparison.Ordinal)
+            || label.Contains("grip correction", StringComparison.Ordinal)
+            || label.Contains("repositionbone", StringComparison.Ordinal))
+        {
+            return "hands";
+        }
+        if (IsWeaponSocketField(field))
+        {
+            return "socket";
+        }
+        if (picker.Contains("skeletal", StringComparison.Ordinal)
+            || picker.Contains("static", StringComparison.Ordinal)
+            || label.Contains("skeletalmesh", StringComparison.Ordinal)
+            || label.Contains("staticmesh", StringComparison.Ordinal)
+            || label.Contains(" mesh", StringComparison.Ordinal)
+            || value.Contains("|/Script/Engine|SkeletalMesh", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("|/Script/Engine|StaticMesh", StringComparison.OrdinalIgnoreCase))
+        {
+            return "mesh";
+        }
+        if (label.Contains("animation blueprint", StringComparison.Ordinal)
+            || label.Contains("animationblueprint", StringComparison.Ordinal)
+            || label.Contains("anim class", StringComparison.Ordinal)
+            || label.Contains("animation data", StringComparison.Ordinal)
+            || valueLower.Contains("/animations/", StringComparison.Ordinal))
+        {
+            return "animation";
+        }
+        if (label.Contains("physicsasset", StringComparison.Ordinal)
+            || label.Contains("physics asset", StringComparison.Ordinal)
+            || label.Contains("skeleton", StringComparison.Ordinal))
+        {
+            return "physics";
+        }
+
+        return "other";
+    }
+
+    private static string ClassifyWeaponContractProfile(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (normalized.Contains("/ranged_weapons/", StringComparison.Ordinal)
+            || normalized.Contains("m16", StringComparison.Ordinal)
+            || normalized.Contains("rifle", StringComparison.Ordinal))
+        {
+            return "ranged-rifle";
+        }
+        if (normalized.Contains("/new_melee/", StringComparison.Ordinal)
+            || normalized.Contains("katana", StringComparison.Ordinal)
+            || normalized.Contains("sword", StringComparison.Ordinal))
+        {
+            return "melee-blade";
+        }
+        if (normalized.Contains("handgun", StringComparison.Ordinal)
+            || normalized.Contains("pistol", StringComparison.Ordinal))
+        {
+            return "ranged-handgun";
+        }
+
+        return "weapon";
+    }
+
+    private static string ClassifyWeaponContractAssetRole(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        var leaf = Path.GetFileNameWithoutExtension(normalized);
+        if (leaf.StartsWith("sk_", StringComparison.Ordinal) || leaf.StartsWith("sm_", StringComparison.Ordinal))
+        {
+            return "visual-mesh";
+        }
+        if (leaf.StartsWith("da_", StringComparison.Ordinal)
+            || normalized.Contains("/data/", StringComparison.Ordinal)
+            || normalized.Contains("/animations/", StringComparison.Ordinal))
+        {
+            return "presentation-data";
+        }
+        if (leaf.StartsWith("bp_", StringComparison.Ordinal) || leaf.StartsWith("bpc_", StringComparison.Ordinal))
+        {
+            return "blueprint";
+        }
+
+        return "item-root";
+    }
+
+    private static List<string> BuildWeaponContractRecommendations(
+        string rootRelativePath,
+        List<StudioWeaponContractAssetDto> assets,
+        List<string> requiredSockets,
+        List<string> materialReferences)
+    {
+        var recommendations = new List<string>
+        {
+            "Замену оружия делать как contract-aware pipeline: visual mesh, first-person presentation, hands/IK sockets, material override/skin и inventory icon должны проверяться вместе."
+        };
+
+        if (requiredSockets.Count > 0)
+        {
+            recommendations.Add($"Новая модель/skeleton должна сохранить или сымитировать sockets: {string.Join(", ", requiredSockets.Take(12))}.");
+        }
+        if (assets.Any(asset => asset.FirstPersonFieldCount > 0)
+            || ClassifyWeaponContractProfile(rootRelativePath).StartsWith("ranged", StringComparison.OrdinalIgnoreCase))
+        {
+            recommendations.Add("Для first-person оружия отдельно проверять FirstPersonAnimationsData, GripCorrection/RepositionBone, ADS center и fixed bounds: обычная замена SkeletalMesh не гарантирует правильный вид от первого лица.");
+        }
+        if (assets.Any(asset => asset.MaterialFieldCount > 0 || asset.SkinFieldCount > 0) || materialReferences.Count > 0)
+        {
+            recommendations.Add("Если cooked PBR-текстуры лежат в pak, но модель в игре серая, следующий слой проверки — runtime material override, skin/durability material setup и Dynamic Material Instance поля.");
+        }
+        if (assets.Any(asset => asset.IconFieldCount > 0))
+        {
+            recommendations.Add("Inventory/vicinity иконка не обновится от mesh replacement: для полноценной замены нужен отдельный icon texture/UI reference pass.");
+        }
+        if (ClassifyWeaponContractProfile(rootRelativePath).Equals("melee-blade", StringComparison.OrdinalIgnoreCase))
+        {
+            recommendations.Add("Для melee-blade pivot должен быть в зоне хвата, а blade-направление проверяется не только по габаритам, но и по handle/grip геометрии.");
+        }
+
+        return recommendations;
+    }
+
+    public StudioVehicleProfileDto GetVehicleProfile(string assetId)
+    {
+        var warnings = new List<string>();
+        if (!TryBuildSelectionFromAssetId(assetId, out var selection))
+        {
+            return new StudioVehicleProfileDto(
+                false,
+                "Ассет не найден.",
+                assetId,
+                string.Empty,
+                "Unknown",
+                "unknown",
+                [],
+                [],
+                [],
+                [],
+                ["Ассет не найден."],
+                []);
+        }
+
+        var rootRelativePath = PathUtil.NormalizeRelative(selection.TargetRelativePath);
+        if (!IsVehicleProfilePath(rootRelativePath))
+        {
+            warnings.Add("Ассет не похож на транспортный Blueprint/Attachment. Профиль будет неполным.");
+        }
+
+        var queue = new Queue<string>();
+        var enqueued = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var assets = new List<StudioVehicleProfileAssetDto>();
+        var links = new List<StudioVehicleProfileLinkDto>();
+        queue.Enqueue(assetId);
+        enqueued.Add(assetId);
+
+        foreach (var relatedAssetId in EnumerateVehicleProfileRelatedAssetIds(rootRelativePath).Take(36))
+        {
+            if (enqueued.Add(relatedAssetId))
+            {
+                queue.Enqueue(relatedAssetId);
+                links.Add(new StudioVehicleProfileLinkDto(
+                    assetId,
+                    relatedAssetId,
+                    "Связанный ассет из папки транспорта",
+                    "pak-index",
+                    relatedAssetId));
+            }
+        }
+
+        var deadlineUtc = DateTime.UtcNow.AddSeconds(18);
+        const int maxVehicleAssets = 36;
+        while (queue.Count > 0 && visited.Count < maxVehicleAssets)
+        {
+            var currentAssetId = queue.Dequeue();
+            if (!visited.Add(currentAssetId))
+            {
+                continue;
+            }
+
+            if (DateTime.UtcNow > deadlineUtc)
+            {
+                var deferredAssetIds = new List<string> { currentAssetId };
+                while (queue.Count > 0 && deferredAssetIds.Count + visited.Count < maxVehicleAssets)
+                {
+                    deferredAssetIds.Add(queue.Dequeue());
+                }
+
+                foreach (var deferredAssetId in deferredAssetIds.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    if (assets.Any(asset => asset.AssetId.Equals(deferredAssetId, StringComparison.OrdinalIgnoreCase))
+                        || !TryBuildSelectionFromAssetId(deferredAssetId, out var deferredSelection))
+                    {
+                        continue;
+                    }
+
+                    assets.Add(BuildVehicleProfileAssetFromPath(
+                        deferredAssetId,
+                        deferredSelection.TargetRelativePath,
+                        "Детальный анализ полей пропущен: профиль ограничен по времени, но модуль найден через pak-index."));
+                }
+
+                queue.Clear();
+                warnings.Add("Vehicle profile остановлен по time budget. Все найденные attachment-модули перечислены, но часть полей помечена как отложенная.");
+                break;
+            }
+
+            var reportLimit = visited.Count == 1 ? 3200 : 650;
+            var report = GetFieldDiscoveryReport(currentAssetId, reportLimit, hiddenOnly: false);
+            foreach (var warning in report.Warnings)
+            {
+                if (!warnings.Contains(warning, StringComparer.OrdinalIgnoreCase))
+                {
+                    warnings.Add(warning);
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(report.RelativePath))
+            {
+                continue;
+            }
+
+            var profileAsset = BuildVehicleProfileAsset(report);
+            assets.Add(profileAsset);
+
+            foreach (var field in report.Fields)
+            {
+                if (!IsVehicleProfileLinkField(field)
+                    || !TryResolveRelativeAssetPathFromGameReference(field.CurrentValue, out var targetRelativePath))
+                {
+                    continue;
+                }
+
+                targetRelativePath = PathUtil.NormalizeRelative(targetRelativePath).ToLowerInvariant();
+                if (!IsVehicleProfileTraversableAssetPath(targetRelativePath))
+                {
+                    continue;
+                }
+
+                var targetAssetId = $"game::{targetRelativePath}";
+                links.Add(new StudioVehicleProfileLinkDto(
+                    report.AssetId,
+                    targetAssetId,
+                    field.Label,
+                    field.FieldPath,
+                    field.CurrentValue));
+
+                if (!enqueued.Contains(targetAssetId) && enqueued.Count < maxVehicleAssets)
+                {
+                    queue.Enqueue(targetAssetId);
+                    enqueued.Add(targetAssetId);
+                }
+            }
+        }
+
+        if (queue.Count > 0)
+        {
+            warnings.Add($"Vehicle profile ограничен первыми {maxVehicleAssets} ассетами, чтобы интерфейс не завис на огромном дереве.");
+        }
+
+        var requiredSockets = assets
+            .SelectMany(asset => asset.RequiredSockets)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var materials = assets
+            .SelectMany(asset => asset.MaterialReferences)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Take(80)
+            .ToList();
+
+        var recommendations = BuildVehicleProfileRecommendations(rootRelativePath, assets, requiredSockets, materials);
+        return new StudioVehicleProfileDto(
+            true,
+            null,
+            assetId,
+            rootRelativePath,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(rootRelativePath)),
+            ClassifyVehicleProfileKind(rootRelativePath),
+            assets,
+            links,
+            requiredSockets,
+            materials,
+            warnings,
+            recommendations);
+    }
+
+    public StudioVehicleModulePlanDto GetVehicleModulePlan(string assetId, string rawSourceRelativePath)
+    {
+        var warnings = new List<string>();
+        if (string.IsNullOrWhiteSpace(assetId))
+        {
+            return new StudioVehicleModulePlanDto(
+                false,
+                "Не выбран транспортный ассет.",
+                string.Empty,
+                rawSourceRelativePath ?? string.Empty,
+                "Unknown",
+                "vehicle",
+                null,
+                [],
+                ["Не выбран транспортный ассет."],
+                []);
+        }
+
+        if (string.IsNullOrWhiteSpace(rawSourceRelativePath)
+            || !TryResolveRawModelImportPath(rawSourceRelativePath, out var rawModelPath)
+            || !File.Exists(rawModelPath))
+        {
+            return new StudioVehicleModulePlanDto(
+                false,
+                "Raw-модель не найдена в папке импортов программы.",
+                assetId,
+                rawSourceRelativePath ?? string.Empty,
+                "Unknown",
+                "vehicle",
+                null,
+                [],
+                ["Raw-модель не найдена в папке импортов программы."],
+                []);
+        }
+
+        var extension = Path.GetExtension(rawModelPath);
+        var rawBounds = TryAnalyzeRawModelBounds(rawModelPath, extension, out var modelBounds)
+            ? modelBounds
+            : null;
+        var rawParts = TryAnalyzeRawModelParts(rawModelPath, extension, out var analyzedParts)
+            ? analyzedParts
+            : [];
+        if (rawParts.Count == 0 && rawBounds is not null)
+        {
+            rawParts =
+            [
+                new StudioRawModelPartDto(
+                    Path.GetFileNameWithoutExtension(rawModelPath),
+                    "hull",
+                    0,
+                    0,
+                    rawBounds,
+                    "Модель не разделена на модули; для транспорта это только входной монолит, а не готовая замена.")
+            ];
+            warnings.Add("Raw-модель не содержит распознанных частей. Для модульного транспорта программа будет считать её монолитом и заблокирует опасные auto-replace шаги.");
+        }
+
+        if (rawParts.Sum(part => part.Triangles) > 75000)
+        {
+            warnings.Add("Raw-модель тяжёлая для транспорта: перед установкой нужен раздельный cook, LOD/упрощение и отдельные query/collision proxies.");
+        }
+
+        var profile = GetVehicleProfile(assetId);
+        foreach (var warning in profile.Warnings)
+        {
+            if (!warnings.Contains(warning, StringComparer.OrdinalIgnoreCase))
+            {
+                warnings.Add(warning);
+            }
+        }
+
+        if (!profile.Ok)
+        {
+            return new StudioVehicleModulePlanDto(
+                false,
+                profile.Error ?? "Профиль транспорта не удалось построить.",
+                assetId,
+                rawSourceRelativePath,
+                profile.DisplayName,
+                profile.ProfileKind,
+                rawBounds,
+                [],
+                warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                []);
+        }
+
+        if (profile.ProfileKind.Equals("airplane", StringComparison.OrdinalIgnoreCase)
+            && rawParts.Count > 0
+            && !rawParts.Any(part => part.Role.Equals("wing", StringComparison.OrdinalIgnoreCase)))
+        {
+            warnings.Add("В raw-модели не найден явный wing-модуль. Для Duster/Valkyrie крылья надо выделить отдельными объектами или геометрическим split в Blender.");
+        }
+
+        if (profile.ProfileKind.Equals("airplane", StringComparison.OrdinalIgnoreCase)
+            && rawParts.Count > 0
+            && !rawParts.Any(part => part.Role.Equals("tail-control", StringComparison.OrdinalIgnoreCase)))
+        {
+            warnings.Add("В raw-модели не найден явный tail/rudder/elevator-модуль. Хвостовые поверхности нужно отделить перед безопасной заменой.");
+        }
+
+        profile = HydrateVehicleModulePlanProfile(profile, rawParts, warnings);
+        var entries = BuildVehicleModulePlanEntries(profile, rawParts, rawBounds, warnings);
+        return new StudioVehicleModulePlanDto(
+            true,
+            null,
+            assetId,
+            rawSourceRelativePath,
+            profile.DisplayName,
+            profile.ProfileKind,
+            rawBounds,
+            entries,
+            warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            BuildVehicleModulePlanNextSteps(profile, rawParts, entries));
+    }
+
+    private StudioVehicleProfileDto HydrateVehicleModulePlanProfile(
+        StudioVehicleProfileDto profile,
+        List<StudioRawModelPartDto> rawParts,
+        List<string> warnings)
+    {
+        var deadlineUtc = DateTime.UtcNow.AddSeconds(42);
+        var hydrated = new List<StudioVehicleProfileAssetDto>(profile.Assets.Count);
+        var hydratedCount = 0;
+
+        foreach (var asset in profile.Assets
+                     .OrderBy(asset => GetVehicleModuleRolePriority(asset.Role))
+                     .ThenBy(asset => asset.RelativePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var selectedParts = SelectRawPartsForVehicleModule(asset.Role, rawParts);
+            var field = SelectVehicleModulePlanField(asset);
+            var needsHydration = selectedParts.Count > 0
+                                 && (asset.KeyFields.Count == 0
+                                     || field is null
+                                     || InferVehicleModulePlanMeshKind(asset).Equals("unknown", StringComparison.OrdinalIgnoreCase)
+                                     || asset.Warnings.Any(warning => warning.Contains("пропущен", StringComparison.OrdinalIgnoreCase)));
+            if (!needsHydration
+                || hydratedCount >= 28
+                || DateTime.UtcNow > deadlineUtc)
+            {
+                hydrated.Add(asset);
+                continue;
+            }
+
+            var reportLimit = asset.Role.Equals("vehicle-root", StringComparison.OrdinalIgnoreCase)
+                ? 3600
+                : 1800;
+            var report = GetFieldDiscoveryReport(asset.AssetId, reportLimit, hiddenOnly: false);
+            if (!string.IsNullOrWhiteSpace(report.RelativePath) && report.Fields.Count > 0)
+            {
+                hydrated.Add(BuildVehicleProfileAsset(report));
+                hydratedCount++;
+                continue;
+            }
+
+            hydrated.Add(asset);
+        }
+
+        if (hydratedCount > 0)
+        {
+            warnings.Add($"Vehicle module plan дочитал attachment-модули глубже: {hydratedCount}.");
+        }
+        if (DateTime.UtcNow > deadlineUtc)
+        {
+            warnings.Add("Vehicle module plan остановил глубокое дочитывание по time budget; оставшиеся unknown-модули можно открыть отдельно.");
+        }
+
+        var requiredSockets = hydrated
+            .SelectMany(asset => asset.RequiredSockets)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var materials = hydrated
+            .SelectMany(asset => asset.MaterialReferences)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Take(80)
+            .ToList();
+
+        return profile with
+        {
+            Assets = hydrated,
+            RequiredSockets = requiredSockets,
+            MaterialReferences = materials
+        };
+    }
+
+    public StudioRawModelCookResultDto CookVehicleModuleRawModel(StudioVehicleModuleCookRequestDto request)
+    {
+        if (request is null
+            || string.IsNullOrWhiteSpace(request.AssetId)
+            || string.IsNullOrWhiteSpace(request.RawSourceRelativePath)
+            || string.IsNullOrWhiteSpace(request.TargetAssetId))
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Нужен assetId транспорта, raw-модель и target module из vehicle module plan.",
+                null,
+                [],
+                []);
+        }
+
+        var plan = GetVehicleModulePlan(request.AssetId, request.RawSourceRelativePath);
+        if (!plan.Ok)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                plan.Error ?? "План модулей не удалось построить.",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        var entry = plan.Entries.FirstOrDefault(candidate =>
+            candidate.TargetAssetId.Equals(request.TargetAssetId, StringComparison.OrdinalIgnoreCase)
+            && (string.IsNullOrWhiteSpace(request.TargetFieldPath)
+                || candidate.TargetFieldPath.Equals(request.TargetFieldPath, StringComparison.OrdinalIgnoreCase)));
+        if (entry is null)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                "Target module не найден в актуальном vehicle module plan.",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        return CookVehicleModulePlanEntryRawModel(
+            request.RawSourceRelativePath,
+            entry,
+            plan,
+            request.MaterialReference);
+    }
+
+    public StudioVehicleModuleCookBatchResultDto CookVehicleModulePlanRawModels(StudioVehicleModuleCookBatchRequestDto request)
+    {
+        if (request is null
+            || string.IsNullOrWhiteSpace(request.AssetId)
+            || string.IsNullOrWhiteSpace(request.RawSourceRelativePath))
+        {
+            return new StudioVehicleModuleCookBatchResultDto(
+                false,
+                "Нужен assetId транспорта и raw-модель для batch cook.",
+                [],
+                [],
+                []);
+        }
+
+        var plan = GetVehicleModulePlan(request.AssetId, request.RawSourceRelativePath);
+        if (!plan.Ok)
+        {
+            return new StudioVehicleModuleCookBatchResultDto(
+                false,
+                plan.Error ?? "План модулей не удалось построить.",
+                [],
+                [],
+                plan.Warnings);
+        }
+
+        var maxModules = Math.Clamp(request.MaxModules.GetValueOrDefault(8), 1, 16);
+        var entries = plan.Entries
+            .Where(IsVehicleModulePlanEntryAutoCookable)
+            .GroupBy(
+                entry => $"{entry.TargetAssetId}|{entry.TargetFieldPath}",
+                StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .Take(maxModules)
+            .ToList();
+        if (entries.Count == 0)
+        {
+            return new StudioVehicleModuleCookBatchResultDto(
+                false,
+                "В vehicle module plan сейчас нет безопасных StaticMesh-кандидатов для batch cook.",
+                [],
+                [],
+                plan.Warnings);
+        }
+
+        var items = new List<StudioVehicleModuleCookBatchItemDto>();
+        var suggestedEdits = new List<StudioAssetEditDto>();
+        foreach (var entry in entries)
+        {
+            var result = CookVehicleModulePlanEntryRawModel(
+                request.RawSourceRelativePath,
+                entry,
+                plan,
+                null);
+            if (result.SuggestedEdit is not null)
+            {
+                suggestedEdits.Add(result.SuggestedEdit);
+            }
+
+            items.Add(new StudioVehicleModuleCookBatchItemDto(
+                entry.TargetAssetId,
+                entry.TargetRelativePath,
+                entry.TargetDisplayName,
+                entry.TargetFieldPath,
+                entry.SafetyLevel,
+                result.Ok,
+                result.Error,
+                result.CookedTargetRelativePath,
+                result.SuggestedEdit,
+                result.Warnings));
+        }
+
+        var successCount = items.Count(item => item.Ok);
+        var warnings = plan.Warnings
+            .Concat([$"Batch cook безопасных vehicle modules: успешно {successCount} из {items.Count}."])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return new StudioVehicleModuleCookBatchResultDto(
+            successCount > 0,
+            successCount > 0 ? null : "Ни один модуль не удалось приготовить.",
+            items,
+            suggestedEdits,
+            warnings);
+    }
+
+    private const string VehicleDefaultBodyMaterialReference =
+        "object:/Game/ConZ_Files/Models/Vehicles2/Plane_01/Materials/MI_Plane_01_Body_A.MI_Plane_01_Body_A|/Script/Engine|MaterialInstanceConstant";
+
+    public StudioVehicleFullReplacementResultDto CookAndBuildVehicleFullReplacement(StudioVehicleFullReplacementRequestDto request)
+    {
+        var warnings = new List<string>();
+        var suppressorResults = new List<StudioRawModelCookResultDto>();
+        var suggestedEdits = new List<StudioAssetEditDto>();
+        if (request is null
+            || string.IsNullOrWhiteSpace(request.AssetId)
+            || string.IsNullOrWhiteSpace(request.RawSourceRelativePath))
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                "Нужен vehicle assetId и raw-модель/архив из импортов программы.",
+                null,
+                null,
+                suppressorResults,
+                suggestedEdits,
+                warnings);
+        }
+
+        var profile = GetVehicleProfile(request.AssetId);
+        if (!profile.Ok)
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                profile.Error ?? "Vehicle profile не удалось построить.",
+                null,
+                null,
+                suppressorResults,
+                suggestedEdits,
+                profile.Warnings);
+        }
+
+        warnings.AddRange(profile.Warnings);
+        var rootAsset = profile.Assets.FirstOrDefault(asset => asset.Role.Equals("vehicle-root", StringComparison.OrdinalIgnoreCase))
+                        ?? profile.Assets.FirstOrDefault(asset => asset.AssetId.Equals(request.AssetId, StringComparison.OrdinalIgnoreCase));
+        if (rootAsset is null)
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                "В vehicle profile не найден root asset транспорта.",
+                null,
+                null,
+                suppressorResults,
+                suggestedEdits,
+                warnings);
+        }
+
+        var visualTargets = DiscoverVehicleFullReplacementVisualTargets(profile, warnings);
+        var rootSkeletalTarget = visualTargets.FirstOrDefault(target =>
+                                     target.AssetId.Equals(rootAsset.AssetId, StringComparison.OrdinalIgnoreCase)
+                                     && target.MeshKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase))
+                                 ?? BuildVehicleFullReplacementRootFallback(rootAsset, profile);
+        if (rootSkeletalTarget is null)
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                "В root asset транспорта не найдено SkeletalMesh-поле для основной модели.",
+                null,
+                null,
+                suppressorResults,
+                suggestedEdits,
+                warnings);
+        }
+
+        var materialReference = PickVehicleFullReplacementMaterialReference(profile, request.MaterialReference, warnings);
+        if (string.IsNullOrWhiteSpace(materialReference))
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                "Не найден cooked MaterialInstance из игры для транспортной модели.",
+                null,
+                null,
+                suppressorResults,
+                suggestedEdits,
+                warnings);
+        }
+
+        var visualOverlayTarget = BuildVehicleFullReplacementOverlayFallback(rootAsset);
+        var requestedMaterialMode = (request.MaterialMode ?? string.Empty).Trim().ToLowerInvariant();
+        var useModelMaterials = requestedMaterialMode is "model" or "source" or "imported" or "textures" or "raw";
+        var wantsCustomPaint = requestedMaterialMode.Equals("custom", StringComparison.OrdinalIgnoreCase)
+                               && request.PaintStrengthPercent is > 0;
+        var materialMode = useModelMaterials ? "model" : wantsCustomPaint ? "custom" : "material";
+        var bodyCookRequest = new StudioRawModelCookRequestDto(
+            RawSourceRelativePath: request.RawSourceRelativePath,
+            AssetId: visualOverlayTarget.AssetId,
+            FieldPath: visualOverlayTarget.FieldPath,
+            ModelKind: "vehicle-visual-static",
+            ScalePercent: request.ScalePercent is >= 1d and <= 1000d ? request.ScalePercent : 100d,
+            OffsetX: 0d,
+            OffsetY: 0d,
+            OffsetZ: 0d,
+            Pitch: 0d,
+            Yaw: 0d,
+            Roll: 0d,
+            AutoFitToTarget: true,
+            TargetLongestCm: request.TargetLongestCm is >= 1d and <= 50000d ? request.TargetLongestCm : 1800d,
+            PaintColorHex: request.PaintColorHex,
+            PaintStrengthPercent: request.PaintStrengthPercent,
+            MetallicPercent: request.MetallicPercent,
+            RoughnessPercent: request.RoughnessPercent,
+            MaterialMode: materialMode,
+            MaterialReference: useModelMaterials ? null : materialReference,
+            RawPartNames: null,
+            TargetTriangleCount: request.TargetTriangleCount is > 0 ? request.TargetTriangleCount : 45000);
+        var bodyCook = CookRawModelAsset(bodyCookRequest);
+        warnings.AddRange(bodyCook.Warnings);
+        if (!bodyCook.Ok || bodyCook.SuggestedEdit is null)
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                bodyCook.Error ?? "Root vehicle SkeletalMesh приготовлен, но staged edit не создан.",
+                null,
+                bodyCook,
+                suppressorResults,
+                suggestedEdits,
+                warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        }
+
+        var overlayCookedAsset = bodyCook.Assets.FirstOrDefault(asset => asset.Kind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase))
+                                 ?? bodyCook.Assets.FirstOrDefault();
+        if (overlayCookedAsset is null)
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                "Visual overlay cook завершился без cooked StaticMesh asset.",
+                null,
+                bodyCook,
+                suppressorResults,
+                suggestedEdits,
+                warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        }
+
+        suggestedEdits.Add(BuildVehicleVisualOverlayRootEdit(rootAsset.AssetId, overlayCookedAsset, request));
+
+        var chassisAsset = profile.Assets.FirstOrDefault(asset =>
+            asset.Role.Equals("chassis", StringComparison.OrdinalIgnoreCase)
+            && asset.RelativePath.Contains("/duster/", StringComparison.OrdinalIgnoreCase));
+        if (chassisAsset is not null)
+        {
+            var queryOffsetX = ClampVehicleVisualOffset(request.OffsetX, -500d);
+            var queryOffsetY = ClampVehicleVisualOffset(request.OffsetY, 0d);
+            var queryOffsetZ = request.OffsetZ is >= -0.0001d and <= 0.0001d
+                ? 70d
+                : ClampVehicleVisualOffset(request.OffsetZ, 70d);
+            var collisionMode = (request.CollisionMode ?? string.Empty).Trim().ToLowerInvariant();
+            var useBoxQueryProxy = collisionMode.Contains("box", StringComparison.Ordinal)
+                                   || collisionMode.Contains("simple", StringComparison.Ordinal)
+                                   || collisionMode.Contains("hull", StringComparison.Ordinal);
+            var queryCookRequest = new StudioRawModelCookRequestDto(
+                RawSourceRelativePath: request.RawSourceRelativePath,
+                AssetId: chassisAsset.AssetId,
+                FieldPath: "e:1/p:3/p:0/p:0",
+                ModelKind: "vehicle-query-proxy-static",
+                ScalePercent: request.ScalePercent is >= 1d and <= 1000d ? request.ScalePercent : 100d,
+                OffsetX: queryOffsetX,
+                OffsetY: queryOffsetY,
+                OffsetZ: queryOffsetZ,
+                Pitch: ClampVehicleVisualRotation(request.Pitch, 0d),
+                Yaw: ClampVehicleVisualRotation(request.Yaw, 0d),
+                Roll: ClampVehicleVisualRotation(request.Roll, 0d),
+                AutoFitToTarget: true,
+                TargetLongestCm: request.TargetLongestCm is >= 1d and <= 50000d ? request.TargetLongestCm : 1800d,
+                PaintColorHex: "#ffffff",
+                PaintStrengthPercent: 0d,
+                MetallicPercent: 0d,
+                RoughnessPercent: 50d,
+                MaterialMode: "game",
+                MaterialReference: materialReference,
+                RawPartNames: null,
+                TargetTriangleCount: useBoxQueryProxy
+                    ? 250
+                    : request.TargetTriangleCount is > 0
+                        ? Math.Min(request.TargetTriangleCount.Value, 4500)
+                        : 3500,
+                CollisionMode: request.CollisionMode,
+                QueryProxyLengthPercent: request.QueryProxyLengthPercent,
+                QueryProxyWidthPercent: request.QueryProxyWidthPercent,
+                QueryProxyHeightPercent: request.QueryProxyHeightPercent);
+            var queryCook = CookRawModelAsset(queryCookRequest);
+            suppressorResults.Add(queryCook);
+            warnings.AddRange(queryCook.Warnings);
+            var queryCookedAsset = queryCook.Assets.FirstOrDefault(asset => asset.Kind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase))
+                                   ?? queryCook.Assets.FirstOrDefault();
+            if (queryCook.Ok && queryCookedAsset is not null)
+            {
+                suggestedEdits.Add(BuildVehicleQueryMeshEdit(chassisAsset.AssetId, queryCookedAsset));
+                warnings.Add("Chassis QueryMeshSetup привязан к упрощённой Valkyrie proxy-модели, чтобы interaction/collision query больше не жили в старом силуэте Duster.");
+            }
+            else
+            {
+                warnings.Add(queryCook.Error ?? "Query/collision proxy для chassis не приготовлен; часть коллизии может остаться от Duster.");
+            }
+        }
+
+        suggestedEdits.AddRange(BuildVehicleMountSlotEdits(profile, request));
+        if (TryBuildVehicleEngineAudioEdit(profile, out var audioEdit))
+        {
+            suggestedEdits.Add(audioEdit);
+        }
+        var suppressTargets = visualTargets
+            .Where(target => !target.AssetId.Equals(rootSkeletalTarget.AssetId, StringComparison.OrdinalIgnoreCase)
+                             || !target.FieldPath.Equals(rootSkeletalTarget.FieldPath, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var hiddenRawModel = EnsureInternalHiddenTinyRawModel(warnings);
+        var staticTargets = suppressTargets
+            .Where(target => target.MeshKind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (staticTargets.Count > 0)
+        {
+            var staticResult = CookVehicleSuppressorAsset(hiddenRawModel, staticTargets[0], materialReference);
+            suppressorResults.Add(staticResult);
+            warnings.AddRange(staticResult.Warnings);
+            if (staticResult.Ok && TryBuildVehicleFullReplacementFieldEdit(staticTargets[0], staticResult, warnings, out var staticCookedAsset, out _))
+            {
+                foreach (var target in staticTargets)
+                {
+                    var value = SelectCookedVisualReferenceValue(staticCookedAsset!, target.ReferencePickerKind, target.CurrentValue);
+                    if (!string.IsNullOrWhiteSpace(value))
+                    {
+                        suggestedEdits.Add(new StudioAssetEditDto(
+                            target.AssetId,
+                            [new StudioFieldEditDto(target.FieldPath, value)],
+                            []));
+                    }
+                }
+            }
+            else
+            {
+                warnings.Add(staticResult.Error ?? "Static visual suppressor не приготовлен; часть старых статических модулей может остаться видимой.");
+            }
+        }
+
+        foreach (var target in suppressTargets.Where(target => target.MeshKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase)))
+        {
+            var skeletalResult = CookVehicleSuppressorAsset(hiddenRawModel, target, materialReference);
+            suppressorResults.Add(skeletalResult);
+            warnings.AddRange(skeletalResult.Warnings);
+            if (!HasVehicleTargetSkeletonAndPhysicsContract(skeletalResult))
+            {
+                warnings.Add($"Skeletal visual suppressor пропущен для {target.DisplayName}: target skeleton/physics не подтверждены, старая модульная часть оставлена вместо потенциального fatal error.");
+                continue;
+            }
+
+            if (TryBuildVehicleFullReplacementFieldEdit(target, skeletalResult, warnings, out _, out var edit))
+            {
+                suggestedEdits.Add(edit!);
+            }
+            else
+            {
+                warnings.Add(skeletalResult.Error ?? $"Skeletal visual suppressor не приготовлен для {target.DisplayName}; соответствующая старая модульная часть может остаться видимой.");
+            }
+        }
+
+        suggestedEdits = suggestedEdits
+            .Where(edit => edit.Edits.Count > 0 || edit.ListEdits is { Count: > 0 })
+            .ToList();
+        if (suggestedEdits.Count == 0)
+        {
+            return new StudioVehicleFullReplacementResultDto(
+                false,
+                "После cook не осталось staged edits для сборки pak.",
+                null,
+                bodyCook,
+                suppressorResults,
+                suggestedEdits,
+                warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        }
+
+        warnings.Add(ShouldEnableVehicleOverlayCollision(request)
+            ? "Vehicle overlay collision включён по override: visual StaticMesh будет блокировать query как BlockAll; если появится невидимая стенка, переключи режим на query-proxy."
+            : "Vehicle overlay collision отключён: блокирующая/interaction форма должна идти через отдельный chassis QueryMeshSetup proxy, чтобы visual mesh не конфликтовал с physics root.");
+        warnings.Add($"Full vehicle replacement подготовил staged edits: {suggestedEdits.Sum(edit => edit.Edits.Count)} полей. Visual overlay, chassis query proxy, mount slots и engine audio обновлены best-effort; damage regions и flight data оставлены из оригинального Duster.");
+        var buildRequest = new StudioBuildRequestDto(
+            ModName: string.IsNullOrWhiteSpace(request.ModName) ? "pakchunk99-WindowsNoEditor_valkyrie_duster_full" : request.ModName,
+            InstallToGame: request.InstallToGame.GetValueOrDefault(true),
+            CreateZip: false,
+            SeedCompanions: false,
+            EnabledPresetIds: [],
+            EnabledFeatureIds: [],
+            FeatureSettings: [],
+            SelectedAssetIds: [],
+            AssetSettings: [],
+            AssetEdits: suggestedEdits,
+            Recipes: []);
+        var build = Build(buildRequest);
+        warnings.AddRange(build.Warnings);
+        return new StudioVehicleFullReplacementResultDto(
+            build.Ok,
+            build.Ok ? null : build.Error,
+            build,
+            bodyCook,
+            suppressorResults,
+            suggestedEdits,
+            warnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+    }
+
+    private static bool HasVehicleTargetSkeletonAndPhysicsContract(StudioRawModelCookResultDto result)
+    {
+        if (!result.Ok)
+        {
+            return false;
+        }
+
+        return result.Warnings.Any(warning =>
+                   warning.Contains("Skeleton target-профиля привязан", StringComparison.OrdinalIgnoreCase))
+               && result.Warnings.Any(warning =>
+                   warning.Contains("PhysicsAsset target-профиля привязан", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private StudioRawModelCookResultDto CookVehicleSuppressorAsset(
+        string hiddenRawModelRelativePath,
+        VehicleVisualReplacementTarget target,
+        string materialReference)
+    {
+        var request = new StudioRawModelCookRequestDto(
+            RawSourceRelativePath: hiddenRawModelRelativePath,
+            AssetId: target.AssetId,
+            FieldPath: target.FieldPath,
+            ModelKind: target.MeshKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase) ? "vehicle-full-skeletal" : "static-mesh",
+            ScalePercent: 100d,
+            OffsetX: 0d,
+            OffsetY: 0d,
+            OffsetZ: 0d,
+            Pitch: 0d,
+            Yaw: 0d,
+            Roll: 0d,
+            AutoFitToTarget: true,
+            TargetLongestCm: 1d,
+            PaintColorHex: "#ffffff",
+            PaintStrengthPercent: 0d,
+            MetallicPercent: 0d,
+            RoughnessPercent: 50d,
+            MaterialMode: "game",
+            MaterialReference: materialReference,
+            RawPartNames: null,
+            TargetTriangleCount: target.MeshKind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase) ? 250 : null);
+        return CookRawModelAsset(request);
+    }
+
+    private bool TryBuildVehicleFullReplacementFieldEdit(
+        VehicleVisualReplacementTarget target,
+        StudioRawModelCookResultDto result,
+        List<string> warnings,
+        out StudioCustomVisualAssetDto? cookedAsset,
+        out StudioAssetEditDto? edit)
+    {
+        cookedAsset = null;
+        edit = null;
+        if (!result.Ok)
+        {
+            return false;
+        }
+
+        cookedAsset = result.Assets.FirstOrDefault(asset => asset.Kind.Equals(target.MeshKind, StringComparison.OrdinalIgnoreCase))
+                      ?? result.Assets.FirstOrDefault();
+        if (cookedAsset is null)
+        {
+            warnings.Add($"Suppressor cook завершился без cooked visual asset: {target.DisplayName} / {target.FieldPath}.");
+            return false;
+        }
+
+        var value = SelectCookedVisualReferenceValue(cookedAsset, target.ReferencePickerKind, target.CurrentValue);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            warnings.Add($"Suppressor cook не смог выбрать reference value: {target.DisplayName} / {target.FieldPath}.");
+            return false;
+        }
+
+        edit = new StudioAssetEditDto(
+            target.AssetId,
+            [new StudioFieldEditDto(target.FieldPath, value)],
+            []);
+        return true;
+    }
+
+    private List<VehicleVisualReplacementTarget> DiscoverVehicleFullReplacementVisualTargets(
+        StudioVehicleProfileDto profile,
+        List<string> warnings)
+    {
+        var result = new Dictionary<string, VehicleVisualReplacementTarget>(StringComparer.OrdinalIgnoreCase);
+        foreach (var asset in profile.Assets)
+        {
+            StudioModAssetSchemaDto schema;
+            try
+            {
+                schema = GetModdingAssetSchema(asset.AssetId);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"Vehicle full replacement: schema skipped для {asset.DisplayName} ({ex.Message})");
+                continue;
+            }
+
+            foreach (var field in schema.Fields)
+            {
+                if (!TryClassifyVehicleVisualField(field, out var meshKind))
+                {
+                    continue;
+                }
+
+                var key = $"{asset.AssetId}|{field.FieldPath}";
+                result[key] = new VehicleVisualReplacementTarget(
+                    asset.AssetId,
+                    asset.RelativePath,
+                    asset.DisplayName,
+                    field.FieldPath,
+                    meshKind,
+                    field.CurrentValue,
+                    field.CurrentDisplayValue ?? string.Empty,
+                    field.ReferencePickerKind,
+                    field.Label);
+            }
+        }
+
+        return result.Values
+            .OrderBy(target => target.AssetId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(target => target.FieldPath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static bool TryClassifyVehicleVisualField(StudioModFieldDto field, out string meshKind)
+    {
+        meshKind = string.Empty;
+        var picker = field.ReferencePickerKind ?? string.Empty;
+        var label = field.Label ?? string.Empty;
+        var display = field.CurrentDisplayValue ?? string.Empty;
+        if (label.Contains("Query", StringComparison.OrdinalIgnoreCase)
+            || label.Contains("Animation Blueprint", StringComparison.OrdinalIgnoreCase)
+            || display.StartsWith("ABP ", StringComparison.OrdinalIgnoreCase)
+            || display.Contains("Anim Blueprint", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (picker.Contains("visual-skeletal-mesh", StringComparison.OrdinalIgnoreCase))
+        {
+            meshKind = "skeletal-mesh";
+            return true;
+        }
+
+        if (picker.Contains("visual-static-mesh", StringComparison.OrdinalIgnoreCase))
+        {
+            meshKind = "static-mesh";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static VehicleVisualReplacementTarget? BuildVehicleFullReplacementRootFallback(
+        StudioVehicleProfileAssetDto rootAsset,
+        StudioVehicleProfileDto profile)
+    {
+        var field = rootAsset.KeyFields.FirstOrDefault(candidate =>
+            candidate.Kind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase));
+        return field is null
+            ? null
+            : new VehicleVisualReplacementTarget(
+                rootAsset.AssetId,
+                rootAsset.RelativePath,
+                rootAsset.DisplayName,
+                field.FieldPath,
+                "skeletal-mesh",
+                field.CurrentValue,
+                field.CurrentDisplayValue,
+                "visual-skeletal-mesh-object",
+                field.Label);
+    }
+
+    private static VehicleVisualReplacementTarget BuildVehicleFullReplacementOverlayFallback(
+        StudioVehicleProfileAssetDto rootAsset)
+    {
+        return new VehicleVisualReplacementTarget(
+            rootAsset.AssetId,
+            rootAsset.RelativePath,
+            rootAsset.DisplayName,
+            "e:29/p:0",
+            "static-mesh",
+            "object:/Engine/BasicShapes/Cylinder.Cylinder|/Script/Engine|StaticMesh",
+            "Propeller Alt Mesh",
+            "visual-static-mesh-object",
+            "Visual Overlay StaticMesh");
+    }
+
+    private static StudioAssetEditDto BuildVehicleVisualOverlayRootEdit(
+        string rootAssetId,
+        StudioCustomVisualAssetDto cookedAsset,
+        StudioVehicleFullReplacementRequestDto request)
+    {
+        var edits = new List<StudioFieldEditDto>();
+        edits.Add(new StudioFieldEditDto("e:29/p:0", cookedAsset.ObjectReference));
+
+        var offsetX = ClampVehicleVisualOffset(request.OffsetX, -500d);
+        var offsetY = ClampVehicleVisualOffset(request.OffsetY, 0d);
+        var offsetZ = request.OffsetZ is >= -0.0001d and <= 0.0001d
+            ? 70d
+            : ClampVehicleVisualOffset(request.OffsetZ, 70d);
+        var pitch = ClampVehicleVisualRotation(request.Pitch, 0d);
+        var yaw = ClampVehicleVisualRotation(request.Yaw, 0d);
+        var roll = ClampVehicleVisualRotation(request.Roll, 0d);
+
+        edits.Add(new StudioFieldEditDto("e:19/p:2", "Mesh"));
+        edits.Add(new StudioFieldEditDto($"{VehicleSyntheticFieldPrefix}clear-override-materials:e:29", "true"));
+        edits.Add(new StudioFieldEditDto($"{VehicleSyntheticFieldPrefix}component-bool:e:29:bHiddenInGame", "false"));
+        edits.Add(new StudioFieldEditDto($"{VehicleSyntheticFieldPrefix}component-bool:e:29:bVisible", "true"));
+        edits.Add(new StudioFieldEditDto($"{VehicleSyntheticFieldPrefix}component-bool:e:35:bHiddenInGame", "true"));
+        edits.Add(new StudioFieldEditDto($"{VehicleSyntheticFieldPrefix}component-bool:e:35:bVisible", "false"));
+
+        var overlayCollisionEnabled = ShouldEnableVehicleOverlayCollision(request);
+        edits.Add(new StudioFieldEditDto("e:29/p:2/p:1", overlayCollisionEnabled ? "1" : "0"));
+        edits.Add(new StudioFieldEditDto("e:29/p:2/p:2", overlayCollisionEnabled ? "BlockAll" : "NoCollision"));
+        for (var responseIndex = 0; responseIndex <= 9; responseIndex++)
+        {
+            edits.Add(new StudioFieldEditDto($"e:29/p:2/p:3/p:0/a:{responseIndex}/p:1", overlayCollisionEnabled ? "2" : "0"));
+        }
+
+        edits.Add(new StudioFieldEditDto("e:29/p:3/p:0/vc:x", offsetX.ToString(CultureInfo.InvariantCulture)));
+        edits.Add(new StudioFieldEditDto("e:29/p:3/p:0/vc:y", offsetY.ToString(CultureInfo.InvariantCulture)));
+        edits.Add(new StudioFieldEditDto("e:29/p:3/p:0/vc:z", offsetZ.ToString(CultureInfo.InvariantCulture)));
+        edits.Add(new StudioFieldEditDto("e:29/p:4/p:0/rc:pitch", pitch.ToString(CultureInfo.InvariantCulture)));
+        edits.Add(new StudioFieldEditDto("e:29/p:4/p:0/rc:yaw", yaw.ToString(CultureInfo.InvariantCulture)));
+        edits.Add(new StudioFieldEditDto("e:29/p:4/p:0/rc:roll", roll.ToString(CultureInfo.InvariantCulture)));
+        edits.Add(new StudioFieldEditDto("e:29/p:5/p:0/vc:x", "1"));
+        edits.Add(new StudioFieldEditDto("e:29/p:5/p:0/vc:y", "1"));
+        edits.Add(new StudioFieldEditDto("e:29/p:5/p:0/vc:z", "1"));
+
+        return new StudioAssetEditDto(rootAssetId, edits, []);
+    }
+
+    private static StudioAssetEditDto BuildVehicleQueryMeshEdit(
+        string chassisAssetId,
+        StudioCustomVisualAssetDto queryAsset)
+    {
+        return new StudioAssetEditDto(
+            chassisAssetId,
+            [new StudioFieldEditDto("e:1/p:3/p:0/p:0", queryAsset.AssetReference)],
+            []);
+    }
+
+    private static IEnumerable<StudioAssetEditDto> BuildVehicleMountSlotEdits(
+        StudioVehicleProfileDto profile,
+        StudioVehicleFullReplacementRequestDto request)
+    {
+        var driverSeatX = ClampVehicleSeatOffset(request.SeatOffsetX, 0d);
+        var driverSeatY = ClampVehicleSeatOffset(request.SeatOffsetY, -12d);
+        var driverSeatZ = ClampVehicleSeatOffset(request.SeatOffsetZ, 0d);
+        var passengerSeatX = ClampVehicleSeatOffset(request.PassengerSeatOffsetX, 0d);
+        var passengerSeatY = ClampVehicleSeatOffset(request.PassengerSeatOffsetY, -12d);
+        var passengerSeatZ = ClampVehicleSeatOffset(request.PassengerSeatOffsetZ, -5d);
+        var hasEntryOverride = request.EntryOffsetX.HasValue
+                               || request.EntryOffsetY.HasValue
+                               || request.EntryOffsetZ.HasValue;
+        var entryX = ClampVehicleSeatOffset(request.EntryOffsetX, 0d);
+        var entryY = Math.Abs(ClampVehicleSeatOffset(request.EntryOffsetY, 0d));
+        var entryZ = ClampVehicleSeatOffset(request.EntryOffsetZ, 0d);
+        var driver = profile.Assets.FirstOrDefault(asset =>
+            asset.Role.Equals("seat-driver", StringComparison.OrdinalIgnoreCase)
+            && asset.RelativePath.Contains("/duster/", StringComparison.OrdinalIgnoreCase));
+        if (driver is not null)
+        {
+            var edits = new List<StudioFieldEditDto>
+            {
+                new("e:1/p:4/p:0/p:0/vc:x", driverSeatX.ToString(CultureInfo.InvariantCulture)),
+                new("e:1/p:4/p:0/p:0/vc:y", driverSeatY.ToString(CultureInfo.InvariantCulture)),
+                new("e:1/p:4/p:0/p:0/vc:z", driverSeatZ.ToString(CultureInfo.InvariantCulture))
+            };
+            if (hasEntryOverride)
+            {
+                edits.AddRange([
+                    new StudioFieldEditDto("e:2/p:0/p:1/p:0/vc:x", entryX.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:2/p:0/p:1/p:0/vc:y", (-entryY).ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:2/p:0/p:1/p:0/vc:z", entryZ.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:3/p:0/p:1/p:0/vc:x", entryX.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:3/p:0/p:1/p:0/vc:y", entryY.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:3/p:0/p:1/p:0/vc:z", entryZ.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:4/p:0/p:1/p:0/vc:x", (entryX - 15d).ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:4/p:0/p:1/p:0/vc:y", (entryY * 2.3d).ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:4/p:0/p:1/p:0/vc:z", Math.Max(30d, entryZ - 75d).ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:5/p:5", "object:/Game/ConZ_Files/Characters/Prisoner/Animations3/Vehicles/Kinglet_Mariner/Player_Kinglet_Mariner_Driver_Enter_Wing_LW_Montage.Player_Kinglet_Mariner_Driver_Enter_Wing_LW_Montage|/Script/Engine|AnimMontage"),
+                    new StudioFieldEditDto("e:6/p:5", "object:/Game/ConZ_Files/Characters/Prisoner/Animations3/Vehicles/Kinglet_Mariner/Player_Kinglet_Mariner_Driver_Enter_Wing_RW_Montage.Player_Kinglet_Mariner_Driver_Enter_Wing_RW_Montage|/Script/Engine|AnimMontage")
+                ]);
+            }
+
+            yield return new StudioAssetEditDto(
+                driver.AssetId,
+                edits,
+                []);
+        }
+
+        var passenger = profile.Assets.FirstOrDefault(asset =>
+            asset.Role.Equals("seat-passenger", StringComparison.OrdinalIgnoreCase)
+            && asset.RelativePath.Contains("/duster/", StringComparison.OrdinalIgnoreCase));
+        if (passenger is not null)
+        {
+            var edits = new List<StudioFieldEditDto>
+            {
+                new("e:1/p:5/p:0/p:0/vc:x", passengerSeatX.ToString(CultureInfo.InvariantCulture)),
+                new("e:1/p:5/p:0/p:0/vc:y", passengerSeatY.ToString(CultureInfo.InvariantCulture)),
+                new("e:1/p:5/p:0/p:0/vc:z", passengerSeatZ.ToString(CultureInfo.InvariantCulture))
+            };
+            if (hasEntryOverride)
+            {
+                edits.AddRange([
+                    new StudioFieldEditDto("e:2/p:0/p:1/p:0/vc:x", entryX.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:2/p:0/p:1/p:0/vc:y", (-entryY).ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:2/p:0/p:1/p:0/vc:z", entryZ.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:3/p:0/p:1/p:0/vc:x", entryX.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:3/p:0/p:1/p:0/vc:y", entryY.ToString(CultureInfo.InvariantCulture)),
+                    new StudioFieldEditDto("e:3/p:0/p:1/p:0/vc:z", entryZ.ToString(CultureInfo.InvariantCulture))
+                ]);
+            }
+
+            yield return new StudioAssetEditDto(
+                passenger.AssetId,
+                edits,
+                []);
+        }
+    }
+
+    private static bool TryBuildVehicleEngineAudioEdit(
+        StudioVehicleProfileDto profile,
+        [NotNullWhen(true)] out StudioAssetEditDto? edit)
+    {
+        edit = null;
+        var engine = profile.Assets.FirstOrDefault(asset =>
+            asset.Role.Equals("engine", StringComparison.OrdinalIgnoreCase)
+            && asset.RelativePath.EndsWith("/bpc_kinglet_duster_engine.uasset", StringComparison.OrdinalIgnoreCase));
+        if (engine is null)
+        {
+            return false;
+        }
+
+        const string dropshipStart = "object:/Game/WwiseAudio/Event/DefaultWorkUnit/Dropship_Engine_Start.Dropship_Engine_Start|/Script/AkAudio|AkAudioEvent";
+        const string dropshipStop = "object:/Game/WwiseAudio/Event/DefaultWorkUnit/Dropship_Engine_Stop.Dropship_Engine_Stop|/Script/AkAudio|AkAudioEvent";
+        edit = new StudioAssetEditDto(
+            engine.AssetId,
+            [
+                new StudioFieldEditDto("e:1/p:0/p:19", dropshipStart),
+                new StudioFieldEditDto("e:1/p:0/p:20", dropshipStop),
+                new StudioFieldEditDto("e:1/p:0/p:25", dropshipStart),
+                new StudioFieldEditDto("e:1/p:0/p:26", dropshipStop),
+                new StudioFieldEditDto("e:1/p:0/p:27", dropshipStop)
+            ],
+            []);
+        return true;
+    }
+
+    private static double ClampVehicleVisualOffset(double? value, double fallback)
+    {
+        var numeric = value.GetValueOrDefault(fallback);
+        return double.IsFinite(numeric) ? Math.Clamp(numeric, -5000d, 5000d) : fallback;
+    }
+
+    private static double ClampVehicleVisualRotation(double? value, double fallback)
+    {
+        var numeric = value.GetValueOrDefault(fallback);
+        return double.IsFinite(numeric) ? Math.Clamp(numeric, -360d, 360d) : fallback;
+    }
+
+    private static bool ShouldEnableVehicleOverlayCollision(StudioVehicleFullReplacementRequestDto request)
+    {
+        var mode = (request.CollisionMode ?? string.Empty).Trim().ToLowerInvariant();
+        return mode is "overlay" or "overlay-block" or "visual" or "visual-block" or "blockall";
+    }
+
+    private static double ClampVehicleSeatOffset(double? value, double fallback)
+    {
+        var numeric = value.GetValueOrDefault(fallback);
+        return double.IsFinite(numeric) ? Math.Clamp(numeric, -1500d, 1500d) : fallback;
+    }
+
+    private static string PickVehicleFullReplacementMaterialReference(
+        StudioVehicleProfileDto profile,
+        string? materialReferenceOverride,
+        List<string> warnings)
+    {
+        if (LooksLikeMaterialObjectReference(materialReferenceOverride))
+        {
+            return materialReferenceOverride!.Trim();
+        }
+
+        var profileMaterial = profile.MaterialReferences
+            .Where(LooksLikeMaterialObjectReference)
+            .Where(reference => !reference.Contains("PhysicalMaterials", StringComparison.OrdinalIgnoreCase))
+            .Where(reference => !reference.Contains("PropellerMotionBlur", StringComparison.OrdinalIgnoreCase))
+            .FirstOrDefault(reference => reference.Contains("/Materials/", StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrWhiteSpace(profileMaterial))
+        {
+            return profileMaterial;
+        }
+
+        warnings.Add("Vehicle full replacement использует стандартный материал корпуса Duster, потому что подходящий MaterialInstance не был найден в profile.");
+        return VehicleDefaultBodyMaterialReference;
+    }
+
+    private string EnsureInternalHiddenTinyRawModel(List<string> warnings)
+    {
+        var rawImportRoot = Path.Combine(GetWritableCustomVisualAssetRoot(), "RawImports");
+        var relativePath = Path.Combine("sms_internal", "sms_hidden_tiny.obj");
+        var fullPath = Path.GetFullPath(Path.Combine(rawImportRoot, relativePath));
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? rawImportRoot);
+        if (!File.Exists(fullPath))
+        {
+            File.WriteAllText(
+                fullPath,
+                """
+# SCUM Mod Studio internal hidden visual suppressor
+o sms_hidden_tiny
+v -0.005 -0.005 -0.005
+v 0.005 -0.005 -0.005
+v 0.005 0.005 -0.005
+v -0.005 0.005 -0.005
+v -0.005 -0.005 0.005
+v 0.005 -0.005 0.005
+v 0.005 0.005 0.005
+v -0.005 0.005 0.005
+f 1 2 3
+f 1 3 4
+f 5 8 7
+f 5 7 6
+f 1 5 6
+f 1 6 2
+f 2 6 7
+f 2 7 3
+f 3 7 8
+f 3 8 4
+f 4 8 5
+f 4 5 1
+""",
+                Encoding.ASCII);
+            warnings.Add("Создан внутренний tiny raw mesh для подавления старых vehicle visual modules.");
+        }
+
+        return relativePath.Replace('\\', '/');
+    }
+
+    private StudioRawModelCookResultDto CookVehicleModulePlanEntryRawModel(
+        string rawSourceRelativePath,
+        StudioVehicleModulePlanEntryDto entry,
+        StudioVehicleModulePlanDto plan,
+        string? materialReferenceOverride)
+    {
+        if (!IsVehicleModulePlanEntryAutoCookable(entry))
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                $"Модуль {entry.TargetDisplayName} нельзя готовить автоматически сейчас: {entry.SafetyLevel}. {entry.Recommendation}",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        if (string.IsNullOrWhiteSpace(entry.TargetFieldPath))
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                $"Для модуля {entry.TargetDisplayName} не найдено точное StaticMesh-поле.",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        if (entry.RawPartNames.Count == 0)
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                $"Для модуля {entry.TargetDisplayName} нет подходящих частей raw-модели.",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        var materialReference = !string.IsNullOrWhiteSpace(materialReferenceOverride)
+            ? materialReferenceOverride
+            : PickVehicleModuleCookMaterialReference(entry, plan);
+        if (string.IsNullOrWhiteSpace(materialReference))
+        {
+            return new StudioRawModelCookResultDto(
+                false,
+                $"Для модуля {entry.TargetDisplayName} не найден cooked Material/MaterialInstance из игры. Нужно сначала открыть attachment/mesh и выбрать .mi материал.",
+                null,
+                [],
+                plan.Warnings);
+        }
+
+        var cookRequest = new StudioRawModelCookRequestDto(
+            RawSourceRelativePath: rawSourceRelativePath,
+            AssetId: entry.TargetAssetId,
+            FieldPath: entry.TargetFieldPath,
+            ModelKind: "static-mesh",
+            ScalePercent: 100d,
+            OffsetX: 0d,
+            OffsetY: 0d,
+            OffsetZ: 0d,
+            Pitch: 0d,
+            Yaw: 0d,
+            Roll: 0d,
+            AutoFitToTarget: true,
+            TargetLongestCm: entry.TargetLongestCm,
+            PaintColorHex: "#ffffff",
+            PaintStrengthPercent: 0d,
+            MetallicPercent: 0d,
+            RoughnessPercent: 50d,
+            MaterialMode: "game",
+            MaterialReference: materialReference,
+            RawPartNames: entry.RawPartNames,
+            TargetTriangleCount: entry.TargetTriangleCount > 0 ? entry.TargetTriangleCount : null);
+
+        var result = CookRawModelAsset(cookRequest);
+        var warnings = plan.Warnings
+            .Concat(result.Warnings)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        warnings.Insert(0, $"Cook выполнен из vehicle module plan: {entry.TargetDisplayName}, части: {string.Join(", ", entry.RawPartNames.Take(6))}.");
+        if (entry.TargetTriangleCount > 0)
+        {
+            warnings.Insert(1, $"Для модуля применён triangle budget: {entry.TargetTriangleCount:N0}.");
+        }
+
+        var suggestedEdit = TryBuildVehicleModuleCookSuggestedEdit(entry, result, warnings);
+        return result with
+        {
+            Warnings = warnings,
+            SuggestedEdit = suggestedEdit
+        };
+    }
+
+    private static bool IsVehicleModulePlanEntryAutoCookable(StudioVehicleModulePlanEntryDto entry)
+    {
+        return entry.CanAutoCook
+            && !entry.SafetyLevel.StartsWith("blocked", StringComparison.OrdinalIgnoreCase)
+            && entry.TargetMeshKind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static StudioAssetEditDto? TryBuildVehicleModuleCookSuggestedEdit(
+        StudioVehicleModulePlanEntryDto entry,
+        StudioRawModelCookResultDto result,
+        List<string> warnings)
+    {
+        if (!result.Ok || string.IsNullOrWhiteSpace(entry.TargetFieldPath))
+        {
+            return null;
+        }
+
+        var cookedAsset = result.Assets.FirstOrDefault(asset =>
+                asset.Kind.Equals(entry.TargetMeshKind, StringComparison.OrdinalIgnoreCase))
+            ?? result.Assets.FirstOrDefault();
+        if (cookedAsset is null)
+        {
+            warnings.Add("Cook завершился, но staged edit не создан: в результате нет cooked visual asset.");
+            return null;
+        }
+
+        var value = SelectCookedVehicleModuleReferenceValue(entry, cookedAsset);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            warnings.Add("Cook завершился, но staged edit не создан: у cooked asset нет ссылки нужного типа.");
+            return null;
+        }
+
+        warnings.Add($"Подготовлена staged-правка: {entry.TargetDisplayName} / {entry.TargetFieldLabel} -> {cookedAsset.Name}.");
+        return new StudioAssetEditDto(
+            entry.TargetAssetId,
+            [new StudioFieldEditDto(entry.TargetFieldPath, value)],
+            []);
+    }
+
+    private static string SelectCookedVehicleModuleReferenceValue(
+        StudioVehicleModulePlanEntryDto entry,
+        StudioCustomVisualAssetDto cookedAsset)
+    {
+        return SelectCookedVisualReferenceValue(
+            cookedAsset,
+            null,
+            entry.TargetCurrentValue);
+    }
+
+    private string PickVehicleModuleCookMaterialReference(
+        StudioVehicleModulePlanEntryDto entry,
+        StudioVehicleModulePlanDto plan)
+    {
+        var direct = entry.MaterialReferences
+            .FirstOrDefault(LooksLikeMaterialObjectReference);
+        if (!string.IsNullOrWhiteSpace(direct))
+        {
+            return direct;
+        }
+
+        var inferredFromTargetMesh = InferMaterialReferencesFromGameMeshReference(entry.TargetCurrentValue)
+            .FirstOrDefault(LooksLikeMaterialObjectReference);
+        if (!string.IsNullOrWhiteSpace(inferredFromTargetMesh))
+        {
+            return inferredFromTargetMesh;
+        }
+
+        var profileMaterial = plan.Entries
+            .SelectMany(item => item.MaterialReferences)
+            .FirstOrDefault(LooksLikeMaterialObjectReference);
+        if (!string.IsNullOrWhiteSpace(profileMaterial))
+        {
+            return profileMaterial;
+        }
+
+        foreach (var term in BuildVehicleModuleMaterialSearchTerms(entry))
+        {
+            try
+            {
+                var option = GetModdingReferenceOptions("visual-material-object", term, 12)
+                    .FirstOrDefault(candidate => LooksLikeMaterialObjectReference(candidate.Value));
+                if (option is not null)
+                {
+                    return option.Value;
+                }
+            }
+            catch
+            {
+                // Best-effort fallback only; the caller will return a clear material error.
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private IEnumerable<string> InferMaterialReferencesFromGameMeshReference(string rawReference)
+    {
+        if (!TryResolveRelativeAssetPathFromGameReference(rawReference, out var meshRelativePath))
+        {
+            yield break;
+        }
+
+        var assetId = $"game::{PathUtil.NormalizeRelative(meshRelativePath).ToLowerInvariant()}";
+        if (!TryBuildSelectionFromAssetId(assetId, out var selection))
+        {
+            yield break;
+        }
+
+        var warnings = new List<string>();
+        var sourcePath = ResolveAssetSourcePath(selection, "game", warnings, includeCompanions: true);
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            yield break;
+        }
+
+        foreach (var dependency in EnumerateCustomVisualDependencies(sourcePath)
+                     .Where(LooksLikeMaterialObjectReference)
+                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(value => value.Contains("/Materials/", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                     .ThenBy(value => value, StringComparer.OrdinalIgnoreCase))
+        {
+            yield return dependency;
+        }
+    }
+
+    private static bool LooksLikeMaterialObjectReference(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim();
+        if (normalized.StartsWith("object:", StringComparison.OrdinalIgnoreCase))
+        {
+            return normalized.Contains("|/Script/Engine|Material", StringComparison.OrdinalIgnoreCase)
+                   || normalized.Contains("|/Script/Engine|MaterialInstance", StringComparison.OrdinalIgnoreCase)
+                   || normalized.Contains("|/Script/Engine|MaterialInstanceConstant", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!normalized.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)
+            || !normalized.Contains('.', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var objectName = normalized[(normalized.LastIndexOf('.') + 1)..];
+        return objectName.StartsWith("MI_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("PARENT_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("M_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("MAT_", StringComparison.OrdinalIgnoreCase)
+               || objectName.StartsWith("PM_", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("/Materials/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> BuildVehicleModuleMaterialSearchTerms(StudioVehicleModulePlanEntryDto entry)
+    {
+        var leaf = Path.GetFileNameWithoutExtension(entry.TargetRelativePath);
+        foreach (var token in new[]
+                 {
+                     entry.TargetDisplayName,
+                     leaf,
+                     entry.ModuleRole,
+                     entry.ModuleRole.Contains("engine", StringComparison.OrdinalIgnoreCase) ? "Propeller" : string.Empty,
+                     entry.ModuleRole.Contains("wing", StringComparison.OrdinalIgnoreCase) ? "Plane" : string.Empty,
+                     entry.ModuleRole.Contains("chassis", StringComparison.OrdinalIgnoreCase) ? "Metal" : string.Empty,
+                     "Metal",
+                     "Vehicle"
+                 })
+        {
+            var normalized = Regex.Replace(token ?? string.Empty, @"[^A-Za-z0-9_]+", " ").Trim();
+            if (normalized.Length >= 2)
+            {
+                yield return normalized;
+            }
+        }
+    }
+
+    private static List<StudioVehicleModulePlanEntryDto> BuildVehicleModulePlanEntries(
+        StudioVehicleProfileDto profile,
+        List<StudioRawModelPartDto> rawParts,
+        StudioModelBoundsDto? rawBounds,
+        List<string> warnings)
+    {
+        var result = new List<StudioVehicleModulePlanEntryDto>();
+        var assets = profile.Assets
+            .OrderBy(asset => GetVehicleModuleRolePriority(asset.Role))
+            .ThenBy(asset => asset.RelativePath, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (assets.Count == 0)
+        {
+            warnings.Add("В профиле транспорта нет модулей. Нужно проверить pak-index и выбранный assetId.");
+        }
+
+        foreach (var asset in assets)
+        {
+            var field = SelectVehicleModulePlanField(asset);
+            var meshKind = field?.Kind ?? InferVehicleModulePlanMeshKind(asset);
+            var selectedParts = SelectRawPartsForVehicleModule(asset.Role, rawParts);
+            var rawPartBounds = TryCombineRawPartBounds(selectedParts, out var combinedBounds)
+                ? combinedBounds
+                : null;
+            var safetyLevel = ClassifyVehicleModulePlanSafety(asset, field, selectedParts);
+            var canAutoCook = safetyLevel.Equals("candidate-static-visual", StringComparison.OrdinalIgnoreCase)
+                              || (safetyLevel.Equals("needs-optimization", StringComparison.OrdinalIgnoreCase)
+                                  && field is not null
+                                  && field.Kind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase));
+            result.Add(new StudioVehicleModulePlanEntryDto(
+                asset.Role,
+                asset.AssetId,
+                asset.RelativePath,
+                asset.DisplayName,
+                field?.FieldPath ?? string.Empty,
+                field?.Label ?? string.Empty,
+                field?.CurrentValue ?? string.Empty,
+                field?.CurrentDisplayValue ?? string.Empty,
+                meshKind,
+                BuildVehicleModuleReplacementStrategy(asset.Role, meshKind, safetyLevel),
+                safetyLevel,
+                canAutoCook,
+                selectedParts.Select(part => part.Name).Take(12).ToList(),
+                selectedParts.Sum(part => part.Triangles),
+                InferVehicleModuleTargetTriangleCount(asset.Role, profile.ProfileKind, selectedParts),
+                rawPartBounds,
+                InferVehicleModuleTargetLongestCm(asset.Role, profile.ProfileKind, rawPartBounds ?? rawBounds),
+                asset.RequiredSockets,
+                asset.MaterialReferences.Take(8).ToList(),
+                BuildVehicleModulePlanRecommendation(asset, field, selectedParts, safetyLevel)));
+        }
+
+        return result;
+    }
+
+    private static int GetVehicleModuleRolePriority(string role)
+    {
+        return role.ToLowerInvariant() switch
+        {
+            "vehicle-root" => 0,
+            "chassis" => 1,
+            "seat-driver" => 2,
+            "seat-passenger" => 3,
+            "engine" => 4,
+            "wing" => 5,
+            "tail-control" => 6,
+            "landing-gear" => 7,
+            "weapon-mount" => 8,
+            _ => 20
+        };
+    }
+
+    private static StudioVehicleProfileFieldDto? SelectVehicleModulePlanField(StudioVehicleProfileAssetDto asset)
+    {
+        if (asset.Role.Equals("vehicle-root", StringComparison.OrdinalIgnoreCase))
+        {
+            return asset.KeyFields.FirstOrDefault(field => field.Kind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase))
+                ?? asset.KeyFields.FirstOrDefault(field => field.Kind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase))
+                ?? asset.KeyFields.FirstOrDefault(field => field.Kind.Equals("query-mesh", StringComparison.OrdinalIgnoreCase));
+        }
+
+        return asset.KeyFields.FirstOrDefault(field => field.Kind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase))
+            ?? asset.KeyFields.FirstOrDefault(field => field.Kind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase))
+            ?? asset.KeyFields.FirstOrDefault(field => field.Kind.Equals("query-mesh", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string InferVehicleModulePlanMeshKind(StudioVehicleProfileAssetDto asset)
+    {
+        if (asset.StaticFieldCount > 0)
+        {
+            return "static-mesh";
+        }
+        if (asset.SkeletalFieldCount > 0)
+        {
+            return "skeletal-mesh";
+        }
+        if (asset.QueryFieldCount > 0)
+        {
+            return "query-mesh";
+        }
+        return "unknown";
+    }
+
+    private static List<StudioRawModelPartDto> SelectRawPartsForVehicleModule(string role, List<StudioRawModelPartDto> rawParts)
+    {
+        if (rawParts.Count == 0)
+        {
+            return [];
+        }
+
+        string[] desiredRoles = role.ToLowerInvariant() switch
+        {
+            "vehicle-root" => ["hull", "seat-interior"],
+            "chassis" => ["hull", "seat-interior", "detail"],
+            "seat-driver" or "seat-passenger" => ["seat-interior", "hull"],
+            "engine" => ["engine"],
+            "wing" => ["wing"],
+            "tail-control" => ["tail-control"],
+            "landing-gear" => ["landing-gear"],
+            "weapon-mount" => ["weapon"],
+            _ => ["detail"]
+        };
+
+        var selected = rawParts
+            .Where(part => desiredRoles.Contains(part.Role, StringComparer.OrdinalIgnoreCase))
+            .OrderByDescending(part => part.Triangles)
+            .ThenByDescending(part => Math.Max(part.Bounds.SizeX, Math.Max(part.Bounds.SizeY, part.Bounds.SizeZ)))
+            .Take(role.Equals("chassis", StringComparison.OrdinalIgnoreCase) ? 8 : 4)
+            .ToList();
+
+        if (selected.Count == 0
+            && (role.Equals("vehicle-root", StringComparison.OrdinalIgnoreCase)
+                || role.Equals("chassis", StringComparison.OrdinalIgnoreCase)))
+        {
+            selected = rawParts
+                .OrderByDescending(part => part.Triangles)
+                .ThenByDescending(part => Math.Max(part.Bounds.SizeX, Math.Max(part.Bounds.SizeY, part.Bounds.SizeZ)))
+                .Take(4)
+                .ToList();
+        }
+
+        return selected;
+    }
+
+    private static bool TryCombineRawPartBounds(List<StudioRawModelPartDto> parts, out StudioModelBoundsDto bounds)
+    {
+        bounds = null!;
+        if (parts.Count == 0)
+        {
+            return false;
+        }
+
+        var accumulator = new ModelBoundsAccumulator();
+        foreach (var part in parts)
+        {
+            accumulator.Add(part.Bounds.MinX, part.Bounds.MinY, part.Bounds.MinZ);
+            accumulator.Add(part.Bounds.MaxX, part.Bounds.MaxY, part.Bounds.MaxZ);
+        }
+
+        return accumulator.TryBuild(out bounds);
+    }
+
+    private static string ClassifyVehicleModulePlanSafety(
+        StudioVehicleProfileAssetDto asset,
+        StudioVehicleProfileFieldDto? field,
+        List<StudioRawModelPartDto> selectedParts)
+    {
+        var meshKind = field?.Kind ?? InferVehicleModulePlanMeshKind(asset);
+        if (asset.Role.Equals("vehicle-root", StringComparison.OrdinalIgnoreCase)
+            || meshKind.Equals("skeletal-mesh", StringComparison.OrdinalIgnoreCase))
+        {
+            return "blocked-skeletal-contract";
+        }
+        if (meshKind.Equals("query-mesh", StringComparison.OrdinalIgnoreCase)
+            || asset.QueryFieldCount > 0 && asset.VisualFieldCount == asset.QueryFieldCount)
+        {
+            return "blocked-query-proxy";
+        }
+        if (asset.Role.StartsWith("seat-", StringComparison.OrdinalIgnoreCase))
+        {
+            return "mount-slot-plan";
+        }
+        if (selectedParts.Count == 0)
+        {
+            return "needs-split";
+        }
+        if (selectedParts.Sum(part => part.Triangles) > 25000)
+        {
+            return "needs-optimization";
+        }
+        if (meshKind.Equals("static-mesh", StringComparison.OrdinalIgnoreCase))
+        {
+            return "candidate-static-visual";
+        }
+        if (meshKind.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return "needs-field-analysis";
+        }
+        return "manual-review";
+    }
+
+    private static string BuildVehicleModuleReplacementStrategy(string role, string meshKind, string safetyLevel)
+    {
+        if (safetyLevel.Equals("blocked-skeletal-contract", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Сохранить оригинальный SkeletalMesh/ABP/PhysicsAsset до отдельной сборки skeleton+socket contract.";
+        }
+        if (safetyLevel.Equals("blocked-query-proxy", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Не использовать full-detail модель. Сгенерировать low-poly query/collision proxy с валидным material slot 0.";
+        }
+        if (safetyLevel.Equals("mount-slot-plan", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Переносить посадку через mount slot transforms, sockets и enter/exit paths, а не через visual mesh.";
+        }
+        if (safetyLevel.Equals("candidate-static-visual", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Cook выбранные части как отдельный StaticMesh с cooked SCUM .mi и заменить только этот visual field.";
+        }
+        if (safetyLevel.Equals("needs-split", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Сначала отделить соответствующую часть модели в Blender/DAE split, затем cook-ить как отдельный модуль.";
+        }
+        if (safetyLevel.Equals("needs-optimization", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Программа может приготовить оптимизированный StaticMesh-драфт с decimate/LOD budget; применять в pak только после проверки query/physics.";
+        }
+        if (safetyLevel.Equals("needs-field-analysis", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Модуль найден по pak-index, но поля не прочитаны в time budget. Открыть attachment отдельно и найти MeshSetup.";
+        }
+
+        return $"Проверить {role}/{meshKind} вручную перед cook и pak.";
+    }
+
+    private static double InferVehicleModuleTargetLongestCm(string role, string profileKind, StudioModelBoundsDto? bounds)
+    {
+        var fallback = role.ToLowerInvariant() switch
+        {
+            "vehicle-root" => 1800d,
+            "chassis" => 900d,
+            "engine" => 180d,
+            "wing" => 650d,
+            "tail-control" => 240d,
+            "landing-gear" => 180d,
+            "weapon-mount" => 120d,
+            "seat-driver" or "seat-passenger" => 120d,
+            _ => profileKind.Equals("airplane", StringComparison.OrdinalIgnoreCase) ? 300d : 180d
+        };
+
+        if (bounds is null)
+        {
+            return fallback;
+        }
+
+        if (Math.Max(bounds.SizeX, Math.Max(bounds.SizeY, bounds.SizeZ)) <= 0)
+        {
+            return fallback;
+        }
+
+        return fallback;
+    }
+
+    private static int InferVehicleModuleTargetTriangleCount(
+        string role,
+        string profileKind,
+        List<StudioRawModelPartDto> selectedParts)
+    {
+        var fallback = role.ToLowerInvariant() switch
+        {
+            "vehicle-root" => 16000,
+            "chassis" => 14000,
+            "engine" => 8000,
+            "wing" => 6000,
+            "tail-control" => 3500,
+            "landing-gear" => 2500,
+            "weapon-mount" => 4500,
+            "seat-driver" or "seat-passenger" => 3000,
+            _ => profileKind.Equals("airplane", StringComparison.OrdinalIgnoreCase) ? 5000 : 3500
+        };
+
+        var currentTriangles = selectedParts.Sum(part => part.Triangles);
+        return currentTriangles > fallback ? fallback : 0;
+    }
+
+    private static string BuildVehicleModulePlanRecommendation(
+        StudioVehicleProfileAssetDto asset,
+        StudioVehicleProfileFieldDto? field,
+        List<StudioRawModelPartDto> selectedParts,
+        string safetyLevel)
+    {
+        var partText = selectedParts.Count > 0
+            ? $"Кандидаты raw: {string.Join(", ", selectedParts.Select(part => part.Name).Take(5))}."
+            : "Подходящих raw-частей пока нет.";
+        var fieldText = field is not null
+            ? $"Целевое поле: {field.Label} ({field.FieldPath})."
+            : "Целевое visual-поле пока не определено.";
+
+        return safetyLevel switch
+        {
+            "candidate-static-visual" => $"{fieldText} {partText} Безопасный тест: один модуль, SCUM material .mi, без изменения QueryMesh/physics.",
+            "blocked-skeletal-contract" => $"{fieldText} {partText} Нужна отдельная сборка skeleton с sockets: {string.Join(", ", asset.RequiredSockets.Take(8))}.",
+            "blocked-query-proxy" => $"{fieldText} QueryMesh/Collision должен быть простым proxy, иначе возможны лаги, взрыв транспорта или fatal.",
+            "mount-slot-plan" => $"{partText} Для сидений менять MountSocketName, MountedTransformCorrection и paths; анимации prisoner готовить отдельным профилем.",
+            "needs-split" => $"{partText} Перед cook надо отделить этот модуль из общей Valkyrie и проверить material slot.",
+            "needs-optimization" => $"{fieldText} {partText} Слишком тяжёлый набор для одного attachment: сначала split/decimate/LOD, затем один модульный cook.",
+            "needs-field-analysis" => $"{fieldText} Открыть attachment отдельно: profile видит модуль, но не успел прочитать поля.",
+            _ => $"{fieldText} {partText} Требуется ручная проверка контракта."
+        };
+    }
+
+    private static List<string> BuildVehicleModulePlanNextSteps(
+        StudioVehicleProfileDto profile,
+        List<StudioRawModelPartDto> rawParts,
+        List<StudioVehicleModulePlanEntryDto> entries)
+    {
+        var steps = new List<string>
+        {
+            "Не собирать Duster/Valkyrie как один монолитный replacement pak: root, attachments, query и seats должны идти раздельно.",
+            "Первый безопасный pak должен менять только один candidate-static-visual модуль и оставлять QueryMeshSetup/physics/damage оригинала.",
+            "Для Valkyrie отделить hull, wing, tail, engine/rotor, landing gear и weapon parts в отдельные FBX/StaticMesh cook targets.",
+            "Для посадки игрока перенести mount slot transforms/sockets; новые prisoner-анимации готовить отдельно после стабильного spawn."
+        };
+
+        if (rawParts.Sum(part => part.Triangles) > 75000)
+        {
+            steps.Add("Снизить полигоны и добавить LOD: текущая модель слишком тяжёлая для full-detail транспорта в SCUM.");
+        }
+        if (entries.Any(entry => entry.SafetyLevel.Equals("blocked-query-proxy", StringComparison.OrdinalIgnoreCase)))
+        {
+            steps.Add("Сгенерировать low-poly query proxies по габаритам модулей, не использовать Valkyrie visual mesh для QueryMeshSetup.");
+        }
+        if (profile.RequiredSockets.Count > 0)
+        {
+            steps.Add($"Сохранить/создать sockets: {string.Join(", ", profile.RequiredSockets.Take(12))}.");
+        }
+
+        return steps;
+    }
+
+    private static StudioVehicleProfileAssetDto BuildVehicleProfileAsset(StudioFieldDiscoveryReportDto report)
+    {
+        var keyFields = report.Fields
+            .Where(IsVehicleProfileInterestingField)
+            .OrderBy(GetVehicleProfileFieldPriority)
+            .ThenBy(field => field.FieldPath, StringComparer.OrdinalIgnoreCase)
+            .Select(field => new StudioVehicleProfileFieldDto(
+                field.FieldPath,
+                field.Label,
+                ClassifyVehicleProfileFieldKind(field),
+                field.CurrentValue,
+                field.CurrentDisplayValue))
+            .Take(120)
+            .ToList();
+
+        var requiredSockets = report.Fields
+            .Where(IsVehicleSocketField)
+            .Select(field => (field.CurrentDisplayValue ?? field.CurrentValue ?? string.Empty).Trim())
+            .Where(value => value.StartsWith("s_", StringComparison.OrdinalIgnoreCase)
+                            || value.Equals("Root", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var materialReferences = report.Fields
+            .Where(field => ClassifyVehicleProfileFieldKind(field).Equals("material", StringComparison.OrdinalIgnoreCase))
+            .Select(field => field.CurrentValue)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Take(40)
+            .ToList();
+
+        var fieldKinds = keyFields
+            .GroupBy(field => field.Kind, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+        var assetWarnings = new List<string>();
+        if (fieldKinds.GetValueOrDefault("query-mesh") > 0)
+        {
+            assetWarnings.Add("QueryMeshSetup найден: не заменяй полной visual-моделью, нужен упрощённый collision/query proxy.");
+        }
+        if (fieldKinds.GetValueOrDefault("skeletal-mesh") > 0)
+        {
+            assetWarnings.Add("SkeletalMesh найден: нужна совместимость skeleton, sockets и AnimationBlueprintClass.");
+        }
+        if (fieldKinds.GetValueOrDefault("material") == 0 && keyFields.Any(field => field.Kind.Contains("mesh", StringComparison.OrdinalIgnoreCase)))
+        {
+            assetWarnings.Add("Материальные слоты не определены из полей: перед заменой проверить imports mesh asset и минимум material index 0.");
+        }
+
+        return new StudioVehicleProfileAssetDto(
+            report.AssetId,
+            report.RelativePath,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(report.RelativePath)),
+            ClassifyVehicleProfileAssetRole(report.RelativePath),
+            fieldKinds.Where(pair => pair.Key.Contains("mesh", StringComparison.OrdinalIgnoreCase) || pair.Key.Equals("root-visual", StringComparison.OrdinalIgnoreCase)).Sum(pair => pair.Value),
+            fieldKinds.GetValueOrDefault("query-mesh"),
+            fieldKinds.GetValueOrDefault("skeletal-mesh"),
+            fieldKinds.GetValueOrDefault("static-mesh"),
+            fieldKinds.GetValueOrDefault("material"),
+            fieldKinds.GetValueOrDefault("socket"),
+            fieldKinds.GetValueOrDefault("attachment-slot"),
+            fieldKinds.GetValueOrDefault("mount-slot"),
+            requiredSockets,
+            materialReferences,
+            keyFields,
+            assetWarnings);
+    }
+
+    private static int GetVehicleProfileFieldPriority(StudioFieldDiscoveryCandidateDto field)
+    {
+        return ClassifyVehicleProfileFieldKind(field) switch
+        {
+            "skeletal-mesh" => 0,
+            "static-mesh" => 0,
+            "query-mesh" => 0,
+            "root-visual" => 0,
+            "material" => 1,
+            "socket" => 2,
+            "mount-slot" => 3,
+            "attachment-slot" => 4,
+            "animation" => 5,
+            "physics-contract" => 6,
+            "destruction" => 7,
+            _ => 20
+        };
+    }
+
+    private static StudioVehicleProfileAssetDto BuildVehicleProfileAssetFromPath(
+        string assetId,
+        string relativePath,
+        string warning)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath);
+        return new StudioVehicleProfileAssetDto(
+            assetId,
+            normalized,
+            LocalizeReferenceObjectName(Path.GetFileNameWithoutExtension(normalized)),
+            ClassifyVehicleProfileAssetRole(normalized),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            [],
+            [],
+            [],
+            string.IsNullOrWhiteSpace(warning) ? [] : [warning]);
+    }
+
+    private static bool IsVehicleProfilePath(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        return normalized.Contains("/vehicles/", StringComparison.Ordinal)
+            || normalized.Contains("/models/vehicles", StringComparison.Ordinal)
+            || normalized.Contains("/airplane/", StringComparison.Ordinal)
+            || normalized.Contains("/duster/", StringComparison.Ordinal)
+            || normalized.Contains("kinglet", StringComparison.Ordinal);
+    }
+
+    private IEnumerable<string> EnumerateVehicleProfileRelatedAssetIds(string rootRelativePath)
+    {
+        PakIndex pakIndex;
+        try
+        {
+            pakIndex = GetOrLoadPakIndex();
+        }
+        catch
+        {
+            yield break;
+        }
+
+        var normalizedRoot = PathUtil.NormalizeRelative(rootRelativePath).ToLowerInvariant();
+        var rootFolder = Path.GetDirectoryName(normalizedRoot)?.Replace('\\', '/') ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(rootFolder))
+        {
+            yield break;
+        }
+
+        foreach (var path in pakIndex.GetAllRelativePaths()
+                     .Select(PathUtil.NormalizeRelative)
+                     .Where(path => path.StartsWith(rootFolder + "/", StringComparison.OrdinalIgnoreCase))
+                     .Where(IsVehicleProfileTraversableAssetPath)
+                     .OrderBy(path => ClassifyVehicleProfileAssetRole(path), StringComparer.OrdinalIgnoreCase)
+                     .ThenBy(path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            yield return $"game::{path.ToLowerInvariant()}";
+        }
+    }
+
+    private static bool IsVehicleProfileTraversableAssetPath(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath).ToLowerInvariant();
+        if (!normalized.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+            || !IsVehicleProfilePath(normalized))
+        {
+            return false;
+        }
+
+        var leaf = Path.GetFileNameWithoutExtension(normalized);
+        var isMountSlotPath = normalized.Contains("/mountslots/", StringComparison.Ordinal)
+                              || leaf.Contains("mountslot", StringComparison.Ordinal);
+        if (leaf.StartsWith("sm_", StringComparison.Ordinal)
+            || leaf.StartsWith("sk_", StringComparison.Ordinal)
+            || leaf.StartsWith("mi_", StringComparison.Ordinal)
+            || leaf.StartsWith("m_", StringComparison.Ordinal)
+            || leaf.StartsWith("t_", StringComparison.Ordinal)
+            || leaf.StartsWith("tx_", StringComparison.Ordinal)
+            || leaf.StartsWith("dt_", StringComparison.Ordinal)
+            || (!isMountSlotPath && leaf.StartsWith("da_", StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        return leaf.StartsWith("bpc_", StringComparison.Ordinal)
+            || leaf.StartsWith("bp_", StringComparison.Ordinal)
+            || isMountSlotPath;
+    }
+
+    private static bool IsVehicleProfileLinkField(StudioFieldDiscoveryCandidateDto field)
+    {
+        var haystack = $"{field.Label} {field.SourceLabel} {field.CurrentValue}".ToLowerInvariant();
+        return haystack.Contains("possible attachment classes", StringComparison.Ordinal)
+            || haystack.Contains("chassis slot", StringComparison.Ordinal)
+            || haystack.Contains("mount slot classes", StringComparison.Ordinal)
+            || haystack.Contains("attachment class", StringComparison.Ordinal)
+            || haystack.Contains("mountslot", StringComparison.Ordinal);
+    }
+
+    private static bool IsVehicleProfileInterestingField(StudioFieldDiscoveryCandidateDto field)
+    {
+        var kind = ClassifyVehicleProfileFieldKind(field);
+        return kind is not "other";
+    }
+
+    private static bool IsVehicleSocketField(StudioFieldDiscoveryCandidateDto field)
+    {
+        var haystack = $"{field.Label} {field.SourceLabel}".ToLowerInvariant();
+        var value = $"{field.CurrentValue} {field.CurrentDisplayValue}".Trim();
+        return haystack.Contains("socket", StringComparison.Ordinal)
+            || value.StartsWith("s_", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("Root", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ClassifyVehicleProfileFieldKind(StudioFieldDiscoveryCandidateDto field)
+    {
+        var picker = (field.ReferencePickerKind ?? string.Empty).ToLowerInvariant();
+        var label = $"{field.Label} {field.SourceLabel}".ToLowerInvariant();
+        var value = field.CurrentValue ?? string.Empty;
+
+        if (label.Contains("destruction effect", StringComparison.Ordinal))
+        {
+            return "destruction";
+        }
+        if (label.Contains("animation blueprint", StringComparison.Ordinal)
+            || label.Contains("anim class", StringComparison.Ordinal)
+            || label.Contains("mounted anim", StringComparison.Ordinal)
+            || label.Contains("mounted animation", StringComparison.Ordinal)
+            || label.Contains("blendspace", StringComparison.Ordinal)
+            || value.EndsWith("_C", StringComparison.OrdinalIgnoreCase)
+               && value.Contains("abp_", StringComparison.OrdinalIgnoreCase))
+        {
+            return "animation";
+        }
+        if (label.Contains("query mesh setup", StringComparison.Ordinal)
+            && (picker.Contains("static", StringComparison.Ordinal)
+                || picker.Contains("skeletal", StringComparison.Ordinal)
+                || label.Contains("mesh / mesh", StringComparison.Ordinal)
+                || value.Contains("|/Script/Engine|StaticMesh", StringComparison.OrdinalIgnoreCase)
+                || value.Contains("|/Script/Engine|SkeletalMesh", StringComparison.OrdinalIgnoreCase)))
+        {
+            return "query-mesh";
+        }
+        if (picker.Contains("skeletal", StringComparison.Ordinal)
+            || label.Contains("скелетная модель", StringComparison.Ordinal)
+            || value.Contains("|/Script/Engine|SkeletalMesh", StringComparison.OrdinalIgnoreCase))
+        {
+            return "skeletal-mesh";
+        }
+        if (picker.Contains("static", StringComparison.Ordinal)
+            || label.Contains("статическая модель", StringComparison.Ordinal)
+            || value.Contains("|/Script/Engine|StaticMesh", StringComparison.OrdinalIgnoreCase))
+        {
+            return "static-mesh";
+        }
+        if (picker.Contains("material", StringComparison.Ordinal)
+            || label.Contains("material", StringComparison.Ordinal)
+            || label.Contains("материал", StringComparison.Ordinal))
+        {
+            return "material";
+        }
+        if (IsVehicleSocketField(field))
+        {
+            return "socket";
+        }
+        if (label.Contains("mount slot", StringComparison.Ordinal)
+            || label.Contains("mounted transform", StringComparison.Ordinal)
+            || label.Contains("external mount path", StringComparison.Ordinal)
+            || label.Contains("internal mount path", StringComparison.Ordinal)
+            || label.Contains("destination transform", StringComparison.Ordinal))
+        {
+            return "mount-slot";
+        }
+        if (label.Contains("possible attachment classes", StringComparison.Ordinal)
+            || label.Contains("chassis slot", StringComparison.Ordinal)
+            || label.Contains("/slots", StringComparison.Ordinal))
+        {
+            return "attachment-slot";
+        }
+        if (label.Contains("aerodynamic", StringComparison.Ordinal)
+            || label.Contains("propeller", StringComparison.Ordinal)
+            || label.Contains("physics", StringComparison.Ordinal)
+            || label.Contains("collision", StringComparison.Ordinal)
+            || label.Contains("damage region", StringComparison.Ordinal))
+        {
+            return "physics-contract";
+        }
+
+        return "other";
+    }
+
+    private static string ClassifyVehicleProfileAssetRole(string relativePath)
+    {
+        var leaf = Path.GetFileNameWithoutExtension(relativePath).ToLowerInvariant();
+        if (leaf.Contains("mountslot", StringComparison.Ordinal) || relativePath.Contains("/mountslots/", StringComparison.OrdinalIgnoreCase))
+        {
+            return leaf.Contains("passenger", StringComparison.Ordinal) ? "seat-passenger" : "seat-driver";
+        }
+        if (leaf.Contains("chassis", StringComparison.Ordinal))
+        {
+            return "chassis";
+        }
+        if (leaf.Contains("wing", StringComparison.Ordinal) || leaf.Contains("aileron", StringComparison.Ordinal) || leaf.Contains("airfoil", StringComparison.Ordinal))
+        {
+            return "wing";
+        }
+        if (leaf.Contains("stabilizer", StringComparison.Ordinal) || leaf.Contains("elevator", StringComparison.Ordinal) || leaf.Contains("rudder", StringComparison.Ordinal))
+        {
+            return "tail-control";
+        }
+        if (leaf.Contains("wheel", StringComparison.Ordinal) || leaf.Contains("leg", StringComparison.Ordinal) || leaf.Contains("strut", StringComparison.Ordinal))
+        {
+            return "landing-gear";
+        }
+        if (leaf.Contains("engine", StringComparison.Ordinal) || leaf.Contains("propeller", StringComparison.Ordinal))
+        {
+            return "engine";
+        }
+        if (leaf.Contains("weapon", StringComparison.Ordinal))
+        {
+            return "weapon-mount";
+        }
+        if (leaf.StartsWith("bpc_", StringComparison.Ordinal))
+        {
+            return "vehicle-root";
+        }
+        return "vehicle-asset";
+    }
+
+    private static string ClassifyVehicleProfileKind(string relativePath)
+    {
+        var normalized = relativePath.ToLowerInvariant();
+        if (normalized.Contains("/airplane/", StringComparison.Ordinal)
+            || normalized.Contains("duster", StringComparison.Ordinal)
+            || normalized.Contains("kinglet", StringComparison.Ordinal))
+        {
+            return "airplane";
+        }
+
+        return "vehicle";
+    }
+
+    private static List<string> BuildVehicleProfileRecommendations(
+        string rootRelativePath,
+        List<StudioVehicleProfileAssetDto> assets,
+        List<string> requiredSockets,
+        List<string> materials)
+    {
+        var recommendations = new List<string>
+        {
+            "Сначала сохранить оригинальные QueryMeshSetup/physics/damage поля и менять только один visual StaticMesh-модуль за тест.",
+            "Для любых модулей транспорта сохранять минимум material slot 0 и использовать cooked MaterialInstance из SCUM.",
+            "SkeletalMesh транспорта менять только через профиль с теми же sockets, skeleton reference, PhysicsAsset и AnimationBlueprintClass.",
+            "После каждого pak проверять UnrealPak -Test, spawn в игре и SCUM.log до перехода к следующему модулю."
+        };
+
+        if (ClassifyVehicleProfileKind(rootRelativePath).Equals("airplane", StringComparison.OrdinalIgnoreCase))
+        {
+            recommendations.Add("Для самолёта отдельно сверить aerodynamic surfaces, propeller location, critical attachment tags и wing/rudder/elevator sockets.");
+        }
+        if (requiredSockets.Any(socket => socket.Contains("Driver", StringComparison.OrdinalIgnoreCase)
+                                          || socket.Contains("Passenger", StringComparison.OrdinalIgnoreCase)))
+        {
+            recommendations.Add("Посадку игрока переносить через mount slot assets: MountSocketName, MountedTransformCorrection и External/Internal MountPaths.");
+        }
+        if (materials.Count == 0)
+        {
+            recommendations.Add("Материалы не найдены в профиле: перед заменой прочитать imports целевых mesh assets и выбрать совместимый SCUM .mi вручную.");
+        }
+        if (assets.Any(asset => asset.QueryFieldCount > 0))
+        {
+            recommendations.Add("Query meshes не заменять full-detail моделью; для них нужен упрощённый proxy по габаритам новой модели.");
+        }
+
+        return recommendations;
     }
 
     public StudioModAssetSchemaDto PreviewModdingAssetSchema(StudioSchemaPreviewRequestDto request)
@@ -6247,7 +19932,7 @@ internal sealed class StudioRuntime
         var fileName = Path.GetFileNameWithoutExtension(path);
         if (string.IsNullOrWhiteSpace(fileName)
             || IsAlwaysHiddenCatalogLane(path)
-            || IsKnownUnstableCatalogAsset(path))
+            || (IsKnownUnstableCatalogAsset(path) && !IsSafeNpcSpawnerPresetCatalogAsset(path)))
         {
             return false;
         }
@@ -6327,6 +20012,11 @@ internal sealed class StudioRuntime
         return KnownUnstableCatalogAssetSuffixes.Any(suffix => path.EndsWith(suffix, StringComparison.Ordinal));
     }
 
+    private static bool IsSafeNpcSpawnerPresetCatalogAsset(string path)
+    {
+        return path.Contains("/items/spawnerpresets2/character/armednpcs/", StringComparison.Ordinal);
+    }
+
     private static bool IsLikelyEditableNpcEncounterAsset(string path, string fileName)
     {
         if (fileName.Contains("_lpc", StringComparison.OrdinalIgnoreCase)
@@ -6338,6 +20028,8 @@ internal sealed class StudioRuntime
         return path.Contains("/encounters/character_presets/npcs/", StringComparison.Ordinal)
             || path.Contains("/encounters/encounterclasses/", StringComparison.Ordinal)
             || path.Contains("/encounters/spawn_amount_curves/", StringComparison.Ordinal)
+            || path.Contains("/items/spawnerpresets2/character/armednpcs/", StringComparison.Ordinal)
+            || path.Contains("/characters/zombies2/blueprints/", StringComparison.Ordinal)
             || path.Contains("/worldevents/", StringComparison.Ordinal)
             || (path.Contains("/gameevents/", StringComparison.Ordinal)
                 && !path.Contains("/ui/gameevents/", StringComparison.Ordinal))
@@ -11552,6 +25244,53 @@ internal sealed class StudioRuntime
         return !string.IsNullOrWhiteSpace(objectName);
     }
 
+    private static bool TryResolveExportClassName(UAsset asset, int exportIndex, out string className)
+    {
+        className = string.Empty;
+        if (exportIndex < 0
+            || exportIndex >= asset.Exports.Count
+            || asset.Exports[exportIndex] is not NormalExport export)
+        {
+            return false;
+        }
+
+        try
+        {
+            className = export.GetExportClassType().Value.ToString();
+        }
+        catch
+        {
+            className = string.Empty;
+        }
+
+        if (!string.IsNullOrWhiteSpace(className))
+        {
+            return true;
+        }
+
+        return TryResolveImportObjectName(asset, export.ClassIndex, out className);
+    }
+
+    private static bool IsUnsafeEditableExportObjectReference(UAsset asset, FPackageIndex packageIndex)
+    {
+        var index = packageIndex.Index;
+        if (index <= 0)
+        {
+            return false;
+        }
+
+        var exportIndex = index - 1;
+        if (!TryResolveExportClassName(asset, exportIndex, out var className))
+        {
+            return false;
+        }
+
+        return className.EndsWith("Component", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("SceneComponent", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("SkeletalMeshComponent", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("StaticMeshComponent", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool TryResolvePackageImportPath(UAsset asset, FPackageIndex packageIndex, out string packagePath)
     {
         packagePath = string.Empty;
@@ -11604,6 +25343,11 @@ internal sealed class StudioRuntime
         if (normalized.StartsWith("class:", StringComparison.OrdinalIgnoreCase))
         {
             var className = normalized["class:".Length..].Trim();
+            if (className.Equals("AttachmentSocketMountTypePrisonerHand", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Рука персонажа";
+            }
+
             return LocalizeReferenceObjectName(className);
         }
 
@@ -11660,6 +25404,13 @@ internal sealed class StudioRuntime
         if (TryDescribeAdvancedItemSpawnerPresetAsset(relativePath, out var advancedDescriptor))
         {
             displayName = TrimReferenceDescriptorPrefix(advancedDescriptor.DisplayName, "Контейнерный пресет:");
+            return true;
+        }
+
+        if (relativePath.Contains("/items/weapons/attachmentsockets/", StringComparison.OrdinalIgnoreCase)
+            && Path.GetFileNameWithoutExtension(relativePath).Contains("mounttype", StringComparison.OrdinalIgnoreCase))
+        {
+            displayName = ResolveAttachmentSocketMountTypeDisplayName(relativePath);
             return true;
         }
 
@@ -11751,6 +25502,12 @@ internal sealed class StudioRuntime
         if (name.StartsWith("CI_", StringComparison.OrdinalIgnoreCase))
         {
             return LocalizeAssetStem(name["CI_".Length..]);
+        }
+
+        if (name.StartsWith("BP_MountType", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("bp_mounttype", StringComparison.OrdinalIgnoreCase))
+        {
+            return ResolveAttachmentSocketMountTypeDisplayName(name);
         }
 
         return LocalizeAssetStem(name);
@@ -13259,6 +27016,44 @@ internal sealed class StudioRuntime
         return CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(value)));
     }
 
+    private static string LocalizeBankCardType(string raw)
+    {
+        var value = (raw ?? string.Empty).Trim();
+        if (value.StartsWith("EBankCardType::", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value["EBankCardType::".Length..];
+        }
+
+        return value.ToLowerInvariant() switch
+        {
+            "none" => "без карты",
+            "starter" => "стартовая карта",
+            "classic" => "классическая карта",
+            "gold" => "золотая карта",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(value)))
+        };
+    }
+
+    private static string LocalizeEconomyRarityKey(string raw)
+    {
+        var value = (raw ?? string.Empty).Trim();
+        if (value.StartsWith("EItemRarity::", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value["EItemRarity::".Length..];
+        }
+
+        return value.ToLowerInvariant() switch
+        {
+            "extremelyrare" => "чрезвычайно редкий",
+            "veryrare" => "очень редкий",
+            "rare" => "редкий",
+            "uncommon" => "необычный",
+            "common" => "обычный",
+            "abundant" => "частый",
+            _ => CapitalizeFirst(NormalizeLocalizedLabel(LocalizeAssetStem(value)))
+        };
+    }
+
     private static string ResolveMapEntryLabel(UAsset asset, string relativePath, string parentLabel, PropertyData keyProperty, int fallbackIndex)
     {
         var path = relativePath.ToLowerInvariant();
@@ -13324,6 +27119,21 @@ internal sealed class StudioRuntime
         if (keyProperty is EnumPropertyData questCurrencyKey && IsQuestRewardCurrencySurface(relativePath, parentLabel))
         {
             return LocalizeQuestCurrencyType(questCurrencyKey.Value?.ToString() ?? string.Empty);
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && keyProperty is EnumPropertyData economyEnumKey)
+        {
+            var keyValue = economyEnumKey.Value?.ToString() ?? string.Empty;
+            if (normalizedParent.Contains("carddataperbankcardtype", StringComparison.Ordinal))
+            {
+                return LocalizeBankCardType(keyValue);
+            }
+
+            if (normalizedParent.Contains("rotationrarityvsavailabilitychance", StringComparison.Ordinal))
+            {
+                return LocalizeEconomyRarityKey(keyValue);
+            }
         }
 
         switch (keyProperty)
@@ -13670,6 +27480,11 @@ internal sealed class StudioRuntime
                 currentValue = textProperty.Value?.ToString() ?? string.Empty;
                 currentDisplayValue = currentValue;
                 return true;
+            case ObjectPropertyData objectProperty when IsUnsafeEditableExportObjectReference(asset, objectProperty.Value):
+                valueType = string.Empty;
+                currentValue = string.Empty;
+                currentDisplayValue = string.Empty;
+                return false;
             case ObjectPropertyData objectProperty when TryExtractObjectReferencePickerValue(asset, objectProperty.Value, out var objectReference, out var objectDisplayValue):
                 valueType = "object";
                 currentValue = objectReference;
@@ -13782,6 +27597,24 @@ internal sealed class StudioRuntime
                 .Replace("clean material", "материал (чистая версия)", StringComparison.OrdinalIgnoreCase)
                 .Replace("stove pipe mesh", "модель неисправности (застрявшая гильза)", StringComparison.OrdinalIgnoreCase)
                 .Replace("double feed mesh", "модель неисправности (двойная подача)", StringComparison.OrdinalIgnoreCase)
+                .Replace("attachment sockets offset", "смещение крепления на теле", StringComparison.OrdinalIgnoreCase)
+                .Replace("muzzle socket name", "сокет дула", StringComparison.OrdinalIgnoreCase)
+                .Replace("grip correction socket name", "сокет хвата", StringComparison.OrdinalIgnoreCase)
+                .Replace("aiming down the sights center socket name", "сокет центра прицела", StringComparison.OrdinalIgnoreCase)
+                .Replace("eject casing socket name", "сокет выброса гильзы", StringComparison.OrdinalIgnoreCase)
+                .Replace("supporting hand ik socket name", "сокет левой руки IK", StringComparison.OrdinalIgnoreCase)
+                .Replace("supporting hand ik location", "позиция левой руки IK", StringComparison.OrdinalIgnoreCase)
+                .Replace("aiming down the sights location offset", "смещение прицельной стойки", StringComparison.OrdinalIgnoreCase)
+                .Replace("ignore supporting hand ik", "игнорировать IK левой руки", StringComparison.OrdinalIgnoreCase)
+                .Replace("bone name", "кость крепления", StringComparison.OrdinalIgnoreCase)
+                .Replace(" / Location / X", " / позиция X", StringComparison.OrdinalIgnoreCase)
+                .Replace(" / Location / Y", " / позиция Y", StringComparison.OrdinalIgnoreCase)
+                .Replace(" / Location / Z", " / позиция Z", StringComparison.OrdinalIgnoreCase)
+                .Replace(" / Rotation / Pitch", " / наклон (Pitch)", StringComparison.OrdinalIgnoreCase)
+                .Replace(" / Rotation / Yaw", " / разворот (Yaw)", StringComparison.OrdinalIgnoreCase)
+                .Replace(" / Rotation / Roll", " / крен (Roll)", StringComparison.OrdinalIgnoreCase)
+                .Replace("location / location", "позиция", StringComparison.OrdinalIgnoreCase)
+                .Replace("rotation / rotation", "поворот", StringComparison.OrdinalIgnoreCase)
                 .Replace("default texture", "базовая текстура", StringComparison.OrdinalIgnoreCase)
                 .Replace("should apply location specific spawn chance modifier", "учитывать модификатор шанса по локации", StringComparison.OrdinalIgnoreCase)
                 .Replace("should apply location specific chance modifier", "учитывать модификатор шанса по локации", StringComparison.OrdinalIgnoreCase)
@@ -13971,6 +27804,7 @@ internal sealed class StudioRuntime
                 .Replace("минимум removal дистанция", "дистанция полного удаления", StringComparison.OrdinalIgnoreCase)
                 .Replace("allowed group появление points", "сколько групповых точек появления можно использовать", StringComparison.OrdinalIgnoreCase)
                 .Replace("is group появление", "появлять сразу группой", StringComparison.OrdinalIgnoreCase)
+                .Replace("character base amount curve", "кривая количества NPC", StringComparison.OrdinalIgnoreCase)
                 .Replace("количество персонажей за цикл", "сколько персонажей может появиться", StringComparison.OrdinalIgnoreCase)
                 .Replace("добавка к числу персонажей за игрока", "добавка к числу NPC за игрока", StringComparison.OrdinalIgnoreCase)
                 .Replace("минимум дистанция between characters", "минимальная дистанция между персонажами", StringComparison.OrdinalIgnoreCase)
@@ -14092,6 +27926,29 @@ internal sealed class StudioRuntime
                 .Replace("expensive tradeables появление шанс map", "шанс появления дорогих товаров", StringComparison.OrdinalIgnoreCase)
                 .Replace("expensive tradeables появление chance map", "шанс появления дорогих товаров", StringComparison.OrdinalIgnoreCase)
                 .Replace("expensive tradeables spawn chance map", "шанс появления дорогих товаров", StringComparison.OrdinalIgnoreCase)
+                .Replace("currency descriptions", "описание валюты", StringComparison.OrdinalIgnoreCase)
+                .Replace("currency symbol", "символ валюты", StringComparison.OrdinalIgnoreCase)
+                .Replace("currency name", "название валюты", StringComparison.OrdinalIgnoreCase)
+                .Replace("config file symbol", "символ валюты в конфиге", StringComparison.OrdinalIgnoreCase)
+                .Replace("required bank card тип to perform transactions", "требуемая банковская карта для операций", StringComparison.OrdinalIgnoreCase)
+                .Replace("required bank card type to perform transactions", "требуемая банковская карта для операций", StringComparison.OrdinalIgnoreCase)
+                .Replace("must be owner of bank card", "требовать владельца банковской карты", StringComparison.OrdinalIgnoreCase)
+                .Replace("card data per bank card тип", "настройки банковских карт", StringComparison.OrdinalIgnoreCase)
+                .Replace("card data per bank card type", "настройки банковских карт", StringComparison.OrdinalIgnoreCase)
+                .Replace("purchase price currency", "валюта покупки карты", StringComparison.OrdinalIgnoreCase)
+                .Replace("purchase price", "цена покупки карты", StringComparison.OrdinalIgnoreCase)
+                .Replace("max wrong pin attempts", "попыток неверного PIN", StringComparison.OrdinalIgnoreCase)
+                .Replace("free renewal num", "бесплатных перевыпусков", StringComparison.OrdinalIgnoreCase)
+                .Replace("daily withdraw limit", "лимит снятия в день", StringComparison.OrdinalIgnoreCase)
+                .Replace("daily deposit limit", "лимит пополнения в день", StringComparison.OrdinalIgnoreCase)
+                .Replace("pin complexity", "сложность PIN", StringComparison.OrdinalIgnoreCase)
+                .Replace("rotation rarity vs availability шанс", "шанс доступности ротации по редкости", StringComparison.OrdinalIgnoreCase)
+                .Replace("rotation rarity vs availability chance", "шанс доступности ротации по редкости", StringComparison.OrdinalIgnoreCase)
+                .Replace("player purchase price delta vs chance curve", "кривая случайного изменения цены покупки", StringComparison.OrdinalIgnoreCase)
+                .Replace("player purchase price delta vs шанс curve", "кривая случайного изменения цены покупки", StringComparison.OrdinalIgnoreCase)
+                .Replace("tradeable durability vs price curve", "кривая цены по прочности товара", StringComparison.OrdinalIgnoreCase)
+                .Replace("tradeable buy price multiplier vs number of players curve", "кривая цены покупки по числу игроков", StringComparison.OrdinalIgnoreCase)
+                .Replace("tradeable sell price multiplier vs number of players curve", "кривая цены продажи по числу игроков", StringComparison.OrdinalIgnoreCase)
                 .Replace("vehicle появление group parent tag / тег", "тег группы спавна транспорта", StringComparison.OrdinalIgnoreCase)
                 .Replace("vehicle spawn group parent tag / тег", "тег группы спавна транспорта", StringComparison.OrdinalIgnoreCase);
 
@@ -14725,7 +28582,32 @@ internal sealed class StudioRuntime
                 .Replace("базовый уровень урон", "базовый урон", StringComparison.OrdinalIgnoreCase);
         }
 
+        if (path.Contains("/items/", StringComparison.OrdinalIgnoreCase)
+            && label.Contains("смещение крепления на теле", StringComparison.OrdinalIgnoreCase))
+        {
+            label = NormalizeItemAttachmentSocketOffsetUserLabel(label);
+        }
+
         return CapitalizeFirst(label.Trim());
+    }
+
+    private static string NormalizeItemAttachmentSocketOffsetUserLabel(string label)
+    {
+        var value = label
+            .Replace(" / Location / X", " / позиция X", StringComparison.OrdinalIgnoreCase)
+            .Replace(" / Location / Y", " / позиция Y", StringComparison.OrdinalIgnoreCase)
+            .Replace(" / Location / Z", " / позиция Z", StringComparison.OrdinalIgnoreCase)
+            .Replace(" / Rotation / Pitch", " / наклон (Pitch)", StringComparison.OrdinalIgnoreCase)
+            .Replace(" / Rotation / Yaw", " / разворот (Yaw)", StringComparison.OrdinalIgnoreCase)
+            .Replace(" / Rotation / Roll", " / крен (Roll)", StringComparison.OrdinalIgnoreCase);
+
+        value = Regex.Replace(value, @"\s*/\s*Location\s*/\s*X\b", " / позиция X", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        value = Regex.Replace(value, @"\s*/\s*Location\s*/\s*Y\b", " / позиция Y", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        value = Regex.Replace(value, @"\s*/\s*Location\s*/\s*Z\b", " / позиция Z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        value = Regex.Replace(value, @"\s*/\s*Rotation\s*/\s*Pitch\b", " / наклон (Pitch)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        value = Regex.Replace(value, @"\s*/\s*Rotation\s*/\s*Yaw\b", " / разворот (Yaw)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        value = Regex.Replace(value, @"\s*/\s*Rotation\s*/\s*Roll\b", " / крен (Roll)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return NormalizeLocalizedLabel(value);
     }
 
     private static string NormalizeItemSpawningUserLabel(string label)
@@ -14992,6 +28874,7 @@ internal sealed class StudioRuntime
             ("min removal distance", "минимальная дистанция удаления"),
             ("allowed group spawn points", "разрешённые групповые точки появления"),
             ("is group spawn", "появлять NPC группой"),
+            ("character base amount curve", "кривая количества NPC"),
             ("character base amount range", "размер группы NPC"),
             ("character amount player cap", "лимит NPC на игрока"),
             ("character respawn time range", "время повторного появления NPC"),
@@ -15026,7 +28909,37 @@ internal sealed class StudioRuntime
             ("gbcrefresh rate per hour", "обновление GBC в час"),
             ("gscrefresh rate per hour", "обновление GSC в час"),
             ("expensive tradeables spawn chance map", "шанс появления дорогих товаров"),
+            ("currency descriptions", "описание валюты"),
+            ("currency symbol", "символ валюты"),
+            ("currency name", "название валюты"),
+            ("config file symbol", "символ валюты в конфиге"),
+            ("required bank card type to perform transactions", "требуемая банковская карта для операций"),
+            ("must be owner of bank card", "требовать владельца банковской карты"),
+            ("card data per bank card type", "настройки банковских карт"),
+            ("purchase price currency", "валюта покупки карты"),
+            ("purchase price", "цена покупки карты"),
+            ("max wrong pin attempts", "попыток неверного PIN"),
+            ("free renewal num", "бесплатных перевыпусков"),
+            ("daily withdraw limit", "лимит снятия в день"),
+            ("daily deposit limit", "лимит пополнения в день"),
+            ("pin complexity", "сложность PIN"),
+            ("rotation rarity vs availability chance", "шанс доступности ротации по редкости"),
+            ("player purchase price delta vs chance curve", "кривая случайного изменения цены покупки"),
+            ("tradeable durability vs price curve", "кривая цены по прочности товара"),
+            ("tradeable buy price multiplier vs number of players curve", "кривая цены покупки по числу игроков"),
+            ("tradeable sell price multiplier vs number of players curve", "кривая цены продажи по числу игроков"),
             ("vehicle spawn group parent tag", "группа появления транспорта"),
+            ("holster attachment socket mount type", "способ крепления в кобуре"),
+            ("holster attachment socket mount тип", "способ крепления в кобуре"),
+            ("attachment socket mount type", "способ крепления предмета"),
+            ("attachment socket mount тип", "способ крепления предмета"),
+            ("hands correctionss data", "коррекция положения рук"),
+            ("hands corrections data", "коррекция положения рук"),
+            ("first person animations data", "анимации от первого лица"),
+            ("grip socket name", "сокет хвата"),
+            ("swimming movement speed modifier", "скорость плавания с предметом"),
+            ("diving movement speed modifier", "скорость ныряния с предметом"),
+            ("can ever have paint job component", "можно использовать покраску"),
             ("repair experience multiplier", "опыт за ремонт"),
             ("fill fuel experience multiplier", "опыт за заправку"),
             ("drain fuel experience multiplier", "опыт за слив топлива"),
@@ -15679,10 +29592,131 @@ internal sealed class StudioRuntime
             || label.Contains("resource for consumption", StringComparison.Ordinal);
     }
 
+    private static bool IsItemSpawnerParticipationLabel(string label)
+    {
+        return label.Contains("не использовать для спавна в мире", StringComparison.Ordinal)
+            || label.Contains("ignored by spawners", StringComparison.Ordinal)
+            || label.Contains("ignore by spawners", StringComparison.Ordinal)
+            || label.Contains("is ignored by spawners", StringComparison.Ordinal);
+    }
+
     private static bool IsVehicleAttachmentClassLabel(string label)
     {
         return label.Contains("класс детали транспорта", StringComparison.Ordinal)
             || label.Contains("attachment class", StringComparison.Ordinal);
+    }
+
+    private static bool IsEncounterSpawnAmountCurveLabel(string label)
+    {
+        return label.Contains("кривая количества npc", StringComparison.Ordinal)
+            || label.Contains("кривая количества спавна", StringComparison.Ordinal)
+            || label.Contains("character base amount curve", StringComparison.Ordinal)
+            || label.Contains("base amount curve", StringComparison.Ordinal);
+    }
+
+    private static bool IsEconomyCurveLabel(string label)
+    {
+        if (!label.Contains("curve", StringComparison.Ordinal)
+            && !label.Contains("кривая", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return label.Contains("цена", StringComparison.Ordinal)
+            || label.Contains("стоим", StringComparison.Ordinal)
+            || label.Contains("покуп", StringComparison.Ordinal)
+            || label.Contains("продаж", StringComparison.Ordinal)
+            || label.Contains("прочност", StringComparison.Ordinal)
+            || label.Contains("игрок", StringComparison.Ordinal)
+            || label.Contains("price", StringComparison.Ordinal)
+            || label.Contains("purchase", StringComparison.Ordinal)
+            || label.Contains("buy", StringComparison.Ordinal)
+            || label.Contains("sell", StringComparison.Ordinal)
+            || label.Contains("durability", StringComparison.Ordinal)
+            || label.Contains("number of players", StringComparison.Ordinal)
+            || label.Contains("player count", StringComparison.Ordinal)
+            || label.Contains("chance", StringComparison.Ordinal)
+            || label.Contains("delta", StringComparison.Ordinal);
+    }
+
+    private static bool IsEconomyCurrencyDescriptionLabel(string label)
+    {
+        if (!label.Contains("описание валюты", StringComparison.Ordinal)
+            && !label.Contains("currency descriptions", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return label.Contains("символ валюты", StringComparison.Ordinal)
+            || label.Contains("название валюты", StringComparison.Ordinal)
+            || label.Contains("символ валюты в конфиге", StringComparison.Ordinal)
+            || label.Contains("currency symbol", StringComparison.Ordinal)
+            || label.Contains("currency name", StringComparison.Ordinal)
+            || label.Contains("config file symbol", StringComparison.Ordinal);
+    }
+
+    private static bool IsEconomyBankCardLabel(string label)
+    {
+        return label.Contains("настройки банковских карт", StringComparison.Ordinal)
+            || label.Contains("card data per bank card", StringComparison.Ordinal)
+            || label.Contains("требуемая банковская карта", StringComparison.Ordinal)
+            || label.Contains("required bank card", StringComparison.Ordinal)
+            || label.Contains("требовать владельца банковской карты", StringComparison.Ordinal)
+            || label.Contains("must be owner of bank card", StringComparison.Ordinal);
+    }
+
+    private static bool IsItemHandsCorrectionsLabel(string label)
+    {
+        return label.Contains("коррекция положения рук", StringComparison.Ordinal)
+            || label.Contains("hands corrections data", StringComparison.Ordinal)
+            || label.Contains("hands correctionss data", StringComparison.Ordinal);
+    }
+
+    private static bool IsItemFirstPersonAnimationsLabel(string label)
+    {
+        return label.Contains("анимации от первого лица", StringComparison.Ordinal)
+            || label.Contains("first person animations data", StringComparison.Ordinal);
+    }
+
+    private static bool IsItemAttachmentSocketMountTypeLabel(string label)
+    {
+        return label.Contains("способ крепления предмета", StringComparison.Ordinal)
+            || label.Contains("способ крепления в кобуре", StringComparison.Ordinal)
+            || label.Contains("attachment socket mount type", StringComparison.Ordinal)
+            || label.Contains("attachment socket mount тип", StringComparison.Ordinal)
+            || label.Contains("holster attachment socket mount type", StringComparison.Ordinal)
+            || label.Contains("holster attachment socket mount тип", StringComparison.Ordinal);
+    }
+
+    private static bool IsItemAttachmentSocketOffsetLabel(string label)
+    {
+        return label.Contains("смещение крепления на теле", StringComparison.Ordinal)
+            || label.Contains("attachment sockets offset", StringComparison.Ordinal)
+            || label.Contains("позиция левой руки ik", StringComparison.Ordinal)
+            || label.Contains("supporting hand ik location", StringComparison.Ordinal)
+            || label.Contains("смещение прицельной стойки", StringComparison.Ordinal)
+            || label.Contains("aiming down the sights location offset", StringComparison.Ordinal);
+    }
+
+    private static bool IsItemGripSocketNameLabel(string label)
+    {
+        return label.Contains("сокет хвата", StringComparison.Ordinal)
+            || label.Contains("grip socket name", StringComparison.Ordinal)
+            || label.Contains("grip correction socket name", StringComparison.Ordinal)
+            || label.Contains("сокет дула", StringComparison.Ordinal)
+            || label.Contains("muzzle socket name", StringComparison.Ordinal)
+            || label.Contains("сокет центра прицела", StringComparison.Ordinal)
+            || label.Contains("aiming down the sights center socket name", StringComparison.Ordinal)
+            || label.Contains("сокет выброса гильзы", StringComparison.Ordinal)
+            || label.Contains("eject casing socket name", StringComparison.Ordinal)
+            || label.Contains("сокет левой руки ik", StringComparison.Ordinal)
+            || label.Contains("supporting hand ik socket name", StringComparison.Ordinal);
+    }
+
+    private static bool IsItemWeaponHandIkToggleLabel(string label)
+    {
+        return label.Contains("игнорировать ik левой руки", StringComparison.Ordinal)
+            || label.Contains("ignore supporting hand ik", StringComparison.Ordinal);
     }
 
     private static bool IsQuestAcceptedRecipesLabel(string label)
@@ -15715,6 +29749,48 @@ internal sealed class StudioRuntime
         var path = relativePath.ToLowerInvariant();
 
         if (IsVisualReferenceFieldCandidate(relativePath, userLabel, valueType))
+        {
+            return true;
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && IsItemSpawnerParticipationLabel(label))
+        {
+            return true;
+        }
+
+        if ((path.Contains("/encounters/", StringComparison.Ordinal)
+                || path.Contains("/npcs/", StringComparison.Ordinal))
+            && IsEncounterSpawnAmountCurveLabel(label))
+        {
+            return true;
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && IsEconomyCurveLabel(label))
+        {
+            return true;
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && IsEconomyCurrencyDescriptionLabel(label))
+        {
+            return true;
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && IsEconomyBankCardLabel(label))
+        {
+            return true;
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && (IsItemHandsCorrectionsLabel(label)
+                || IsItemFirstPersonAnimationsLabel(label)
+                || IsItemAttachmentSocketMountTypeLabel(label)
+                || IsItemAttachmentSocketOffsetLabel(label)
+                || IsItemGripSocketNameLabel(label)
+                || IsItemWeaponHandIkToggleLabel(label)))
         {
             return true;
         }
@@ -16632,18 +30708,7 @@ internal sealed class StudioRuntime
 
     private static bool IsVisualReferenceSurfacePath(string relativePath)
     {
-        var path = relativePath.ToLowerInvariant();
-        return path.Contains("/items/", StringComparison.Ordinal)
-               || path.Contains("/vehicles/", StringComparison.Ordinal)
-               || path.Contains("/fortifications/", StringComparison.Ordinal)
-               || path.Contains("/basebuilding/", StringComparison.Ordinal)
-               || path.Contains("/worldevents/", StringComparison.Ordinal)
-               || path.Contains("/gameevents/", StringComparison.Ordinal)
-               || path.Contains("/characters/", StringComparison.Ordinal)
-               || path.Contains("/foliage/farming/", StringComparison.Ordinal)
-               || path.Contains("/minigames/lockpicking/", StringComparison.Ordinal)
-               || path.Contains("/skills/", StringComparison.Ordinal)
-               || path.Contains("/cooking/", StringComparison.Ordinal);
+        return IsGameplayVisualAssetPath(relativePath);
     }
 
     private static bool ShouldExposeReferenceInfoField(string relativePath, string userLabel)
@@ -17250,6 +31315,24 @@ internal sealed class StudioRuntime
             return "Совместимость транспорта";
         }
 
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && (IsItemHandsCorrectionsLabel(label)
+                || IsItemFirstPersonAnimationsLabel(label)
+                || IsItemAttachmentSocketMountTypeLabel(label)
+                || IsItemGripSocketNameLabel(label)
+                || IsItemWeaponHandIkToggleLabel(label)
+                || label.Contains("скорость плавания с предметом", StringComparison.Ordinal)
+                || label.Contains("скорость ныряния с предметом", StringComparison.Ordinal)))
+        {
+            return "В руках";
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && IsItemAttachmentSocketOffsetLabel(label))
+        {
+            return "Крепление";
+        }
+
         if (path.Contains("/fortifications/locks/", StringComparison.Ordinal)
             && IsLockExplosionRadiusLabel(label))
         {
@@ -17260,6 +31343,30 @@ internal sealed class StudioRuntime
             && IsQuestAcceptedRecipesLabel(label))
         {
             return "Условия квеста";
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && IsEconomyCurveLabel(label))
+        {
+            return "Цены и множители";
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && IsEconomyCurrencyDescriptionLabel(label))
+        {
+            return "Валюта";
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && IsEconomyBankCardLabel(label))
+        {
+            return "Банковские карты";
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && label.Contains("шанс доступности ротации по редкости", StringComparison.Ordinal))
+        {
+            return "Ротация товаров";
         }
 
         if (IsCookingGameplaySurface(relativePath))
@@ -17658,6 +31765,11 @@ internal sealed class StudioRuntime
                 return "Зоны появления";
             }
 
+            if (IsItemSpawnerParticipationLabel(label))
+            {
+                return "Лут и редкость";
+            }
+
             if (label.Contains("rarity", StringComparison.Ordinal)
                 || label.Contains("редкость", StringComparison.Ordinal))
             {
@@ -17925,6 +32037,8 @@ internal sealed class StudioRuntime
 
         if (label.Contains("сколько персонажей может появиться", StringComparison.Ordinal)
             || label.Contains("добавка к числу npc за игрока", StringComparison.Ordinal)
+            || label.Contains("кривая количества npc", StringComparison.Ordinal)
+            || label.Contains("кривая количества спавна", StringComparison.Ordinal)
             || label.Contains("лимит npc на игрока", StringComparison.Ordinal)
             || label.Contains("сколько персонажей возвращать за один цикл", StringComparison.Ordinal)
             || label.Contains("размер волны повторного появления npc", StringComparison.Ordinal)
@@ -18292,6 +32406,92 @@ internal sealed class StudioRuntime
                 return "В каких типах зон этот предмет считается подходящим для появления. Эти флаги помогают спавнерам выбирать лут по месту.";
             }
 
+            if (IsItemSpawnerParticipationLabel(label))
+            {
+                return "Если включено, обычные мировые спавнеры не выбирают этот предмет. Отключай осторожно: предмет начнёт участвовать в луте только там, где другие таблицы уже допускают его появление.";
+            }
+
+            if (IsItemHandsCorrectionsLabel(label))
+            {
+                return "Профиль коррекции рук, который подгоняет хват под форму предмета. Полезно после замены модели: выбирай профиль от похожего предмета.";
+            }
+
+            if (IsItemFirstPersonAnimationsLabel(label))
+            {
+                return "Профиль анимаций от первого лица для предмета. Меняй на совместимый профиль, чтобы новая модель нормально выглядела в руках.";
+            }
+
+            if (IsItemAttachmentSocketMountTypeLabel(label))
+            {
+                return "Какой профиль крепления используется для удержания, кобуры или слота. При замене модели выбирай профиль от похожего предмета: несовместимый профиль может плохо позиционировать предмет.";
+            }
+
+            if (IsItemAttachmentSocketOffsetLabel(label))
+            {
+                if (label.Contains("прицельной", StringComparison.Ordinal)
+                    || label.Contains("aiming down", StringComparison.Ordinal))
+                {
+                    return "Тонкое смещение оружия в прицельной стойке. Используй после замены модели, если мушка/прицел не попадает в центр экрана.";
+                }
+
+                if (label.Contains("левой руки", StringComparison.Ordinal)
+                    || label.Contains("supporting hand", StringComparison.Ordinal))
+                {
+                    return "Позиция IK поддерживающей руки относительно оружия. Помогает посадить левую руку на цевьё или рукоять новой модели.";
+                }
+
+                if (label.Contains("кость крепления", StringComparison.Ordinal)
+                    || label.Contains("bone name", StringComparison.Ordinal))
+                {
+                    return "Кость скелета персонажа, к которой привязывается предмет при переноске или креплении на теле. Для нестандартной модели меняй только если понимаешь, где должен висеть предмет.";
+                }
+
+                if (label.Contains("поворот", StringComparison.Ordinal)
+                    || label.Contains("наклон", StringComparison.Ordinal)
+                    || label.Contains("разворот", StringComparison.Ordinal)
+                    || label.Contains("крен", StringComparison.Ordinal)
+                    || label.Contains("rotation", StringComparison.Ordinal))
+                {
+                    return "Поворот предмета на теле или в кобуре. Используется для точной посадки модели после замены внешнего вида.";
+                }
+
+                return "Смещение предмета на теле или в кобуре. Используется для точной посадки модели после замены внешнего вида.";
+            }
+
+            if (IsItemGripSocketNameLabel(label))
+            {
+                if (label.Contains("дул", StringComparison.Ordinal)
+                    || label.Contains("muzzle", StringComparison.Ordinal))
+                {
+                    return "Имя socket/bone на модели, откуда выходит выстрел, вспышка и трасса. Для пользовательского оружейного rig программа создаёт Muzzle автоматически.";
+                }
+
+                if (label.Contains("прицел", StringComparison.Ordinal)
+                    || label.Contains("aiming down", StringComparison.Ordinal))
+                {
+                    return "Имя socket/bone, по которому игра выравнивает оружие в прицельной стойке. Для корректного ADS он должен существовать в SkeletalMesh.";
+                }
+
+                if (label.Contains("гильз", StringComparison.Ordinal)
+                    || label.Contains("eject", StringComparison.Ordinal))
+                {
+                    return "Имя socket/bone для выброса гильзы. Если его нет, визуальные эффекты выстрела и перезарядки могут появляться не там.";
+                }
+
+                if (label.Contains("левой руки", StringComparison.Ordinal)
+                    || label.Contains("supporting hand", StringComparison.Ordinal))
+                {
+                    return "Имя socket/bone для IK поддерживающей руки. Для пользовательского оружейного rig программа создаёт LeftHandIK автоматически.";
+                }
+
+                return "Имя socket/bone на модели, за который предмет берётся в руки. Для пользовательской модели socket или bone должен существовать с таким же названием.";
+            }
+
+            if (IsItemWeaponHandIkToggleLabel(label))
+            {
+                return "Отключает IK поддерживающей руки. Обычно лучше оставить выключенным, а положение руки исправлять через socket LeftHandIK или координаты IK.";
+            }
+
             if (label.Contains("rarity", StringComparison.Ordinal)
                 || label.Contains("редкость", StringComparison.Ordinal))
             {
@@ -18319,6 +32519,12 @@ internal sealed class StudioRuntime
             if (label.Contains("выбрасывать при входе в боевой режим", StringComparison.Ordinal))
             {
                 return "Если включено, предмет автоматически сбрасывается или убирается, когда игрок переходит в боевой режим.";
+            }
+
+            if (label.Contains("скорость плавания с предметом", StringComparison.Ordinal)
+                || label.Contains("скорость ныряния с предметом", StringComparison.Ordinal))
+            {
+                return "Множитель скорости движения в воде, когда этот предмет находится в руках.";
             }
 
             if (IsFuelPoweredItemSafeFieldLabel(label))
@@ -18983,6 +33189,67 @@ internal sealed class StudioRuntime
             return "Насколько этот вредитель или болезнь уменьшает итоговый урожай растения.";
         }
 
+        if (IsEconomyCurrencyDescriptionLabel(label))
+        {
+            if (label.Contains("символ валюты в конфиге", StringComparison.Ordinal))
+            {
+                return "Короткий символ этой валюты в серверных конфигурациях и экономических настройках.";
+            }
+
+            if (label.Contains("символ валюты", StringComparison.Ordinal))
+            {
+                return "Символ, который игра показывает рядом с суммой этой валюты.";
+            }
+
+            return "Отображаемое название валюты в экономической системе.";
+        }
+
+        if (label.Contains("цена покупки карты", StringComparison.Ordinal))
+        {
+            return "Сколько стоит покупка или оформление банковской карты этого типа.";
+        }
+
+        if (label.Contains("валюта покупки карты", StringComparison.Ordinal))
+        {
+            return "В какой валюте оплачивается покупка банковской карты.";
+        }
+
+        if (label.Contains("попыток неверного pin", StringComparison.Ordinal))
+        {
+            return "Сколько раз можно ошибиться с PIN-кодом до блокировки карты.";
+        }
+
+        if (label.Contains("бесплатных перевыпусков", StringComparison.Ordinal))
+        {
+            return "Сколько бесплатных перевыпусков доступно для карты. Отрицательное значение обычно означает отсутствие лимита.";
+        }
+
+        if (label.Contains("лимит снятия в день", StringComparison.Ordinal)
+            || label.Contains("лимит пополнения в день", StringComparison.Ordinal))
+        {
+            return "Дневной лимит банковской операции для выбранного типа карты.";
+        }
+
+        if (label.Contains("сложность pin", StringComparison.Ordinal))
+        {
+            return "Насколько сложный PIN требуется для этого типа карты.";
+        }
+
+        if (label.Contains("требуемая банковская карта для операций", StringComparison.Ordinal))
+        {
+            return "Какой тип банковской карты нужен игроку, чтобы выполнять операции с этой валютой.";
+        }
+
+        if (label.Contains("требовать владельца банковской карты", StringComparison.Ordinal))
+        {
+            return "Если включено, операции разрешены только владельцу подходящей банковской карты.";
+        }
+
+        if (label.Contains("шанс доступности ротации по редкости", StringComparison.Ordinal))
+        {
+            return "Вероятность того, что товар выбранной редкости попадёт в торговую ротацию.";
+        }
+
         if (label.Contains("порог наличных для уровня", StringComparison.Ordinal)
             || label.Contains("порог золота для уровня", StringComparison.Ordinal))
         {
@@ -19005,9 +33272,31 @@ internal sealed class StudioRuntime
             return "Шанс появления дорогих товаров на каждом уровне экономики.";
         }
 
+        if (label.Contains("кривая цены по прочности товара", StringComparison.Ordinal))
+        {
+            return "Какая CurveFloat определяет множитель цены предмета от его состояния. Замена позволяет сделать повреждённые товары дешевле или мягче настроить штраф за износ.";
+        }
+
+        if (label.Contains("кривая случайного изменения цены покупки", StringComparison.Ordinal))
+        {
+            return "Какая CurveFloat управляет шансом случайного отклонения цены при покупке. Полезно для более живой экономики без ручной правки каждой торговой таблицы.";
+        }
+
+        if (label.Contains("кривая цены покупки по числу игроков", StringComparison.Ordinal)
+            || label.Contains("кривая цены продажи по числу игроков", StringComparison.Ordinal))
+        {
+            return "Какая CurveFloat меняет множитель цены в зависимости от количества игроков. Можно усиливать или ослаблять динамическую экономику сервера.";
+        }
+
         if (label.Contains("тип пресета npc", StringComparison.Ordinal))
         {
             return "Внутренний тег, который определяет тип этого NPC-пресета.";
+        }
+
+        if (label.Contains("кривая количества npc", StringComparison.Ordinal)
+            || label.Contains("кривая количества спавна", StringComparison.Ordinal))
+        {
+            return "Какая кривая CurveFloat задаёт базовое количество NPC для этого события. Замена позволяет быстро переключить шаблон на более мягкую или более плотную схему спавна.";
         }
 
         if (label.Contains("состав пресета npc", StringComparison.Ordinal)
@@ -20273,6 +34562,18 @@ internal sealed class StudioRuntime
             return TraderTypeOptions;
         }
 
+        if (currentValue.StartsWith("ECurrencyType::", StringComparison.OrdinalIgnoreCase)
+            || userLabel.Contains("валюта покупки карты", StringComparison.OrdinalIgnoreCase))
+        {
+            return CurrencyTypeOptions;
+        }
+
+        if (currentValue.StartsWith("EBankCardType::", StringComparison.OrdinalIgnoreCase)
+            || userLabel.Contains("требуемая банковская карта", StringComparison.OrdinalIgnoreCase))
+        {
+            return BankCardTypeOptions;
+        }
+
         if (currentValue.StartsWith("EFoodCookLevel::", StringComparison.OrdinalIgnoreCase)
             || userLabel.Contains("готовность еды", StringComparison.OrdinalIgnoreCase))
         {
@@ -20335,12 +34636,53 @@ internal sealed class StudioRuntime
                 "Найди совместимый blueprint детали транспорта для этого предмета.");
         }
 
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && IsItemHandsCorrectionsLabel(label))
+        {
+            return (
+                "item-hands-corrections",
+                "Найди профиль коррекции рук от похожего предмета, чтобы новая модель правильно сидела в руках.");
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && IsItemFirstPersonAnimationsLabel(label))
+        {
+            return (
+                "item-first-person-animations",
+                "Найди профиль анимаций от первого лица для похожего предмета.");
+        }
+
+        if (path.Contains("/items/", StringComparison.Ordinal)
+            && IsItemAttachmentSocketMountTypeLabel(label))
+        {
+            return (
+                "item-attachment-socket-mount-type",
+                "Найди совместимый профиль крепления предмета для руки, кобуры или слота.");
+        }
+
         if (path.Contains("/quests/", StringComparison.Ordinal)
             && IsQuestAcceptedRecipesLabel(label))
         {
             return (
                 "crafting-recipe-asset",
                 "Найди рецепт, который должен засчитываться этим квестовым условием.");
+        }
+
+        if (path.Contains("/economy/", StringComparison.Ordinal)
+            && IsEconomyCurveLabel(label))
+        {
+            return (
+                "economy-curve",
+                "Найди CurveFloat из экономики, который должен управлять этим ценовым или торговым множителем.");
+        }
+
+        if ((path.Contains("/encounters/", StringComparison.Ordinal)
+                || path.Contains("/npcs/", StringComparison.Ordinal))
+            && IsEncounterSpawnAmountCurveLabel(label))
+        {
+            return (
+                "encounter-spawn-amount-curve",
+                "Найди кривую количества спавна, которая должна управлять базовой плотностью NPC для этого события.");
         }
 
         if (path.Contains("/items/spawnerpresets2/", StringComparison.Ordinal)
@@ -20811,6 +35153,27 @@ internal sealed class StudioRuntime
             && IsLockExplosionRadiusLabel(label))
         {
             return ("0", "10000");
+        }
+
+        if (relativePath.Contains("/items/weapons/", StringComparison.OrdinalIgnoreCase)
+            && (IsItemAttachmentSocketOffsetLabel(label)
+                || IsItemGripSocketNameLabel(label)))
+        {
+            if (label.Contains("pitch", StringComparison.Ordinal)
+                || label.Contains("yaw", StringComparison.Ordinal)
+                || label.Contains("roll", StringComparison.Ordinal)
+                || label.Contains("поворот", StringComparison.Ordinal)
+                || label.Contains("наклон", StringComparison.Ordinal)
+                || label.Contains("разворот", StringComparison.Ordinal)
+                || label.Contains("крен", StringComparison.Ordinal))
+            {
+                return ("-360", "360");
+            }
+
+            if (valueType is "float" or "double" or "int" or "long")
+            {
+                return ("-500", "500");
+            }
         }
 
         if (IsFishingGameplaySurface(relativePath))
@@ -25061,6 +39424,8 @@ internal sealed class StudioRuntime
             }
 
             return path.Contains("/encounters/", StringComparison.Ordinal)
+                || path.Contains("/items/spawnerpresets2/character/armednpcs/", StringComparison.Ordinal)
+                || path.Contains("/characters/zombies2/blueprints/", StringComparison.Ordinal)
                 || (path.Contains("/gameevents/", StringComparison.Ordinal)
                     && !path.Contains("/ui/gameevents/", StringComparison.Ordinal))
                 || path.Contains("/worldevents/", StringComparison.Ordinal)
@@ -26544,7 +40909,7 @@ internal sealed class StudioRuntime
 
     private bool TryExtractAssetFromPak(string pakPath, string extractRoot, string fileName, List<string> warnings)
     {
-        var cryptoRoot = Path.Combine(_runtimePaths.TempRoot, "asset-source-crypto");
+        var cryptoRoot = Path.Combine(_runtimePaths.TempRoot, "asset-source-crypto", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(cryptoRoot);
         var cryptoPath = CryptoKeyWriter.Write(cryptoRoot, DefaultAesKeyHex);
 
@@ -27049,7 +41414,8 @@ internal sealed class StudioRuntime
         UAsset asset;
         try
         {
-            asset = new UAsset(sourcePath, EngineVersion.VER_UE4_27, null, CustomSerializationFlags.None);
+            var flags = CustomSerializationFlags.SkipLoadingExports | CustomSerializationFlags.SkipPreloadDependencyLoading;
+            asset = new UAsset(sourcePath, false, EngineVersion.VER_UE4_27, null, flags);
         }
         catch
         {
@@ -27059,6 +41425,19 @@ internal sealed class StudioRuntime
         foreach (var import in asset.Imports)
         {
             var objectName = import.ObjectName?.ToString() ?? string.Empty;
+            var className = import.ClassName?.ToString() ?? string.Empty;
+            if (className.Equals("Package", StringComparison.OrdinalIgnoreCase)
+                && objectName.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase))
+            {
+                var packageAssetName = objectName[(objectName.LastIndexOf('/') + 1)..];
+                if (!string.IsNullOrWhiteSpace(packageAssetName))
+                {
+                    yield return $"{objectName}.{packageAssetName}";
+                }
+
+                continue;
+            }
+
             if (string.IsNullOrWhiteSpace(objectName)
                 || !TryResolvePackageImportPath(asset, import.OuterIndex, out var packagePath))
             {
@@ -27265,7 +41644,120 @@ internal sealed class StudioRuntime
             return TryApplyAmmunitionSyntheticFieldEdit(asset, edit, warnings, out applied);
         }
 
+        if (edit.FieldPath.StartsWith(VehicleSyntheticFieldPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return TryApplyVehicleSyntheticFieldEdit(asset, edit, warnings, out applied);
+        }
+
         return false;
+    }
+
+    private static bool TryApplyVehicleSyntheticFieldEdit(
+        UAsset asset,
+        StudioFieldEditDto edit,
+        List<string> warnings,
+        out bool applied)
+    {
+        applied = false;
+        var payload = edit.FieldPath[VehicleSyntheticFieldPrefix.Length..];
+
+        if (payload.StartsWith("clear-override-materials:", StringComparison.OrdinalIgnoreCase))
+        {
+            var exportPath = payload["clear-override-materials:".Length..].Trim();
+            if (!TryResolveExportIndexFromSyntheticPath(exportPath, asset.Exports.Count, out var exportIndex))
+            {
+                warnings.Add($"Vehicle edit skipped: неверный component path {exportPath}");
+                return true;
+            }
+
+            if (asset.Exports[exportIndex] is not NormalExport export)
+            {
+                warnings.Add($"Vehicle edit skipped: export {exportPath} не является NormalExport");
+                return true;
+            }
+
+            var overrideMaterials = FindTopLevelProperty<ArrayPropertyData>(export, "OverrideMaterials", out _);
+            if (overrideMaterials is not null)
+            {
+                overrideMaterials.Value = [];
+                applied = true;
+            }
+
+            return true;
+        }
+
+        if (payload.StartsWith("component-bool:", StringComparison.OrdinalIgnoreCase))
+        {
+            var boolPayload = payload["component-bool:".Length..].Trim();
+            var separatorIndex = boolPayload.LastIndexOf(':');
+            if (separatorIndex <= 0 || separatorIndex >= boolPayload.Length - 1)
+            {
+                warnings.Add($"Vehicle edit skipped: неверный component bool path {payload}");
+                return true;
+            }
+
+            var componentPath = boolPayload[..separatorIndex];
+            var propertyName = boolPayload[(separatorIndex + 1)..];
+            if (!TryResolveExportIndexFromSyntheticPath(componentPath, asset.Exports.Count, out var exportIndex))
+            {
+                warnings.Add($"Vehicle edit skipped: неверный component bool path {payload}");
+                return true;
+            }
+
+            if (asset.Exports[exportIndex] is not NormalExport export)
+            {
+                warnings.Add($"Vehicle edit skipped: export {componentPath} не является NormalExport");
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(propertyName))
+            {
+                warnings.Add($"Vehicle edit skipped: пустое имя bool-свойства {payload}");
+                return true;
+            }
+
+            var value = bool.TryParse(edit.Value, out var parsed) && parsed;
+            var boolProperty = FindTopLevelProperty<BoolPropertyData>(export, propertyName, out _);
+            if (boolProperty is null)
+            {
+                boolProperty = new BoolPropertyData(CreateFName(asset, propertyName));
+                export.Data.Add(boolProperty);
+            }
+
+            boolProperty.Value = value;
+            applied = true;
+            return true;
+        }
+
+        warnings.Add($"Vehicle edit skipped: неизвестная synthetic-команда {payload}");
+        return true;
+    }
+
+    private static bool TryResolveExportIndexFromSyntheticPath(string rawPath, int exportCount, out int exportIndex)
+    {
+        exportIndex = -1;
+        var normalized = (rawPath ?? string.Empty).Trim();
+        if (!normalized.StartsWith("e:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var numberText = normalized["e:".Length..];
+        var separatorIndex = numberText.IndexOf('/');
+        if (separatorIndex >= 0)
+        {
+            numberText = numberText[..separatorIndex];
+        }
+
+        if (!int.TryParse(numberText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var zeroBased)
+            || zeroBased < 0
+            || zeroBased >= exportCount)
+        {
+            return false;
+        }
+
+        exportIndex = zeroBased;
+        return true;
     }
 
     private static bool TryApplyMathComponentEdit(
@@ -27806,6 +42298,31 @@ internal sealed class StudioRuntime
         if (string.IsNullOrWhiteSpace(propertyName))
         {
             warnings.Add("UAsset edit skipped: не указан параметр оружия.");
+            return true;
+        }
+
+        if (propertyName.StartsWith("clear-override-materials:", StringComparison.OrdinalIgnoreCase))
+        {
+            var exportPath = propertyName["clear-override-materials:".Length..].Trim();
+            if (!TryResolveExportIndexFromSyntheticPath(exportPath, asset.Exports.Count, out var exportIndex))
+            {
+                warnings.Add($"Weapon edit skipped: неверный component path {exportPath}");
+                return true;
+            }
+
+            if (asset.Exports[exportIndex] is not NormalExport componentExport)
+            {
+                warnings.Add($"Weapon edit skipped: export {exportPath} не является NormalExport");
+                return true;
+            }
+
+            var overrideMaterials = FindTopLevelProperty<ArrayPropertyData>(componentExport, "OverrideMaterials", out _);
+            if (overrideMaterials is not null && overrideMaterials.Value.Length > 0)
+            {
+                overrideMaterials.Value = [];
+                applied = true;
+            }
+
             return true;
         }
 
@@ -31286,6 +45803,13 @@ internal sealed class StudioRuntime
                 error = string.Empty;
                 return true;
             case ObjectPropertyData objectProperty:
+                if (IsUnsafeEditableExportObjectReference(asset, objectProperty.Value)
+                    && !rawValue.Trim().StartsWith("export:", StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "это поле ссылается на внутренний компонент Unreal, а не на asset модели; замена на внешний объект опасна и может вызвать fatal error";
+                    return false;
+                }
+
                 if (TryBuildObjectReferenceFromPicker(asset, rawValue, out var objectReference, out error))
                 {
                     objectProperty.Value = objectReference;
@@ -31731,9 +46255,59 @@ internal sealed class StudioRuntime
         var withoutPrefix = withoutExtension.StartsWith("scum/content/", StringComparison.OrdinalIgnoreCase)
             ? withoutExtension["scum/content/".Length..]
             : withoutExtension;
+        withoutPrefix = CanonicalizeGamePackageRelativePath(withoutPrefix);
         var packagePath = $"/Game/{withoutPrefix}";
-        var objectName = Path.GetFileNameWithoutExtension(normalized);
+        var objectName = Path.GetFileNameWithoutExtension(withoutPrefix);
         return BuildImportedObjectReferenceRawValue(packagePath, objectName, classPackage, className);
+    }
+
+    private static string CanonicalizeGamePackageRelativePath(string relativePath)
+    {
+        var normalized = PathUtil.NormalizeRelative(relativePath);
+        var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length == 0)
+        {
+            return normalized;
+        }
+
+        if (!segments[0].Equals("conz_files", StringComparison.OrdinalIgnoreCase))
+        {
+            return normalized;
+        }
+
+        segments[0] = "ConZ_Files";
+        for (var i = 1; i < segments.Length; i++)
+        {
+            segments[i] = CanonicalizeUnrealPathSegment(segments[i]);
+        }
+
+        return string.Join('/', segments);
+    }
+
+    private static string CanonicalizeUnrealPathSegment(string segment)
+    {
+        if (string.IsNullOrWhiteSpace(segment))
+        {
+            return segment;
+        }
+
+        var parts = segment.Split('_', StringSplitOptions.None);
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var part = parts[i];
+            if (string.IsNullOrEmpty(part))
+            {
+                continue;
+            }
+
+            parts[i] = part.ToLowerInvariant() switch
+            {
+                "ao" or "bp" or "bpc" or "da" or "dt" or "mi" or "m" or "mat" or "sk" or "sm" or "t" or "tx" or "ui" => part.ToUpperInvariant(),
+                _ => char.ToUpperInvariant(part[0]) + part[1..]
+            };
+        }
+
+        return string.Join('_', parts);
     }
 
     private static string BuildImportedObjectReferenceRawValue(
@@ -32198,7 +46772,7 @@ internal sealed class StudioRuntime
             }
 
             var runStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-            var tmpRoot = Path.Combine(_runtimePaths.TempRoot, $"catalog-{runStamp}");
+            var tmpRoot = Path.Combine(_runtimePaths.TempRoot, $"catalog-{runStamp}-{Guid.NewGuid():N}");
             Directory.CreateDirectory(tmpRoot);
             var cryptoPath = CryptoKeyWriter.Write(tmpRoot, DefaultAesKeyHex);
             _pakIndexCache = PakIndexService.LoadOrBuild(_scum, _unrealPakPath, cryptoPath, _ => { });
@@ -32321,6 +46895,12 @@ internal sealed class StudioRuntime
         if (path.Contains("/data/weapon/malfunctionprobabilitycurves/", StringComparison.OrdinalIgnoreCase))
         {
             return new ModCategory("weapons-items", "Оружие и предметы", ResolveCategoryDescription("weapons-items"));
+        }
+
+        if (path.Contains("/items/spawnerpresets2/character/armednpcs/", StringComparison.OrdinalIgnoreCase)
+            || path.Contains("/characters/zombies2/blueprints/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ModCategory("npc-encounters", "Враги, орды и события", ResolveCategoryDescription("npc-encounters"));
         }
 
         if (path.Contains("/items/spawnerpresets2/", StringComparison.OrdinalIgnoreCase))
@@ -32453,6 +47033,17 @@ internal sealed class StudioRuntime
         string AssetReference,
         string DisplayName,
         string Kind);
+
+    private sealed record VehicleVisualReplacementTarget(
+        string AssetId,
+        string RelativePath,
+        string DisplayName,
+        string FieldPath,
+        string MeshKind,
+        string CurrentValue,
+        string CurrentDisplayValue,
+        string? ReferencePickerKind,
+        string Label);
 
     private sealed class ModAssetsCatalogCacheEnvelope
     {

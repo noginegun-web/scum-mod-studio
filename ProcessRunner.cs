@@ -29,6 +29,15 @@ internal static class ProcessRunner
         var errTail = new TailBuffer(80);
 
         process.Start();
+        var outTask = Task.Run(() =>
+        {
+            string? line;
+            while ((line = process.StandardOutput.ReadLine()) is not null)
+            {
+                outTail.Add(line);
+                onStdOutLine?.Invoke(line);
+            }
+        });
         var errTask = Task.Run(() =>
         {
             string? line;
@@ -37,13 +46,6 @@ internal static class ProcessRunner
                 errTail.Add(line);
             }
         });
-
-        string? outLine;
-        while ((outLine = process.StandardOutput.ReadLine()) is not null)
-        {
-            outTail.Add(outLine);
-            onStdOutLine?.Invoke(outLine);
-        }
 
         if (!process.WaitForExit(timeoutMs))
         {
@@ -59,6 +61,7 @@ internal static class ProcessRunner
             throw new TimeoutException($"Время ожидания процесса истекло: {Path.GetFileName(fileName)}");
         }
 
+        outTask.GetAwaiter().GetResult();
         errTask.GetAwaiter().GetResult();
         return new ProcessRunResult(process.ExitCode, outTail.Joined(), errTail.Joined());
     }
