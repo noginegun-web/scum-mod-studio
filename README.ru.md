@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish_release.ps1
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\publish_update_release.ps1 `
-  -RepoUrl "https://github.com/noginegun-web/scum-mod-studio-releases"
+  -RepoUrl "https://github.com/noginegun-web/scum-mod-studio"
 ```
 
 Если нужно сразу выгрузить релиз в GitHub Releases:
@@ -94,7 +94,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish_update_release.ps1 `
 ```powershell
 $env:GITHUB_TOKEN = "github_token_with_repo_access"
 powershell -ExecutionPolicy Bypass -File .\scripts\publish_update_release.ps1 `
-  -RepoUrl "https://github.com/noginegun-web/scum-mod-studio-releases" `
+  -RepoUrl "https://github.com/noginegun-web/scum-mod-studio" `
   -PublishToGithub
 ```
 
@@ -107,7 +107,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish_update_release.ps1 `
 Важно:
 - автообновление работает у установленной версии программы, а не у файла из `bin\Debug`
 - `RepoUrl` подставляется прямо в выпускной `appsettings.json`, чтобы установленная программа знала, откуда брать обновления
-- исходники держим в приватном репозитории, а публичные обновления Velopack публикуем в отдельный бинарный репозиторий `noginegun-web/scum-mod-studio-releases`
+- обновления Velopack публикуем в основной публичный репозиторий `noginegun-web/scum-mod-studio`, потому что установленная программа проверяет релизы именно там.
 
 Подробная памятка для другого агента: `docs/github-release-flow.ru.md`.
 Рабочая база знаний по cooked asset modding и mini-DevKit подходу: `docs/cooked-asset-modding-knowledge-base.ru.md`.
